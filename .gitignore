@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.pyc
+*.pyo
+*.pyd
+
+# Base de datos
+postventa.db
+*.db
+*.sqlite
+*.sqlite3
+
+# Archivos y carpetas sensibles
+comprobantes/
+*.log
+temp_*
+.env
+.venv
+venv/
+ENV/
+env/
+
+# Credenciales y archivos de configuración sensibles
+*.json
+!package.json
+postventa-invoice-parser-*.json
+*-credentials.json
+*-service-account.json
+
+# Archivos Excel (pueden contener datos sensibles)
+*.xlsx
+*.xls
+!requirements.xlsx  # Si necesitas incluir algún Excel de ejemplo
+
+# Archivos del sistema
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Streamlit
+.streamlit/secrets.toml
+
