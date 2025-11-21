@@ -231,11 +231,13 @@ def get_ai_summary(df_ventas: pd.DataFrame, df_gastos: pd.DataFrame, gemini_api_
             # Ya se logueó arriba
             
             # Combinar insights de Gemini con los existentes
+            # IMPORTANTE: Agregar al final para poder identificarlos después
             if tendencias_gemini:
                 insights['tendencias'].extend(tendencias_gemini)
             if alertas_gemini:
                 insights['alertas'].extend(alertas_gemini)
             if recomendaciones_gemini:
+                # Agregar al final para poder identificarlas
                 recomendaciones.extend(recomendaciones_gemini)
             
             gemini_status['activo'] = True
@@ -580,16 +582,56 @@ def test_gemini_connection(api_key: str) -> dict:
     try:
         import google.generativeai as genai
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-1.5-flash')
         
-        # Hacer una prueba simple
-        response = model.generate_content("Responde solo con 'OK' si puedes leer esto.")
+        # Primero, listar modelos disponibles
+        try:
+            available_models = genai.list_models()
+            modelos_disponibles = [m.name.split('/')[-1] for m in available_models if 'generateContent' in m.supported_generation_methods]
+        except:
+            modelos_disponibles = []
         
+        # Intentar con diferentes nombres de modelo (ordenados por preferencia)
+        # Los modelos disponibles son Gemini 2.0/2.5 (no 1.5)
+        modelos_a_probar = ['gemini-2.0-flash', 'gemini-2.5-flash', 'gemini-2.0-flash-exp', 'gemini-2.5-pro']
+        
+        for modelo_nombre in modelos_a_probar:
+            try:
+                model = genai.GenerativeModel(modelo_nombre)
+                # Hacer una prueba simple
+                response = model.generate_content("Responde solo con 'OK' si puedes leer esto.")
+                
+                return {
+                    'success': True,
+                    'message': f'Conexión exitosa con Gemini API usando modelo: {modelo_nombre}',
+                    'model': modelo_nombre,
+                    'response_preview': response.text[:100] if response.text else 'Sin respuesta',
+                    'modelos_disponibles': modelos_disponibles[:5] if modelos_disponibles else []
+                }
+            except Exception as e:
+                error_str = str(e)
+                if '404' in error_str or 'not found' in error_str.lower():
+                    continue  # Probar siguiente modelo
+                elif '429' in error_str or 'quota' in error_str.lower() or 'rate limit' in error_str.lower():
+                    return {
+                        'success': False,
+                        'error': f'Cuota agotada para {modelo_nombre}. Espera unos minutos o verifica tu plan de Google AI Studio.',
+                        'modelos_disponibles': modelos_disponibles[:5] if modelos_disponibles else [],
+                        'tipo_error': 'quota_exceeded'
+                    }
+                else:
+                    # Otro error, devolver información útil
+                    return {
+                        'success': False,
+                        'error': f'Error con modelo {modelo_nombre}: {error_str}',
+                        'modelos_disponibles': modelos_disponibles[:5] if modelos_disponibles else []
+                    }
+        
+        # Si llegamos aquí, ningún modelo funcionó
         return {
-            'success': True,
-            'message': 'Conexión exitosa con Gemini API',
-            'model': 'gemini-1.5-flash',
-            'response_preview': response.text[:100] if response.text else 'Sin respuesta'
+            'success': False,
+            'error': 'Ninguno de los modelos probados está disponible. Verifica tu API key y permisos.',
+            'modelos_probados': modelos_a_probar,
+            'modelos_disponibles': modelos_disponibles[:10] if modelos_disponibles else []
         }
     except Exception as e:
         return {
@@ -606,7 +648,67 @@ def get_gemini_insights(df_ventas: pd.DataFrame, df_gastos: pd.DataFrame, api_ke
     try:
         # Configurar Gemini
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        
+        # Listar modelos disponibles primero
+        try:
+            available_models = genai.list_models()
+            modelos_disponibles = [m.name.split('/')[-1] for m in available_models if 'generateContent' in m.supported_generation_methods]
+            import sys
+            sys.stderr.write(f"[GEMINI] Modelos disponibles: {', '.join(modelos_disponibles[:5])}\n")
+            sys.stderr.flush()
+        except Exception as e:
+            import sys
+            sys.stderr.write(f"[GEMINI WARNING] No se pudieron listar modelos: {e}\n")
+            sys.stderr.flush()
+            modelos_disponibles = []
+        
+        # Intentar con diferentes modelos (ordenados por preferencia)
+        # Los modelos disponibles son Gemini 2.0/2.5, no 1.5
+        modelos_a_probar = ['gemini-2.0-flash', 'gemini-2.5-flash', 'gemini-2.0-flash-exp', 'gemini-2.5-pro']
+        # Si hay modelos disponibles, priorizar los que están en la lista
+        if modelos_disponibles:
+            modelos_a_probar = [m for m in modelos_a_probar if m in modelos_disponibles] + [m for m in modelos_disponibles[:5] if m not in modelos_a_probar]
+        
+        model = None
+        modelo_usado = None
+        
+        for modelo_nombre in modelos_a_probar[:5]:  # Limitar a 5 intentos
+            try:
+                model = genai.GenerativeModel(modelo_nombre)
+                # Probar que funciona con un prompt simple
+                test_response = model.generate_content("test")
+                modelo_usado = modelo_nombre
+                break
+            except Exception as e:
+                error_str = str(e)
+                if '404' in error_str or 'not found' in error_str.lower():
+                    import sys
+                    sys.stderr.write(f"[GEMINI] Modelo {modelo_nombre} no disponible (404), probando siguiente...\n")
+                    sys.stderr.flush()
+                    continue
+                elif '429' in error_str or 'quota' in error_str.lower() or 'rate limit' in error_str.lower():
+                    import sys
+                    sys.stderr.write(f"[GEMINI ERROR] Cuota agotada para {modelo_nombre}. Espera unos minutos o verifica tu plan.\n")
+                    sys.stderr.flush()
+                    # No lanzar error, devolver vacío para que continúe con análisis estadístico
+                    return {'tendencias': [], 'alertas': [], 'recomendaciones': []}
+                else:
+                    import sys
+                    sys.stderr.write(f"[GEMINI ERROR] Error con modelo {modelo_nombre}: {error_str}\n")
+                    sys.stderr.flush()
+                    raise
+        
+        if model is None:
+            import sys
+            sys.stderr.write(f"[GEMINI ERROR] Ningún modelo disponible. Modelos probados: {modelos_a_probar[:5]}\n")
+            if modelos_disponibles:
+                sys.stderr.write(f"[GEMINI] Modelos disponibles según API: {', '.join(modelos_disponibles[:10])}\n")
+            sys.stderr.flush()
+            return {'tendencias': [], 'alertas': [], 'recomendaciones': []}
+        
+        import sys
+        sys.stderr.write(f"[GEMINI] ✅ Usando modelo: {modelo_usado}\n")
+        sys.stderr.flush()
         
         # Preparar resumen de datos para Gemini
         resumen_datos = {
@@ -625,31 +727,42 @@ def get_gemini_insights(df_ventas: pd.DataFrame, df_gastos: pd.DataFrame, api_ke
             resumen_datos['gastos_totales'] = float(gastos_totales['gastos_postventa_total'])
             resumen_datos['margen'] = float(resumen_datos['total_ingresos'] - resumen_datos['gastos_totales'])
         
-        # Crear prompt para Gemini
-        prompt = f"""
-Analiza los siguientes datos financieros de un negocio de postventa (servicios y repuestos) y proporciona:
-1. Tendencias identificadas (máximo 3)
-2. Alertas importantes (máximo 3)
-3. Recomendaciones estratégicas específicas y accionables (máximo 5)
+        # Crear prompt para Gemini - más específico y estructurado
+        margen_pct = (resumen_datos.get('margen', 0) / resumen_datos['total_ingresos'] * 100) if resumen_datos['total_ingresos'] > 0 else 0
+        
+        prompt = f"""Eres un analista financiero experto. Analiza estos datos de un negocio de postventa (servicios y repuestos para maquinaria agrícola) y proporciona insights valiosos.
 
-Datos:
-- Total de ventas: {resumen_datos['total_ventas']}
+DATOS FINANCIEROS:
+- Total de ventas registradas: {resumen_datos['total_ventas']}
 - Ingresos totales: ${resumen_datos['total_ingresos']:,.2f} USD
-- Ventas RE (Repuestos): {resumen_datos['ventas_re']} registros, ${resumen_datos['ingresos_re']:,.2f} USD
-- Ventas SE (Servicios): {resumen_datos['ventas_se']} registros, ${resumen_datos['ingresos_se']:,.2f} USD
-- Top 5 clientes: {resumen_datos['top_clientes']}
-- Ventas por sucursal: {resumen_datos['ventas_por_sucursal']}
+- Ventas de Repuestos (RE): {resumen_datos['ventas_re']} registros, ${resumen_datos['ingresos_re']:,.2f} USD
+- Ventas de Servicios (SE): {resumen_datos['ventas_se']} registros, ${resumen_datos['ingresos_se']:,.2f} USD
 - Gastos totales: ${resumen_datos.get('gastos_totales', 0):,.2f} USD
-- Margen: ${resumen_datos.get('margen', 0):,.2f} USD
+- Margen: ${resumen_datos.get('margen', 0):,.2f} USD ({margen_pct:.1f}%)
+- Top 5 clientes por volumen: {resumen_datos['top_clientes']}
+- Ventas por sucursal: {resumen_datos['ventas_por_sucursal']}
 
-Responde en formato JSON con esta estructura:
+INSTRUCCIONES:
+Analiza estos datos y proporciona insights específicos, accionables y diferentes a análisis estadísticos básicos. 
+NO repitas información obvia como "las ventas son X" o "el margen es Y". 
+Enfócate en:
+- Patrones no obvios
+- Oportunidades de mejora específicas
+- Riesgos o alertas que requieren atención
+- Recomendaciones estratégicas concretas
+
+Responde SOLO en formato JSON válido con esta estructura exacta:
 {{
-    "tendencias": ["tendencia 1", "tendencia 2"],
-    "alertas": ["alerta 1", "alerta 2"],
-    "recomendaciones": ["recomendación 1", "recomendación 2"]
+    "tendencias": ["tendencia específica 1", "tendencia específica 2"],
+    "alertas": ["alerta importante 1", "alerta importante 2"],
+    "recomendaciones": ["recomendación accionable 1", "recomendación accionable 2"]
 }}
 
-Sé específico, conciso y enfocado en acciones prácticas para mejorar el negocio.
+IMPORTANTE: 
+- Proporciona al menos 2-3 items en cada categoría si es posible
+- Sé específico y evita generalidades
+- Enfócate en insights que un análisis estadístico simple no revelaría
+- Responde SOLO con el JSON, sin texto adicional antes o después
 """
         
         # Llamar a Gemini

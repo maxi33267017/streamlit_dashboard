@@ -2712,10 +2712,19 @@ elif page == "🤖 Análisis IA":
                             if test_result['success']:
                                 st.success(f"✅ {test_result['message']}")
                                 st.caption(f"Modelo: {test_result.get('model', 'N/A')}")
+                                if test_result.get('modelos_disponibles'):
+                                    with st.expander("Ver modelos disponibles"):
+                                        for m in test_result['modelos_disponibles']:
+                                            st.write(f"- {m}")
                             else:
-                                st.error(f"❌ Error: {test_result.get('error', 'Desconocido')}")
-                                if 'Librería' in test_result.get('error', ''):
+                                error_msg = test_result.get('error', 'Desconocido')
+                                st.error(f"❌ Error: {error_msg}")
+                                if 'quota' in error_msg.lower() or '429' in error_msg:
+                                    st.warning("⚠️ Cuota agotada. Espera unos minutos o verifica tu plan en https://ai.dev/usage")
+                                elif 'Librería' in error_msg:
                                     st.info("💡 Instala la librería: `pip install google-generativeai`")
+                                elif test_result.get('modelos_disponibles'):
+                                    st.info(f"💡 Modelos disponibles: {', '.join(test_result['modelos_disponibles'][:3])}")
                         except ImportError:
                             st.error("❌ Función de prueba no disponible")
                         except Exception as e:
@@ -2942,27 +2951,35 @@ elif page == "🤖 Análisis IA":
             st.subheader("💡 Recomendaciones Inteligentes")
             
             # Separar recomendaciones de Gemini vs estadísticas
-            todas_recomendaciones = summary['insights']['recomendaciones'] + summary['recomendaciones']
-            
-            # Intentar identificar cuáles vienen de Gemini (generalmente más detalladas y contextuales)
             gemini_status = summary.get('gemini_status', {})
             hay_gemini = gemini_status.get('activo', False)
             
-            if todas_recomendaciones:
-                if hay_gemini:
-                    st.info("💡 Las recomendaciones incluyen análisis de **Google Gemini AI** (marcadas con 🤖) y análisis estadístico local")
+            # Obtener recomendaciones de Gemini (si las hay)
+            recomendaciones_gemini = []
+            if hay_gemini and gemini_status.get('recomendaciones_agregadas', 0) > 0:
+                # Las recomendaciones de Gemini están al final de la lista (se agregaron después)
+                # Contar cuántas agregó Gemini
+                num_gemini = gemini_status.get('recomendaciones_agregadas', 0)
+                todas_recomendaciones = summary['insights']['recomendaciones'] + summary['recomendaciones']
+                if len(todas_recomendaciones) >= num_gemini:
+                    recomendaciones_gemini = todas_recomendaciones[-num_gemini:]
+                    recomendaciones_estadisticas = todas_recomendaciones[:-num_gemini] if num_gemini < len(todas_recomendaciones) else []
+                else:
+                    recomendaciones_estadisticas = todas_recomendaciones
+            else:
+                todas_recomendaciones = summary['insights']['recomendaciones'] + summary['recomendaciones']
+                recomendaciones_estadisticas = todas_recomendaciones
+            
+            if recomendaciones_gemini or recomendaciones_estadisticas:
+                if recomendaciones_gemini:
+                    st.success("🤖 **Recomendaciones de Google Gemini AI:**")
+                    for i, recomendacion in enumerate(recomendaciones_gemini, 1):
+                        st.success(f"🤖 {i}. {recomendacion}")
                     st.divider()
                 
-                for i, recomendacion in enumerate(todas_recomendaciones, 1):
-                    # Si la recomendación parece venir de Gemini (más detallada, sin emojis específicos del código)
-                    es_gemini = hay_gemini and (
-                        len(recomendacion) > 100 or  # Recomendaciones de Gemini suelen ser más largas
-                        any(palabra in recomendacion.lower() for palabra in ['considerar', 'recomendamos', 'sugerimos', 'estrategia'])
-                    )
-                    
-                    if es_gemini:
-                        st.success(f"🤖 **{i}. {recomendacion}** *(Análisis Gemini AI)*")
-                    else:
+                if recomendaciones_estadisticas:
+                    st.info("📊 **Recomendaciones del Análisis Estadístico:**")
+                    for i, recomendacion in enumerate(recomendaciones_estadisticas, 1):
                         st.info(f"{i}. {recomendacion}")
             else:
                 st.info("No hay recomendaciones específicas en este momento")
@@ -2970,7 +2987,10 @@ elif page == "🤖 Análisis IA":
             # Mostrar estado de Gemini si está activo
             if hay_gemini:
                 st.divider()
-                st.caption("✅ **Google Gemini AI** está activo y proporcionando análisis avanzado")
+                if gemini_status.get('insights_agregados', 0) > 0:
+                    st.success(f"✅ **Google Gemini AI** está activo y agregó {gemini_status['insights_agregados']} insights")
+                else:
+                    st.warning("⚠️ **Google Gemini AI** está activo pero no agregó insights. Revisa los logs para más detalles.")
         
         with tab5:
             st.subheader("🚨 Alertas Críticas en Tiempo Real")
