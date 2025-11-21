@@ -1877,42 +1877,185 @@ elif page == "📋 Ver Registros":
                                 # Convertir PDF a base64
                                 base64_pdf = base64.b64encode(archivo_bytes).decode('utf-8')
                                 
-                                # Verificar tamaño del PDF (data URIs tienen límites ~2MB en algunos navegadores)
-                                pdf_size_mb = len(archivo_bytes) / (1024 * 1024)
-                                
-                                if pdf_size_mb > 2:
-                                    st.warning(f"⚠️ El PDF es grande ({pdf_size_mb:.1f} MB). La previsualización puede tardar o no funcionar. Usa el botón de descarga si hay problemas.")
-                                
-                                # Usar st.components.v1.html para mejor compatibilidad en Streamlit Cloud
-                                # Intentar con iframe primero, con fallback a embed
+                                # Usar PDF.js para renderizar el PDF (más robusto que data URIs)
+                                # PDF.js es una librería de Mozilla que funciona en todos los navegadores
                                 pdf_html = f"""
-                                <div style="width: 100%; height: 600px; border: 1px solid #ccc;">
-                                    <iframe 
-                                        src="data:application/pdf;base64,{base64_pdf}" 
-                                        width="100%" 
-                                        height="100%" 
-                                        type="application/pdf"
-                                        style="border: none;"
-                                        onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
-                                    </iframe>
-                                    <embed 
-                                        src="data:application/pdf;base64,{base64_pdf}" 
-                                        type="application/pdf" 
-                                        width="100%" 
-                                        height="100%"
-                                        style="display: none; border: none;"
-                                        onerror="this.parentElement.innerHTML='<p style=\\'padding: 20px; text-align: center; color: #666;\\'>⚠️ No se pudo cargar la previsualización. Por favor, usa el botón de descarga.</p>'">
-                                    </embed>
-                                </div>
+                                <!DOCTYPE html>
+                                <html>
+                                <head>
+                                    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+                                    <style>
+                                        #pdf-container {{
+                                            width: 100%;
+                                            height: 600px;
+                                            overflow: auto;
+                                            border: 1px solid #ccc;
+                                            background: #f5f5f5;
+                                            padding: 10px;
+                                        }}
+                                        .pdf-page {{
+                                            margin-bottom: 10px;
+                                            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                                        }}
+                                        .pdf-controls {{
+                                            margin-bottom: 10px;
+                                            text-align: center;
+                                        }}
+                                        .pdf-controls button {{
+                                            margin: 0 5px;
+                                            padding: 5px 15px;
+                                            background: #1f77b4;
+                                            color: white;
+                                            border: none;
+                                            border-radius: 4px;
+                                            cursor: pointer;
+                                        }}
+                                        .pdf-controls button:hover {{
+                                            background: #1565a0;
+                                        }}
+                                        .pdf-controls button:disabled {{
+                                            background: #ccc;
+                                            cursor: not-allowed;
+                                        }}
+                                        .loading {{
+                                            text-align: center;
+                                            padding: 50px;
+                                            color: #666;
+                                        }}
+                                        .error {{
+                                            text-align: center;
+                                            padding: 50px;
+                                            color: #d32f2f;
+                                        }}
+                                    </style>
+                                </head>
+                                <body>
+                                    <div class="pdf-controls">
+                                        <button id="prev-page" onclick="changePage(-1)">◀ Anterior</button>
+                                        <span id="page-info">Página <span id="page-num">1</span> de <span id="page-count">-</span></span>
+                                        <button id="next-page" onclick="changePage(1)">Siguiente ▶</button>
+                                        <button onclick="zoomOut()">🔍-</button>
+                                        <button onclick="zoomIn()">🔍+</button>
+                                        <button onclick="resetZoom()">🔍 Reset</button>
+                                    </div>
+                                    <div id="pdf-container">
+                                        <div class="loading">Cargando PDF...</div>
+                                    </div>
+                                    
+                                    <script>
+                                        // Configurar PDF.js para usar el worker desde CDN
+                                        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+                                        
+                                        let pdfDoc = null;
+                                        let pageNum = 1;
+                                        let pageRendering = false;
+                                        let pageNumPending = null;
+                                        let scale = 1.5;
+                                        
+                                        // Convertir base64 a Uint8Array
+                                        const base64ToUint8Array = (base64) => {{
+                                            const binaryString = window.atob(base64);
+                                            const bytes = new Uint8Array(binaryString.length);
+                                            for (let i = 0; i < binaryString.length; i++) {{
+                                                bytes[i] = binaryString.charCodeAt(i);
+                                            }}
+                                            return bytes;
+                                        }};
+                                        
+                                        // Cargar PDF
+                                        const pdfData = base64ToUint8Array('{base64_pdf}');
+                                        
+                                        pdfjsLib.getDocument({{data: pdfData}}).promise.then(function(pdf) {{
+                                            pdfDoc = pdf;
+                                            document.getElementById('page-count').textContent = pdf.numPages;
+                                            
+                                            // Renderizar primera página
+                                            renderPage(pageNum);
+                                        }}).catch(function(error) {{
+                                            document.getElementById('pdf-container').innerHTML = 
+                                                '<div class="error">❌ Error al cargar el PDF: ' + error.message + '<br>Por favor, usa el botón de descarga.</div>';
+                                        }});
+                                        
+                                        function renderPage(num) {{
+                                            pageRendering = true;
+                                            
+                                            pdfDoc.getPage(num).then(function(page) {{
+                                                const viewport = page.getViewport({{scale: scale}});
+                                                const canvas = document.createElement('canvas');
+                                                const ctx = canvas.getContext('2d');
+                                                canvas.height = viewport.height;
+                                                canvas.width = viewport.width;
+                                                
+                                                const container = document.getElementById('pdf-container');
+                                                container.innerHTML = '';
+                                                container.appendChild(canvas);
+                                                
+                                                const renderContext = {{
+                                                    canvasContext: ctx,
+                                                    viewport: viewport
+                                                }};
+                                                
+                                                const renderTask = page.render(renderContext);
+                                                
+                                                renderTask.promise.then(function() {{
+                                                    pageRendering = false;
+                                                    if (pageNumPending !== null) {{
+                                                        renderPage(pageNumPending);
+                                                        pageNumPending = null;
+                                                    }}
+                                                }});
+                                            }});
+                                            
+                                            document.getElementById('page-num').textContent = num;
+                                            
+                                            // Actualizar botones
+                                            document.getElementById('prev-page').disabled = (num <= 1);
+                                            document.getElementById('next-page').disabled = (num >= pdfDoc.numPages);
+                                        }}
+                                        
+                                        function queueRenderPage(num) {{
+                                            if (pageRendering) {{
+                                                pageNumPending = num;
+                                            }} else {{
+                                                renderPage(num);
+                                            }}
+                                        }}
+                                        
+                                        function changePage(delta) {{
+                                            const newPage = pageNum + delta;
+                                            if (newPage >= 1 && newPage <= pdfDoc.numPages) {{
+                                                pageNum = newPage;
+                                                queueRenderPage(pageNum);
+                                            }}
+                                        }}
+                                        
+                                        function zoomIn() {{
+                                            scale += 0.25;
+                                            queueRenderPage(pageNum);
+                                        }}
+                                        
+                                        function zoomOut() {{
+                                            if (scale > 0.5) {{
+                                                scale -= 0.25;
+                                                queueRenderPage(pageNum);
+                                            }}
+                                        }}
+                                        
+                                        function resetZoom() {{
+                                            scale = 1.5;
+                                            queueRenderPage(pageNum);
+                                        }}
+                                    </script>
+                                </body>
+                                </html>
                                 """
                                 
                                 try:
                                     import streamlit.components.v1 as components
-                                    components.html(pdf_html, height=600)
+                                    components.html(pdf_html, height=700, scrolling=True)
                                 except Exception as e:
-                                    # Fallback a markdown si components.html falla
-                                    st.markdown(f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="600px" type="application/pdf"></iframe>', unsafe_allow_html=True)
-                                    st.warning(f"⚠️ Error al cargar previsualización: {e}. Usa el botón de descarga.")
+                                    st.error(f"⚠️ Error al cargar el visor de PDF: {e}")
+                                    st.info("💡 Por favor, usa el botón de descarga para ver el PDF.")
                     
                     with tab_editar:
                         with st.form(f"form_edit_venta_{venta_seleccionada}"):
