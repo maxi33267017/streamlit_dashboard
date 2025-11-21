@@ -4,6 +4,7 @@ Módulo de gestión de base de datos SQLite
 import sqlite3
 import pandas as pd
 import re
+import json
 from datetime import datetime
 from pathlib import Path
 import os
@@ -95,6 +96,19 @@ def init_database():
             activa INTEGER DEFAULT 1,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    
+    # Tabla de historial de análisis IA
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS historial_analisis_ia (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fecha_hora TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            tipo_analisis TEXT NOT NULL,
+            fuente TEXT NOT NULL,
+            contenido TEXT NOT NULL,
+            metadata TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
     
@@ -904,3 +918,65 @@ def eliminar_todos_los_registros(eliminar_plantillas=False):
         }
     finally:
         conn.close()
+
+def guardar_analisis_ia(tipo_analisis: str, fuente: str, contenido: str, metadata: dict = None):
+    """
+    Guarda un análisis de IA en el historial.
+    
+    Args:
+        tipo_analisis: Tipo de análisis ('tendencia', 'prediccion', 'anomalia', 'recomendacion', 'alerta')
+        fuente: Fuente del análisis ('gemini' o 'local')
+        contenido: Contenido del análisis (texto)
+        metadata: Diccionario con metadatos adicionales (se guarda como JSON)
+    
+    Returns:
+        int: ID del registro guardado
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    metadata_json = json.dumps(metadata) if metadata else None
+    
+    cursor.execute("""
+        INSERT INTO historial_analisis_ia (tipo_analisis, fuente, contenido, metadata)
+        VALUES (?, ?, ?, ?)
+    """, (tipo_analisis, fuente, contenido, metadata_json))
+    
+    registro_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    
+    return registro_id
+
+def get_historial_analisis_ia(limit: int = 50, tipo_analisis: str = None, fuente: str = None):
+    """
+    Obtiene el historial de análisis de IA.
+    
+    Args:
+        limit: Número máximo de registros a obtener
+        tipo_analisis: Filtrar por tipo ('tendencia', 'prediccion', 'anomalia', 'recomendacion', 'alerta')
+        fuente: Filtrar por fuente ('gemini' o 'local')
+    
+    Returns:
+        pd.DataFrame: DataFrame con el historial
+    """
+    conn = get_connection()
+    
+    query = "SELECT * FROM historial_analisis_ia WHERE 1=1"
+    params = []
+    
+    if tipo_analisis:
+        query += " AND tipo_analisis = ?"
+        params.append(tipo_analisis)
+    
+    if fuente:
+        query += " AND fuente = ?"
+        params.append(fuente)
+    
+    query += " ORDER BY fecha_hora DESC LIMIT ?"
+    params.append(limit)
+    
+    df = pd.read_sql_query(query, conn, params=params)
+    conn.close()
+    
+    return df

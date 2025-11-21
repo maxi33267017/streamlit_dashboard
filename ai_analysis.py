@@ -7,6 +7,13 @@ import numpy as np
 from datetime import timedelta, datetime
 from gastos_automaticos import obtener_gastos_totales_con_automaticos
 
+# Intentar importar funciones de historial (puede no estar disponible en todas las versiones)
+try:
+    from database import guardar_analisis_ia
+    HISTORIAL_DISPONIBLE = True
+except ImportError:
+    HISTORIAL_DISPONIBLE = False
+
 # Intentar importar Google Gemini
 try:
     import google.generativeai as genai
@@ -261,6 +268,56 @@ def get_ai_summary(df_ventas: pd.DataFrame, df_gastos: pd.DataFrame, gemini_api_
     elif not gemini_api_key:
         gemini_status['debug_info'] = 'No se proporcionó API key de Gemini'
     
+    timestamp_analisis = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
+    # Guardar en historial si está disponible
+    if HISTORIAL_DISPONIBLE:
+        try:
+            fuente = 'gemini' if (gemini_api_key and GEMINI_AVAILABLE and gemini_status.get('activo', False)) else 'local'
+            
+            # Guardar tendencias
+            for tendencia in insights.get('tendencias', []):
+                guardar_analisis_ia('tendencia', fuente, tendencia, {'timestamp': timestamp_analisis})
+            
+            # Guardar alertas
+            for alerta in insights.get('alertas', []):
+                guardar_analisis_ia('alerta', fuente, alerta, {'timestamp': timestamp_analisis})
+            
+            # Guardar recomendaciones
+            todas_recomendaciones = insights.get('recomendaciones', []) + recomendaciones
+            for recomendacion in todas_recomendaciones:
+                guardar_analisis_ia('recomendacion', fuente, recomendacion, {'timestamp': timestamp_analisis})
+            
+            # Guardar anomalías
+            for anomalia in anomalias:
+                guardar_analisis_ia('anomalia', fuente, anomalia.get('descripcion', str(anomalia)), {
+                    'timestamp': timestamp_analisis,
+                    'tipo': anomalia.get('tipo', 'desconocido'),
+                    'severidad': anomalia.get('severidad', 'media')
+                })
+            
+            # Guardar predicción
+            if prediccion and prediccion.get('prediccion'):
+                pred_texto = f"Predicción: {prediccion.get('prediccion', 0):,.2f} USD - Confianza: {prediccion.get('confianza', 'N/A')} - {prediccion.get('mensaje', '')}"
+                guardar_analisis_ia('prediccion', fuente, pred_texto, {
+                    'timestamp': timestamp_analisis,
+                    'valor': prediccion.get('prediccion'),
+                    'confianza': prediccion.get('confianza'),
+                    'metodo': prediccion.get('metodo', 'desconocido')
+                })
+            
+            # Guardar alertas críticas
+            for alerta in alertas_criticas:
+                guardar_analisis_ia('alerta', fuente, f"{alerta.get('titulo', '')} - {alerta.get('descripcion', '')}", {
+                    'timestamp': timestamp_analisis,
+                    'severidad': alerta.get('severidad', 'media'),
+                    'fecha_deteccion': alerta.get('fecha_deteccion', '')
+                })
+        except Exception as e:
+            # Si falla el guardado, continuar sin error (no crítico)
+            import sys
+            sys.stderr.write(f"[HISTORIAL] Error al guardar historial: {e}\n")
+    
     return {
         'insights': insights,
         'prediccion': prediccion,
@@ -269,7 +326,7 @@ def get_ai_summary(df_ventas: pd.DataFrame, df_gastos: pd.DataFrame, gemini_api_
         'alertas_criticas': alertas_criticas,
         'usando_ia': gemini_api_key is not None and GEMINI_AVAILABLE,
         'gemini_status': gemini_status,
-        'timestamp_analisis': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        'timestamp_analisis': timestamp_analisis
     }
 
 def predict_next_month_advanced(df_ventas: pd.DataFrame) -> dict:

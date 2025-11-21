@@ -57,7 +57,8 @@ from database import (
     get_plantillas_gastos, get_plantilla_gasto_by_id,
     insert_plantilla_gasto, update_plantilla_gasto, delete_plantilla_gasto,
     eliminar_todos_los_registros,
-    exportar_plantillas_gastos, importar_plantillas_gastos
+    exportar_plantillas_gastos, importar_plantillas_gastos,
+    guardar_analisis_ia, get_historial_analisis_ia
 )
 from gastos_automaticos import obtener_gastos_totales_con_automaticos
 from calculos_financieros import (
@@ -2519,6 +2520,30 @@ elif page == "📈 Reportes":
                 
                 st.divider()
                 
+                # Calcular y mostrar ticket promedio
+                st.write("**🎫 Ticket Promedio**")
+                col1, col2 = st.columns(2)
+                
+                # Ticket promedio de repuestos (RE)
+                ventas_re_count = len(df_ventas[df_ventas['tipo_re_se'] == 'RE'])
+                ticket_promedio_re = (total_ventas_re / ventas_re_count) if ventas_re_count > 0 else 0
+                
+                # Ticket promedio de servicios (SE)
+                ventas_se_count = len(df_ventas[df_ventas['tipo_re_se'] == 'SE'])
+                total_ventas_se = df_ventas[df_ventas['tipo_re_se'] == 'SE']['total'].sum() if ventas_se_count > 0 else 0
+                ticket_promedio_se = (total_ventas_se / ventas_se_count) if ventas_se_count > 0 else 0
+                
+                with col1:
+                    st.metric("🎫 Ticket Promedio Repuestos (RE)", 
+                             formatear_moneda(ticket_promedio_re),
+                             help=f"Promedio de {ventas_re_count} ventas RE")
+                with col2:
+                    st.metric("🎫 Ticket Promedio Servicios (SE)", 
+                             formatear_moneda(ticket_promedio_se),
+                             help=f"Promedio de {ventas_se_count} ventas SE")
+                
+                st.divider()
+                
                 # Mostrar métricas de otros componentes
                 st.write("**💰 Otros Componentes de Ventas**")
                 col1, col2, col3 = st.columns(3)
@@ -3009,7 +3034,7 @@ elif page == "🤖 Análisis IA":
             st.info("ℹ️ Análisis estadístico local (activa Gemini API en el sidebar para análisis avanzado)")
         
         # Mostrar insights
-        tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Insights", "🔮 Predicciones", "⚠️ Anomalías", "💡 Recomendaciones", "🚨 Alertas Críticas"])
+        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📊 Insights", "🔮 Predicciones", "⚠️ Anomalías", "💡 Recomendaciones", "🚨 Alertas Críticas", "📜 Historial"])
         
         with tab1:
             st.subheader("📊 Tendencias e Insights")
@@ -3198,6 +3223,81 @@ elif page == "🤖 Análisis IA":
                             st.divider()
             else:
                 st.success("✅ No hay alertas críticas en este momento. El negocio está funcionando normalmente.")
+        
+        with tab6:
+            st.subheader("📜 Historial de Análisis IA")
+            st.markdown("**Recomendaciones, tendencias, predicciones y alertas guardadas históricamente**")
+            
+            # Filtros
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                tipo_filtro = st.selectbox("Filtrar por tipo", 
+                    ["Todos", "Tendencia", "Predicción", "Anomalía", "Recomendación", "Alerta"],
+                    key="historial_tipo")
+            with col2:
+                fuente_filtro = st.selectbox("Filtrar por fuente",
+                    ["Todas", "Gemini", "Local"],
+                    key="historial_fuente")
+            with col3:
+                limit_historial = st.number_input("Cantidad de registros", min_value=10, max_value=200, value=50, step=10)
+            
+            # Obtener historial
+            tipo_filtro_db = None if tipo_filtro == "Todos" else tipo_filtro.lower()
+            fuente_filtro_db = None if fuente_filtro == "Todas" else fuente_filtro.lower()
+            
+            df_historial = get_historial_analisis_ia(
+                limit=limit_historial,
+                tipo_analisis=tipo_filtro_db,
+                fuente=fuente_filtro_db
+            )
+            
+            if len(df_historial) > 0:
+                st.info(f"📊 Mostrando {len(df_historial)} registros del historial")
+                
+                # Agrupar por fecha
+                df_historial['fecha_hora'] = pd.to_datetime(df_historial['fecha_hora'])
+                df_historial = df_historial.sort_values('fecha_hora', ascending=False)
+                
+                # Mostrar por fecha
+                fechas_unicas = df_historial['fecha_hora'].dt.date.unique()
+                
+                for fecha in fechas_unicas:
+                    registros_fecha = df_historial[df_historial['fecha_hora'].dt.date == fecha]
+                    
+                    with st.expander(f"📅 {fecha.strftime('%d/%m/%Y')} ({len(registros_fecha)} registros)", expanded=False):
+                        for idx, registro in registros_fecha.iterrows():
+                            # Icono según tipo
+                            iconos = {
+                                'tendencia': '📈',
+                                'prediccion': '🔮',
+                                'anomalia': '⚠️',
+                                'recomendacion': '💡',
+                                'alerta': '🚨'
+                            }
+                            icono = iconos.get(registro['tipo_analisis'], '📌')
+                            
+                            # Color según fuente
+                            if registro['fuente'] == 'gemini':
+                                st.success(f"{icono} **{registro['tipo_analisis'].upper()}** (🤖 Gemini) - {registro['fecha_hora'].strftime('%H:%M:%S')}")
+                            else:
+                                st.info(f"{icono} **{registro['tipo_analisis'].upper()}** (📊 Local) - {registro['fecha_hora'].strftime('%H:%M:%S')}")
+                            
+                            st.write(registro['contenido'])
+                            
+                            # Mostrar metadata si existe
+                            if registro['metadata']:
+                                try:
+                                    import json
+                                    metadata = json.loads(registro['metadata'])
+                                    if metadata:
+                                        with st.expander("ℹ️ Detalles adicionales"):
+                                            st.json(metadata)
+                                except:
+                                    pass
+                            
+                            st.divider()
+            else:
+                st.info("📭 No hay registros en el historial. Los análisis se guardarán automáticamente cuando se ejecuten.")
         
         # Resumen ejecutivo
         st.divider()
