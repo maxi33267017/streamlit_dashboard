@@ -581,6 +581,9 @@ def import_ventas_from_excel(excel_path):
         # Mostrar columnas encontradas para debug
         print(f"Columnas encontradas en REGISTRO VENTAS: {list(df.columns)}")
         
+        # Detectar si el Excel tiene formato de exportación (nombres de columnas de BD)
+        es_formato_exportacion = 'tipo_re_se' in df.columns or 'total' in df.columns
+        
         count = 0
         errores = []
         for idx, row in df.iterrows():
@@ -614,35 +617,81 @@ def import_ventas_from_excel(excel_path):
                                     return val
                     return default
                 
-                tipo_comprobante = str(get_col_value(df, row, ['Tipo Comprobante', 'TIPO COMPROBANTE'], 'FACTURA VENTA')).strip() or 'FACTURA VENTA'
-                total = _limpiar_valor_monetario(get_col_value(df, row, ['Total', 'TOTAL'], 0))
-                
-                # Si es nota de crédito (pero NO JD), convertir el total a negativo automáticamente
-                # NOTA: "NOTA DE CREDITO JD" son pagos recibidos de John Deere, por lo que son POSITIVOS
-                # Si el valor ya viene negativo del Excel, no hacer nada. Solo convertir si es positivo.
-                es_nota_credito = tipo_comprobante and 'CREDITO' in tipo_comprobante.upper() and 'JD' not in tipo_comprobante.upper()
-                if es_nota_credito and total > 0:
-                    total = -total
-                
-                venta_data = {
-                    'mes': fecha.strftime("%B%y"),
-                    'fecha': fecha,
-                    'sucursal': str(get_col_value(df, row, ['Sucursal', 'SUCURSAL'], '')).strip() or None,
-                    'cliente': str(get_col_value(df, row, ['Cliente', 'CLIENTE'], '')).strip() or None,
-                    'pin': str(get_col_value(df, row, ['PIN'], '')).strip() or None,
-                    'comprobante': str(get_col_value(df, row, ['Comprobante', 'COMPROBANTE'], '')).strip() or None,
-                    'tipo_comprobante': tipo_comprobante,
-                    'trabajo': str(get_col_value(df, row, ['Trabajo', 'TRABAJO'], 'EXTERNO')).strip() or 'EXTERNO',
-                    'n_comprobante': str(get_col_value(df, row, ['N° Comprobante', "N' Comprobante", 'N COMPROBANTE', 'N Comprobante'], '')).strip() or None,
-                    'tipo_re_se': str(get_col_value(df, row, ['Tipo (RE o SE)', 'TIPO (RE o SE)'], 'SE')).strip() or 'SE',
-                    'mano_obra': _limpiar_valor_monetario(get_col_value(df, row, ['Mano de Obra', 'MANO DE OBRA'], 0)),
-                    'asistencia': _limpiar_valor_monetario(get_col_value(df, row, ['Asistencia', 'ASISTENCIA'], 0)),
-                    'repuestos': _limpiar_valor_monetario(get_col_value(df, row, ['Repuestos', 'REPUESTOS'], 0)),
-                    'terceros': _limpiar_valor_monetario(get_col_value(df, row, ['Terceros', 'TERCEROS'], 0)),
-                    'descuento': _limpiar_valor_monetario(get_col_value(df, row, ['Descuento', 'DESCUENTO'], 0)),
-                    'total': total,
-                    'detalles': str(get_col_value(df, row, ['Detalles', 'DETALLES'], '')).strip() or None
-                }
+                # Si es formato de exportación, usar valores directamente
+                if es_formato_exportacion:
+                    mes_val = row.get('mes', '')
+                    if pd.notna(mes_val) and mes_val:
+                        mes = str(mes_val)
+                    else:
+                        mes = fecha.strftime("%B%y")
+                    
+                    tipo_comprobante = str(row.get('tipo_comprobante', 'FACTURA VENTA')).strip() if pd.notna(row.get('tipo_comprobante')) else 'FACTURA VENTA'
+                    total = float(row.get('total', 0)) if pd.notna(row.get('total')) else 0
+                    
+                    # Si es nota de crédito (pero NO JD), convertir el total a negativo automáticamente
+                    es_nota_credito = tipo_comprobante and 'CREDITO' in tipo_comprobante.upper() and 'JD' not in tipo_comprobante.upper()
+                    if es_nota_credito and total > 0:
+                        total = -total
+                    
+                    tipo_re_se = str(row.get('tipo_re_se', 'SE')).strip().upper() if pd.notna(row.get('tipo_re_se')) else 'SE'
+                    # Validar que sea RE o SE
+                    if tipo_re_se not in ['RE', 'SE']:
+                        tipo_re_se = 'SE'  # Por defecto SE si no es válido
+                    
+                    venta_data = {
+                        'mes': mes,
+                        'fecha': fecha,
+                        'sucursal': str(row.get('sucursal', '')).strip() if pd.notna(row.get('sucursal')) else None,
+                        'cliente': str(row.get('cliente', '')).strip() if pd.notna(row.get('cliente')) else None,
+                        'pin': str(row.get('pin', '')).strip() if pd.notna(row.get('pin')) else None,
+                        'comprobante': str(row.get('comprobante', '')).strip() if pd.notna(row.get('comprobante')) else None,
+                        'tipo_comprobante': tipo_comprobante,
+                        'trabajo': str(row.get('trabajo', 'EXTERNO')).strip() if pd.notna(row.get('trabajo')) else 'EXTERNO',
+                        'n_comprobante': str(row.get('n_comprobante', '')).strip() if pd.notna(row.get('n_comprobante')) else None,
+                        'tipo_re_se': tipo_re_se,
+                        'mano_obra': float(row.get('mano_obra', 0)) if pd.notna(row.get('mano_obra')) else 0,
+                        'asistencia': float(row.get('asistencia', 0)) if pd.notna(row.get('asistencia')) else 0,
+                        'repuestos': float(row.get('repuestos', 0)) if pd.notna(row.get('repuestos')) else 0,
+                        'terceros': float(row.get('terceros', 0)) if pd.notna(row.get('terceros')) else 0,
+                        'descuento': float(row.get('descuento', 0)) if pd.notna(row.get('descuento')) else 0,
+                        'total': total,
+                        'detalles': str(row.get('detalles', '')).strip() if pd.notna(row.get('detalles')) else None
+                    }
+                else:
+                    # Formato original: buscar columnas con nombres descriptivos
+                    tipo_comprobante = str(get_col_value(df, row, ['Tipo Comprobante', 'TIPO COMPROBANTE'], 'FACTURA VENTA')).strip() or 'FACTURA VENTA'
+                    total = _limpiar_valor_monetario(get_col_value(df, row, ['Total', 'TOTAL'], 0))
+                    
+                    # Si es nota de crédito (pero NO JD), convertir el total a negativo automáticamente
+                    es_nota_credito = tipo_comprobante and 'CREDITO' in tipo_comprobante.upper() and 'JD' not in tipo_comprobante.upper()
+                    if es_nota_credito and total > 0:
+                        total = -total
+                    
+                    tipo_re_se_val = get_col_value(df, row, ['Tipo (RE o SE)', 'TIPO (RE o SE)', 'Tipo RE o SE'], 'SE')
+                    tipo_re_se = str(tipo_re_se_val).strip().upper() if tipo_re_se_val else 'SE'
+                    # Validar que sea RE o SE
+                    if tipo_re_se not in ['RE', 'SE']:
+                        tipo_re_se = 'SE'  # Por defecto SE si no es válido
+                    
+                    venta_data = {
+                        'mes': fecha.strftime("%B%y"),
+                        'fecha': fecha,
+                        'sucursal': str(get_col_value(df, row, ['Sucursal', 'SUCURSAL'], '')).strip() or None,
+                        'cliente': str(get_col_value(df, row, ['Cliente', 'CLIENTE'], '')).strip() or None,
+                        'pin': str(get_col_value(df, row, ['PIN'], '')).strip() or None,
+                        'comprobante': str(get_col_value(df, row, ['Comprobante', 'COMPROBANTE'], '')).strip() or None,
+                        'tipo_comprobante': tipo_comprobante,
+                        'trabajo': str(get_col_value(df, row, ['Trabajo', 'TRABAJO'], 'EXTERNO')).strip() or 'EXTERNO',
+                        'n_comprobante': str(get_col_value(df, row, ['N° Comprobante', "N' Comprobante", 'N COMPROBANTE', 'N Comprobante'], '')).strip() or None,
+                        'tipo_re_se': tipo_re_se,
+                        'mano_obra': _limpiar_valor_monetario(get_col_value(df, row, ['Mano de Obra', 'MANO DE OBRA'], 0)),
+                        'asistencia': _limpiar_valor_monetario(get_col_value(df, row, ['Asistencia', 'ASISTENCIA'], 0)),
+                        'repuestos': _limpiar_valor_monetario(get_col_value(df, row, ['Repuestos', 'REPUESTOS'], 0)),
+                        'terceros': _limpiar_valor_monetario(get_col_value(df, row, ['Terceros', 'TERCEROS'], 0)),
+                        'descuento': _limpiar_valor_monetario(get_col_value(df, row, ['Descuento', 'DESCUENTO'], 0)),
+                        'total': total,
+                        'detalles': str(get_col_value(df, row, ['Detalles', 'DETALLES'], '')).strip() or None
+                    }
                 
                 insert_venta(venta_data)
                 count += 1
