@@ -201,16 +201,63 @@ def get_ai_summary(df_ventas: pd.DataFrame, df_gastos: pd.DataFrame, gemini_api_
     alertas_criticas = detect_critical_alerts(df_ventas, df_gastos)
     
     # Si hay API key de Gemini, mejorar con IA
+    gemini_status = {
+        'activo': False,
+        'error': None,
+        'insights_agregados': 0,
+        'tendencias_agregadas': 0,
+        'alertas_agregadas': 0,
+        'recomendaciones_agregadas': 0,
+        'debug_info': None
+    }
+    
     if gemini_api_key and GEMINI_AVAILABLE:
         try:
+            # Logging más visible
+            import sys
+            sys.stderr.write(f"[GEMINI DEBUG] Llamando a get_gemini_insights con API key: {gemini_api_key[:10]}...\n")
+            sys.stderr.flush()
+            
             gemini_insights = get_gemini_insights(df_ventas, df_gastos, gemini_api_key)
+            
+            sys.stderr.write(f"[GEMINI DEBUG] Respuesta recibida. Tendencias: {len(gemini_insights.get('tendencias', []))}, Alertas: {len(gemini_insights.get('alertas', []))}, Recomendaciones: {len(gemini_insights.get('recomendaciones', []))}\n")
+            sys.stderr.flush()
+            
+            # Contar cuántos insights se agregaron
+            tendencias_gemini = gemini_insights.get('tendencias', [])
+            alertas_gemini = gemini_insights.get('alertas', [])
+            recomendaciones_gemini = gemini_insights.get('recomendaciones', [])
+            
+            # Ya se logueó arriba
+            
             # Combinar insights de Gemini con los existentes
-            insights['tendencias'].extend(gemini_insights.get('tendencias', []))
-            insights['alertas'].extend(gemini_insights.get('alertas', []))
-            recomendaciones.extend(gemini_insights.get('recomendaciones', []))
+            if tendencias_gemini:
+                insights['tendencias'].extend(tendencias_gemini)
+            if alertas_gemini:
+                insights['alertas'].extend(alertas_gemini)
+            if recomendaciones_gemini:
+                recomendaciones.extend(recomendaciones_gemini)
+            
+            gemini_status['activo'] = True
+            gemini_status['tendencias_agregadas'] = len(tendencias_gemini)
+            gemini_status['alertas_agregadas'] = len(alertas_gemini)
+            gemini_status['recomendaciones_agregadas'] = len(recomendaciones_gemini)
+            gemini_status['insights_agregados'] = len(tendencias_gemini) + len(alertas_gemini) + len(recomendaciones_gemini)
+            gemini_status['debug_info'] = f"Gemini procesó {len(df_ventas)} ventas y {len(df_gastos)} gastos"
         except Exception as e:
-            print(f"Error al usar Gemini API: {e}")
+            import traceback
+            import sys
+            gemini_status['error'] = str(e)
+            gemini_status['debug_info'] = traceback.format_exc()
+            sys.stderr.write(f"[GEMINI ERROR] Error al usar Gemini API: {e}\n")
+            sys.stderr.write(f"[GEMINI ERROR] Traceback: {traceback.format_exc()}\n")
+            sys.stderr.flush()
             # Continuar con análisis estadístico
+    elif gemini_api_key and not GEMINI_AVAILABLE:
+        gemini_status['error'] = 'Librería google-generativeai no está instalada'
+        gemini_status['debug_info'] = 'Ejecuta: pip install google-generativeai'
+    elif not gemini_api_key:
+        gemini_status['debug_info'] = 'No se proporcionó API key de Gemini'
     
     return {
         'insights': insights,
@@ -219,6 +266,7 @@ def get_ai_summary(df_ventas: pd.DataFrame, df_gastos: pd.DataFrame, gemini_api_
         'recomendaciones': recomendaciones,
         'alertas_criticas': alertas_criticas,
         'usando_ia': gemini_api_key is not None and GEMINI_AVAILABLE,
+        'gemini_status': gemini_status,
         'timestamp_analisis': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     }
 
@@ -521,6 +569,35 @@ def generate_recommendations(df_ventas: pd.DataFrame, df_gastos: pd.DataFrame) -
     
     return recomendaciones
 
+def test_gemini_connection(api_key: str) -> dict:
+    """Prueba la conexión con Gemini API"""
+    if not GEMINI_AVAILABLE:
+        return {
+            'success': False,
+            'error': 'Librería google-generativeai no está instalada. Ejecuta: pip install google-generativeai'
+        }
+    
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        
+        # Hacer una prueba simple
+        response = model.generate_content("Responde solo con 'OK' si puedes leer esto.")
+        
+        return {
+            'success': True,
+            'message': 'Conexión exitosa con Gemini API',
+            'model': 'gemini-1.5-flash',
+            'response_preview': response.text[:100] if response.text else 'Sin respuesta'
+        }
+    except Exception as e:
+        return {
+            'success': False,
+            'error': str(e),
+            'message': 'Error al conectar con Gemini API'
+        }
+
 def get_gemini_insights(df_ventas: pd.DataFrame, df_gastos: pd.DataFrame, api_key: str) -> dict:
     """Obtiene insights avanzados usando Google Gemini API"""
     if not GEMINI_AVAILABLE:
@@ -576,10 +653,17 @@ Sé específico, conciso y enfocado en acciones prácticas para mejorar el negoc
 """
         
         # Llamar a Gemini
+        import sys
+        sys.stderr.write(f"[GEMINI] Enviando prompt a Gemini (longitud: {len(prompt)} caracteres)\n")
+        sys.stderr.flush()
+        
         response = model.generate_content(prompt)
         
         # Parsear respuesta (puede venir como texto o JSON)
         respuesta_texto = response.text
+        sys.stderr.write(f"[GEMINI] Respuesta recibida (longitud: {len(respuesta_texto)} caracteres)\n")
+        sys.stderr.write(f"[GEMINI] Primeros 300 caracteres: {respuesta_texto[:300]}\n")
+        sys.stderr.flush()
         
         # Intentar extraer JSON de la respuesta
         import json
@@ -589,16 +673,38 @@ Sé específico, conciso y enfocado en acciones prácticas para mejorar el negoc
         json_match = re.search(r'\{.*\}', respuesta_texto, re.DOTALL)
         if json_match:
             try:
-                resultado = json.loads(json_match.group())
-                return {
+                json_str = json_match.group()
+                import sys
+                sys.stderr.write(f"[GEMINI] JSON extraído exitosamente\n")
+                resultado = json.loads(json_str)
+                sys.stderr.write(f"[GEMINI] JSON parseado correctamente\n")
+                resultado_final = {
                     'tendencias': resultado.get('tendencias', []),
                     'alertas': resultado.get('alertas', []),
                     'recomendaciones': resultado.get('recomendaciones', [])
                 }
-            except:
-                pass
+                sys.stderr.write(f"[GEMINI] Retornando {len(resultado_final['tendencias'])} tendencias, {len(resultado_final['alertas'])} alertas, {len(resultado_final['recomendaciones'])} recomendaciones\n")
+                sys.stderr.flush()
+                return resultado_final
+            except json.JSONDecodeError as e:
+                import sys
+                sys.stderr.write(f"[GEMINI ERROR] Error parseando JSON: {e}\n")
+                sys.stderr.write(f"[GEMINI ERROR] JSON problemático: {json_str[:300]}\n")
+                sys.stderr.flush()
+            except Exception as e:
+                import sys
+                sys.stderr.write(f"[GEMINI ERROR] Error inesperado: {e}\n")
+                sys.stderr.flush()
+        else:
+            import sys
+            sys.stderr.write(f"[GEMINI WARNING] No se encontró JSON en la respuesta\n")
+            sys.stderr.write(f"[GEMINI WARNING] Respuesta: {respuesta_texto[:500]}\n")
+            sys.stderr.flush()
         
         # Si no se puede parsear JSON, devolver vacío
+        import sys
+        sys.stderr.write(f"[GEMINI WARNING] Retornando diccionario vacío\n")
+        sys.stderr.flush()
         return {'tendencias': [], 'alertas': [], 'recomendaciones': []}
         
     except Exception as e:

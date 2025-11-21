@@ -66,7 +66,11 @@ from calculos_financieros import (
     calcular_factor_absorcion_postventa,
     calcular_punto_equilibrio
 )
-from ai_analysis import get_ai_summary
+from ai_analysis import get_ai_summary, test_gemini_connection
+try:
+    from ai_analysis import GEMINI_AVAILABLE
+except ImportError:
+    GEMINI_AVAILABLE = False
 
 def analizar_texto_pdf(texto: str) -> dict:
     """
@@ -2686,10 +2690,31 @@ elif page == "🤖 Análisis IA":
             st.session_state['gemini_api_key'] = gemini_api_key_input
             gemini_api_key = gemini_api_key_input
         
+        # Debug info
+        with st.sidebar.expander("🔍 Debug Info", expanded=False):
+            st.write(f"**usar_gemini:** {usar_gemini}")
+            st.write(f"**API key presente:** {bool(gemini_api_key)}")
+            st.write(f"**GEMINI_AVAILABLE:** {GEMINI_AVAILABLE}")
+            st.write(f"**API key (primeros 10):** {gemini_api_key[:10] if gemini_api_key else 'N/A'}...")
+        
         if not gemini_api_key:
             st.sidebar.warning("⚠️ Ingresa tu API key para usar análisis avanzado con Gemini")
         else:
             st.sidebar.success("✅ Gemini API configurada")
+            
+            # Botón para probar conexión
+            if st.sidebar.button("🧪 Probar Conexión Gemini", use_container_width=True, key="test_gemini"):
+                with st.sidebar:
+                    with st.spinner("Probando conexión..."):
+                        test_result = test_gemini_connection(gemini_api_key)
+                        if test_result['success']:
+                            st.success(f"✅ {test_result['message']}")
+                            st.caption(f"Modelo: {test_result.get('model', 'N/A')}")
+                        else:
+                            st.error(f"❌ Error: {test_result.get('error', 'Desconocido')}")
+                            if 'Librería' in test_result.get('error', ''):
+                                st.info("💡 Instala la librería: `pip install google-generativeai`")
+            
             if st.sidebar.button("🗑️ Eliminar API Key", key="eliminar_gemini_key"):
                 st.session_state['gemini_api_key'] = ''
                 st.rerun()
@@ -2750,11 +2775,44 @@ elif page == "🤖 Análisis IA":
                 st.caption(f"Detectado: {alerta['fecha_deteccion']}")
             st.divider()
         
-        # Mostrar indicador de método usado
-        if summary.get('usando_ia'):
-            st.success("✅ Análisis mejorado con Google Gemini API")
-        else:
-            st.info("ℹ️ Análisis estadístico local (activa Gemini API para análisis avanzado)")
+        # Mostrar indicador de método usado y estado de Gemini
+        gemini_status = summary.get('gemini_status', {})
+        
+        # Panel de estado detallado de Gemini
+        with st.expander("🔍 Estado Detallado de Gemini API", expanded=True):
+            if summary.get('usando_ia'):
+                if gemini_status.get('activo'):
+                    st.success("✅ **Gemini API está ACTIVO y funcionando**")
+                    st.write(f"📊 **Insights agregados:**")
+                    st.write(f"- Tendencias: {gemini_status.get('tendencias_agregadas', 0)}")
+                    st.write(f"- Alertas: {gemini_status.get('alertas_agregadas', 0)}")
+                    st.write(f"- Recomendaciones: {gemini_status.get('recomendaciones_agregadas', 0)}")
+                    st.write(f"- **Total:** {gemini_status.get('insights_agregados', 0)} insights")
+                    if gemini_status.get('debug_info'):
+                        st.caption(f"ℹ️ {gemini_status['debug_info']}")
+                elif gemini_status.get('error'):
+                    st.error(f"❌ **Error con Gemini API**: {gemini_status['error']}")
+                    if gemini_status.get('debug_info'):
+                        st.code(gemini_status['debug_info'], language='text')
+                    st.info("ℹ️ Continuando con análisis estadístico local")
+                else:
+                    st.warning("⚠️ Gemini API configurada pero no se pudo conectar. Verifica tu API key.")
+                    if gemini_status.get('debug_info'):
+                        st.caption(f"ℹ️ {gemini_status['debug_info']}")
+            else:
+                st.info("ℹ️ Gemini API no está activado. Actívalo en el sidebar para análisis avanzado.")
+        
+        # Mensaje principal más visible
+        if summary.get('usando_ia') and gemini_status.get('activo'):
+            st.success("✅ **Análisis mejorado con Google Gemini API** - Funcionando correctamente")
+            if gemini_status.get('insights_agregados', 0) > 0:
+                st.caption(f"📊 Gemini agregó {gemini_status['insights_agregados']} insights adicionales (Tendencias: {gemini_status.get('tendencias_agregadas', 0)}, Alertas: {gemini_status.get('alertas_agregadas', 0)}, Recomendaciones: {gemini_status.get('recomendaciones_agregadas', 0)})")
+            else:
+                st.warning("⚠️ Gemini está activo pero no agregó insights. Revisa los logs en la consola.")
+        elif summary.get('usando_ia') and gemini_status.get('error'):
+            st.error(f"❌ **Error con Gemini API**: {gemini_status['error']}")
+        elif not summary.get('usando_ia'):
+            st.info("ℹ️ Análisis estadístico local (activa Gemini API en el sidebar para análisis avanzado)")
         
         # Mostrar insights
         tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Insights", "🔮 Predicciones", "⚠️ Anomalías", "💡 Recomendaciones", "🚨 Alertas Críticas"])
@@ -2877,16 +2935,36 @@ elif page == "🤖 Análisis IA":
         with tab4:
             st.subheader("💡 Recomendaciones Inteligentes")
             
-            todas_recomendaciones = (
-                summary['insights']['recomendaciones'] + 
-                summary['recomendaciones']
-            )
+            # Separar recomendaciones de Gemini vs estadísticas
+            todas_recomendaciones = summary['insights']['recomendaciones'] + summary['recomendaciones']
+            
+            # Intentar identificar cuáles vienen de Gemini (generalmente más detalladas y contextuales)
+            gemini_status = summary.get('gemini_status', {})
+            hay_gemini = gemini_status.get('activo', False)
             
             if todas_recomendaciones:
+                if hay_gemini:
+                    st.info("💡 Las recomendaciones incluyen análisis de **Google Gemini AI** (marcadas con 🤖) y análisis estadístico local")
+                    st.divider()
+                
                 for i, recomendacion in enumerate(todas_recomendaciones, 1):
-                    st.info(f"{i}. {recomendacion}")
+                    # Si la recomendación parece venir de Gemini (más detallada, sin emojis específicos del código)
+                    es_gemini = hay_gemini and (
+                        len(recomendacion) > 100 or  # Recomendaciones de Gemini suelen ser más largas
+                        any(palabra in recomendacion.lower() for palabra in ['considerar', 'recomendamos', 'sugerimos', 'estrategia'])
+                    )
+                    
+                    if es_gemini:
+                        st.success(f"🤖 **{i}. {recomendacion}** *(Análisis Gemini AI)*")
+                    else:
+                        st.info(f"{i}. {recomendacion}")
             else:
                 st.info("No hay recomendaciones específicas en este momento")
+            
+            # Mostrar estado de Gemini si está activo
+            if hay_gemini:
+                st.divider()
+                st.caption("✅ **Google Gemini AI** está activo y proporcionando análisis avanzado")
         
         with tab5:
             st.subheader("🚨 Alertas Críticas en Tiempo Real")
