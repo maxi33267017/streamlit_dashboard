@@ -1873,10 +1873,46 @@ elif page == "📋 Ver Registros":
                             # Mostrar preview del PDF si está activado
                             if archivo_path.suffix.lower() == '.pdf' and st.session_state.get(f'preview_pdf_{venta_seleccionada}', False):
                                 st.subheader("📄 Previsualización del PDF")
-                                # Convertir PDF a base64 para mostrarlo en iframe
+                                
+                                # Convertir PDF a base64
                                 base64_pdf = base64.b64encode(archivo_bytes).decode('utf-8')
-                                pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="600px" type="application/pdf"></iframe>'
-                                st.markdown(pdf_display, unsafe_allow_html=True)
+                                
+                                # Verificar tamaño del PDF (data URIs tienen límites ~2MB en algunos navegadores)
+                                pdf_size_mb = len(archivo_bytes) / (1024 * 1024)
+                                
+                                if pdf_size_mb > 2:
+                                    st.warning(f"⚠️ El PDF es grande ({pdf_size_mb:.1f} MB). La previsualización puede tardar o no funcionar. Usa el botón de descarga si hay problemas.")
+                                
+                                # Usar st.components.v1.html para mejor compatibilidad en Streamlit Cloud
+                                # Intentar con iframe primero, con fallback a embed
+                                pdf_html = f"""
+                                <div style="width: 100%; height: 600px; border: 1px solid #ccc;">
+                                    <iframe 
+                                        src="data:application/pdf;base64,{base64_pdf}" 
+                                        width="100%" 
+                                        height="100%" 
+                                        type="application/pdf"
+                                        style="border: none;"
+                                        onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
+                                    </iframe>
+                                    <embed 
+                                        src="data:application/pdf;base64,{base64_pdf}" 
+                                        type="application/pdf" 
+                                        width="100%" 
+                                        height="100%"
+                                        style="display: none; border: none;"
+                                        onerror="this.parentElement.innerHTML='<p style=\\'padding: 20px; text-align: center; color: #666;\\'>⚠️ No se pudo cargar la previsualización. Por favor, usa el botón de descarga.</p>'">
+                                    </embed>
+                                </div>
+                                """
+                                
+                                try:
+                                    import streamlit.components.v1 as components
+                                    components.html(pdf_html, height=600)
+                                except Exception as e:
+                                    # Fallback a markdown si components.html falla
+                                    st.markdown(f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="600px" type="application/pdf"></iframe>', unsafe_allow_html=True)
+                                    st.warning(f"⚠️ Error al cargar previsualización: {e}. Usa el botón de descarga.")
                     
                     with tab_editar:
                         with st.form(f"form_edit_venta_{venta_seleccionada}"):
