@@ -980,3 +980,92 @@ def get_historial_analisis_ia(limit: int = 50, tipo_analisis: str = None, fuente
     conn.close()
     
     return df
+
+def get_resumen_mensual_analisis_ia(mes: int = None, año: int = None):
+    """
+    Obtiene un resumen mensual de los análisis de IA, agrupando por tipo y mostrando lo más relevante.
+    
+    Args:
+        mes: Mes a resumir (1-12). Si es None, usa el mes actual.
+        año: Año a resumir. Si es None, usa el año actual.
+    
+    Returns:
+        dict: Diccionario con el resumen mensual organizado por tipo
+    """
+    from datetime import datetime
+    
+    if mes is None:
+        mes = datetime.now().month
+    if año is None:
+        año = datetime.now().year
+    
+    conn = get_connection()
+    
+    # Obtener todos los registros del mes
+    query = """
+        SELECT * FROM historial_analisis_ia 
+        WHERE strftime('%Y', fecha_hora) = ? 
+        AND strftime('%m', fecha_hora) = ?
+        ORDER BY fecha_hora DESC
+    """
+    
+    df = pd.read_sql_query(query, conn, params=(str(año), f"{mes:02d}"))
+    conn.close()
+    
+    if len(df) == 0:
+        return {
+            'mes': mes,
+            'año': año,
+            'total_registros': 0,
+            'resumen': {}
+        }
+    
+    # Convertir fecha_hora a datetime
+    df['fecha_hora'] = pd.to_datetime(df['fecha_hora'])
+    
+    resumen = {
+        'mes': mes,
+        'año': año,
+        'total_registros': len(df),
+        'resumen': {}
+    }
+    
+    # Agrupar por tipo de análisis
+    for tipo in ['tendencia', 'prediccion', 'anomalia', 'recomendacion', 'alerta']:
+        df_tipo = df[df['tipo_analisis'] == tipo]
+        
+        if len(df_tipo) == 0:
+            continue
+        
+        # Para recomendaciones y alertas, agrupar por contenido similar (usar los más frecuentes)
+        if tipo in ['recomendacion', 'alerta']:
+            # Contar frecuencia de cada contenido
+            conteo = df_tipo['contenido'].value_counts()
+            
+            # Obtener las top 5 más frecuentes
+            top_contenidos = conteo.head(5).to_dict()
+            
+            resumen['resumen'][tipo] = {
+                'total': len(df_tipo),
+                'top_items': [
+                    {
+                        'contenido': contenido,
+                        'frecuencia': freq,
+                        'fuentes': df_tipo[df_tipo['contenido'] == contenido]['fuente'].unique().tolist(),
+                        'ultima_aparicion': df_tipo[df_tipo['contenido'] == contenido]['fecha_hora'].max().strftime('%Y-%m-%d %H:%M:%S')
+                    }
+                    for contenido, freq in top_contenidos.items()
+                ]
+            }
+        else:
+            # Para otros tipos, mostrar todos pero agrupar por fuente
+            resumen['resumen'][tipo] = {
+                'total': len(df_tipo),
+                'por_fuente': {
+                    'gemini': len(df_tipo[df_tipo['fuente'] == 'gemini']),
+                    'local': len(df_tipo[df_tipo['fuente'] == 'local'])
+                },
+                'items': df_tipo[['contenido', 'fuente', 'fecha_hora']].to_dict('records')
+            }
+    
+    return resumen

@@ -58,7 +58,7 @@ from database import (
     insert_plantilla_gasto, update_plantilla_gasto, delete_plantilla_gasto,
     eliminar_todos_los_registros,
     exportar_plantillas_gastos, importar_plantillas_gastos,
-    guardar_analisis_ia, get_historial_analisis_ia
+    guardar_analisis_ia, get_historial_analisis_ia, get_resumen_mensual_analisis_ia
 )
 from gastos_automaticos import obtener_gastos_totales_con_automaticos
 from calculos_financieros import (
@@ -3227,6 +3227,87 @@ elif page == "🤖 Análisis IA":
         with tab6:
             st.subheader("📜 Historial de Análisis IA")
             st.markdown("**Recomendaciones, tendencias, predicciones y alertas guardadas históricamente**")
+            
+            # Resumen mensual destacado
+            st.divider()
+            st.subheader("📊 Resumen Mensual - Lo Más Relevante")
+            
+            from datetime import datetime
+            mes_actual = datetime.now().month
+            año_actual = datetime.now().year
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                mes_seleccionado = st.selectbox(
+                    "Mes",
+                    list(range(1, 13)),
+                    index=mes_actual - 1,
+                    format_func=lambda x: datetime(2000, x, 1).strftime('%B'),
+                    key="resumen_mes"
+                )
+            with col2:
+                año_seleccionado = st.number_input(
+                    "Año",
+                    min_value=2020,
+                    max_value=2030,
+                    value=año_actual,
+                    key="resumen_año"
+                )
+            
+            # Obtener resumen mensual
+            resumen_mensual = get_resumen_mensual_analisis_ia(mes_seleccionado, año_seleccionado)
+            
+            if resumen_mensual['total_registros'] > 0:
+                st.success(f"📈 **{resumen_mensual['total_registros']} análisis** registrados en {datetime(2000, mes_seleccionado, 1).strftime('%B')} {año_seleccionado}")
+                
+                # Mostrar resumen por tipo
+                resumen_data = resumen_mensual['resumen']
+                
+                # Recomendaciones (lo más importante)
+                if 'recomendacion' in resumen_data:
+                    st.write("**💡 Recomendaciones Más Frecuentes:**")
+                    for item in resumen_data['recomendacion']['top_items']:
+                        fuentes_str = " + ".join([f"🤖 Gemini" if f == 'gemini' else "📊 Local" for f in item['fuentes']])
+                        st.info(f"**({item['frecuencia']}x)** {item['contenido']} - {fuentes_str}")
+                        st.caption(f"Última aparición: {item['ultima_aparicion']}")
+                    st.divider()
+                
+                # Alertas
+                if 'alerta' in resumen_data:
+                    st.write("**🚨 Alertas Más Frecuentes:**")
+                    for item in resumen_data['alerta']['top_items']:
+                        fuentes_str = " + ".join([f"🤖 Gemini" if f == 'gemini' else "📊 Local" for f in item['fuentes']])
+                        st.warning(f"**({item['frecuencia']}x)** {item['contenido']} - {fuentes_str}")
+                        st.caption(f"Última aparición: {item['ultima_aparicion']}")
+                    st.divider()
+                
+                # Tendencias
+                if 'tendencia' in resumen_data:
+                    st.write("**📈 Tendencias Identificadas:**")
+                    st.metric("Total", resumen_data['tendencia']['total'])
+                    if 'por_fuente' in resumen_data['tendencia']:
+                        st.caption(f"🤖 Gemini: {resumen_data['tendencia']['por_fuente'].get('gemini', 0)} | 📊 Local: {resumen_data['tendencia']['por_fuente'].get('local', 0)}")
+                    st.divider()
+                
+                # Predicciones
+                if 'prediccion' in resumen_data:
+                    st.write("**🔮 Predicciones Realizadas:**")
+                    st.metric("Total", resumen_data['prediccion']['total'])
+                    if 'por_fuente' in resumen_data['prediccion']:
+                        st.caption(f"🤖 Gemini: {resumen_data['prediccion']['por_fuente'].get('gemini', 0)} | 📊 Local: {resumen_data['prediccion']['por_fuente'].get('local', 0)}")
+                    st.divider()
+                
+                # Anomalías
+                if 'anomalia' in resumen_data:
+                    st.write("**⚠️ Anomalías Detectadas:**")
+                    st.metric("Total", resumen_data['anomalia']['total'])
+                    if 'por_fuente' in resumen_data['anomalia']:
+                        st.caption(f"🤖 Gemini: {resumen_data['anomalia']['por_fuente'].get('gemini', 0)} | 📊 Local: {resumen_data['anomalia']['por_fuente'].get('local', 0)}")
+            else:
+                st.info(f"📭 No hay análisis registrados para {datetime(2000, mes_seleccionado, 1).strftime('%B')} {año_seleccionado}")
+            
+            st.divider()
+            st.subheader("📋 Historial Completo")
             
             # Filtros
             col1, col2, col3 = st.columns(3)
