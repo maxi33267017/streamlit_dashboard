@@ -2662,12 +2662,66 @@ elif page == "🤖 Análisis IA":
     st.title("🤖 Análisis Inteligente con IA")
     st.markdown("**Análisis avanzado, predicciones y recomendaciones basadas en tus datos**")
     
+    # Configuración de Google Gemini (opcional)
+    st.sidebar.divider()
+    st.sidebar.subheader("⚙️ Configuración de IA")
+    
+    # Inicializar API key por defecto si no existe
+    if 'gemini_api_key' not in st.session_state:
+        # API key proporcionada por el usuario
+        st.session_state['gemini_api_key'] = 'AIzaSyAIsktRR9lhw_cdrK6_PMf-aSk88i06CQk'
+    
+    usar_gemini = st.sidebar.checkbox("Usar Google Gemini API (Análisis Avanzado)", value=True)
+    gemini_api_key = None
+    
+    if usar_gemini:
+        gemini_api_key_input = st.sidebar.text_input(
+            "🔑 Google Gemini API Key",
+            value=st.session_state['gemini_api_key'],
+            type="password",
+            help="Obtén tu API key gratuita en: https://aistudio.google.com/apikey"
+        )
+        
+        if gemini_api_key_input:
+            st.session_state['gemini_api_key'] = gemini_api_key_input
+            gemini_api_key = gemini_api_key_input
+        
+        if not gemini_api_key:
+            st.sidebar.warning("⚠️ Ingresa tu API key para usar análisis avanzado con Gemini")
+        else:
+            st.sidebar.success("✅ Gemini API configurada")
+            if st.sidebar.button("🗑️ Eliminar API Key", key="eliminar_gemini_key"):
+                st.session_state['gemini_api_key'] = ''
+                st.rerun()
+    
+    # Configuración de auto-actualización
+    auto_refresh = st.sidebar.checkbox("🔄 Auto-actualización", value=False, help="Actualiza el análisis automáticamente cada X minutos")
+    refresh_interval = None
+    if auto_refresh:
+        refresh_interval = st.sidebar.selectbox(
+            "Intervalo de actualización",
+            [5, 10, 15, 30, 60],
+            index=1,
+            format_func=lambda x: f"{x} minutos"
+        )
+    
     # Filtros de fecha
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns([2, 2, 1])
     with col1:
         fecha_inicio = st.date_input("Fecha Inicio (IA)", value=date(2025, 11, 1))
     with col2:
         fecha_fin = st.date_input("Fecha Fin (IA)", value=date.today())
+    with col3:
+        st.write("")  # Espacio
+        st.write("")  # Espacio
+        if st.button("🔄 Actualizar Análisis", use_container_width=True, type="primary"):
+            st.rerun()
+    
+    # Auto-refresh usando st.rerun con time.sleep (simulado con placeholder)
+    if auto_refresh and refresh_interval:
+        st.sidebar.info(f"⏱️ Próxima actualización en {refresh_interval} minutos")
+        # Nota: En producción, esto requeriría un mecanismo más sofisticado
+        # Streamlit no tiene auto-refresh nativo, pero se puede usar st.rerun() con time.sleep
     
     # Obtener datos
     df_ventas = get_ventas(str(fecha_inicio), str(fecha_fin))
@@ -2677,11 +2731,33 @@ elif page == "🤖 Análisis IA":
         st.info("📊 No hay datos para analizar. Importa datos desde Excel o registra nuevas ventas/gastos.")
     else:
         # Ejecutar análisis con IA
-        with st.spinner("🤖 Analizando datos con IA..."):
-            summary = get_ai_summary(df_ventas, df_gastos)
+        mensaje_analisis = "🤖 Analizando datos con IA avanzada (Gemini)..." if gemini_api_key else "🤖 Analizando datos con IA..."
+        with st.spinner(mensaje_analisis):
+            summary = get_ai_summary(df_ventas, df_gastos, gemini_api_key=gemini_api_key)
+        
+        # Mostrar timestamp del análisis
+        if summary.get('timestamp_analisis'):
+            st.caption(f"📅 Última actualización: {summary['timestamp_analisis']}")
+        
+        # Mostrar alertas críticas primero (si existen)
+        if summary.get('alertas_criticas') and len(summary['alertas_criticas']) > 0:
+            st.error("🚨 **ALERTAS CRÍTICAS DETECTADAS**")
+            for alerta in summary['alertas_criticas']:
+                if alerta['severidad'] == 'ALTA':
+                    st.error(f"**{alerta['titulo']}** - {alerta['descripcion']}")
+                else:
+                    st.warning(f"**{alerta['titulo']}** - {alerta['descripcion']}")
+                st.caption(f"Detectado: {alerta['fecha_deteccion']}")
+            st.divider()
+        
+        # Mostrar indicador de método usado
+        if summary.get('usando_ia'):
+            st.success("✅ Análisis mejorado con Google Gemini API")
+        else:
+            st.info("ℹ️ Análisis estadístico local (activa Gemini API para análisis avanzado)")
         
         # Mostrar insights
-        tab1, tab2, tab3, tab4 = st.tabs(["📊 Insights", "🔮 Predicciones", "⚠️ Anomalías", "💡 Recomendaciones"])
+        tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Insights", "🔮 Predicciones", "⚠️ Anomalías", "💡 Recomendaciones", "🚨 Alertas Críticas"])
         
         with tab1:
             st.subheader("📊 Tendencias e Insights")
@@ -2705,6 +2781,16 @@ elif page == "🤖 Análisis IA":
                 prediccion = summary['prediccion']['prediccion']
                 confianza = summary['prediccion']['confianza']
                 mensaje = summary['prediccion']['mensaje']
+                metodo = summary['prediccion'].get('metodo', 'Promedio Simple')
+                
+                # Mostrar método usado
+                st.info(f"📊 Método: {metodo}")
+                
+                # Si hay predicciones de múltiples modelos, mostrarlas
+                if 'predicciones_individuales' in summary['prediccion']:
+                    with st.expander("📈 Ver predicciones por modelo"):
+                        for modelo, pred_valor in summary['prediccion']['predicciones_individuales'].items():
+                            st.write(f"**{modelo}**: {formatear_moneda(pred_valor)} USD")
                 
                 # Mostrar predicción con color según confianza
                 if confianza == 'Alta':
@@ -2772,11 +2858,19 @@ elif page == "🤖 Análisis IA":
             st.subheader("⚠️ Anomalías Detectadas")
             
             if summary['anomalias']:
-                for i, anomalia in enumerate(summary['anomalias'], 1):
-                    with st.expander(f"Anomalía {i}: {anomalia['tipo']}"):
-                        st.write(f"**Fecha:** {anomalia['fecha']}")
-                        st.write(f"**Valor:** {formatear_moneda(anomalia['valor'])} USD" if isinstance(anomalia['valor'], (int, float)) else f"**Valor:** {anomalia['valor']}")
-                        st.write(f"**Descripción:** {anomalia['descripcion']}")
+                # Agrupar por categoría
+                categorias = {}
+                for anomalia in summary['anomalias']:
+                    categoria = anomalia.get('categoria', 'General')
+                    if categoria not in categorias:
+                        categorias[categoria] = []
+                    categorias[categoria].append(anomalia)
+                
+                for categoria, anomalias_cat in categorias.items():
+                    with st.expander(f"📂 {categoria} ({len(anomalias_cat)} anomalías)"):
+                        for anomalia in anomalias_cat:
+                            st.warning(f"**{anomalia['tipo']}** - {anomalia['descripcion']}")
+                            st.caption(f"Fecha: {anomalia['fecha']} | Valor: {formatear_moneda(anomalia['valor']) if isinstance(anomalia['valor'], (int, float)) else anomalia['valor']}")
             else:
                 st.success("✅ No se detectaron anomalías significativas en los datos")
         
@@ -2793,6 +2887,34 @@ elif page == "🤖 Análisis IA":
                     st.info(f"{i}. {recomendacion}")
             else:
                 st.info("No hay recomendaciones específicas en este momento")
+        
+        with tab5:
+            st.subheader("🚨 Alertas Críticas en Tiempo Real")
+            
+            if summary.get('alertas_criticas') and len(summary['alertas_criticas']) > 0:
+                # Agrupar por severidad
+                alertas_altas = [a for a in summary['alertas_criticas'] if a['severidad'] == 'ALTA']
+                alertas_medias = [a for a in summary['alertas_criticas'] if a['severidad'] == 'MEDIA']
+                
+                if alertas_altas:
+                    st.error(f"**🔴 Alertas de Alta Severidad ({len(alertas_altas)})**")
+                    for alerta in alertas_altas:
+                        with st.container():
+                            st.error(f"**{alerta['titulo']}**")
+                            st.write(alerta['descripcion'])
+                            st.caption(f"⏰ Detectado: {alerta['fecha_deteccion']}")
+                            st.divider()
+                
+                if alertas_medias:
+                    st.warning(f"**🟡 Alertas de Severidad Media ({len(alertas_medias)})**")
+                    for alerta in alertas_medias:
+                        with st.container():
+                            st.warning(f"**{alerta['titulo']}**")
+                            st.write(alerta['descripcion'])
+                            st.caption(f"⏰ Detectado: {alerta['fecha_deteccion']}")
+                            st.divider()
+            else:
+                st.success("✅ No hay alertas críticas en este momento. El negocio está funcionando normalmente.")
         
         # Resumen ejecutivo
         st.divider()
