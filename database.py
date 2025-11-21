@@ -441,6 +441,87 @@ def delete_plantilla_gasto(plantilla_id):
     conn.commit()
     conn.close()
 
+def exportar_plantillas_gastos():
+    """Exporta todas las plantillas de gastos a un diccionario (para JSON)"""
+    df = get_plantillas_gastos()
+    
+    # Convertir a lista de diccionarios, excluyendo columnas que no son necesarias
+    plantillas = []
+    for _, row in df.iterrows():
+        plantilla = {
+            'nombre': row.get('nombre', ''),
+            'descripcion': row.get('descripcion', '') if pd.notna(row.get('descripcion')) else '',
+            'sucursal': row.get('sucursal', '') if pd.notna(row.get('sucursal')) else None,
+            'area': row.get('area', '') if pd.notna(row.get('area')) else None,
+            'pct_postventa': float(row.get('pct_postventa', 0)) if pd.notna(row.get('pct_postventa')) else 0.0,
+            'pct_servicios': float(row.get('pct_servicios', 0)) if pd.notna(row.get('pct_servicios')) else 0.0,
+            'pct_repuestos': float(row.get('pct_repuestos', 0)) if pd.notna(row.get('pct_repuestos')) else 0.0,
+            'tipo': row.get('tipo', '') if pd.notna(row.get('tipo')) else None,
+            'clasificacion': row.get('clasificacion', '') if pd.notna(row.get('clasificacion')) else None,
+            'proveedor': row.get('proveedor', '') if pd.notna(row.get('proveedor')) else None,
+            'detalles': row.get('detalles', '') if pd.notna(row.get('detalles')) else None,
+            'activa': bool(row.get('activa', True)) if pd.notna(row.get('activa')) else True
+        }
+        plantillas.append(plantilla)
+    
+    return plantillas
+
+def importar_plantillas_gastos(plantillas_data, sobrescribir=False):
+    """
+    Importa plantillas de gastos desde una lista de diccionarios
+    
+    Args:
+        plantillas_data: Lista de diccionarios con los datos de las plantillas
+        sobrescribir: Si True, actualiza plantillas existentes con el mismo nombre. Si False, las omite.
+    
+    Returns:
+        dict con 'importadas', 'actualizadas', 'omitidas', 'errores'
+    """
+    resultado = {
+        'importadas': 0,
+        'actualizadas': 0,
+        'omitidas': 0,
+        'errores': []
+    }
+    
+    df_existentes = get_plantillas_gastos()
+    nombres_existentes = set(df_existentes['nombre'].str.lower()) if len(df_existentes) > 0 else set()
+    
+    for idx, plantilla_data in enumerate(plantillas_data):
+        try:
+            nombre = plantilla_data.get('nombre', '').strip()
+            if not nombre:
+                resultado['errores'].append(f"Plantilla {idx + 1}: Nombre vacío")
+                continue
+            
+            nombre_lower = nombre.lower()
+            
+            # Verificar si ya existe
+            if nombre_lower in nombres_existentes:
+                if sobrescribir:
+                    # Buscar la plantilla existente por nombre
+                    plantilla_existente = df_existentes[df_existentes['nombre'].str.lower() == nombre_lower]
+                    if len(plantilla_existente) > 0:
+                        plantilla_id = plantilla_existente.iloc[0]['id']
+                        update_plantilla_gasto(plantilla_id, plantilla_data)
+                        resultado['actualizadas'] += 1
+                    else:
+                        # Si no se encuentra, crear nueva
+                        insert_plantilla_gasto(plantilla_data)
+                        resultado['importadas'] += 1
+                        nombres_existentes.add(nombre_lower)
+                else:
+                    resultado['omitidas'] += 1
+            else:
+                # Crear nueva plantilla
+                insert_plantilla_gasto(plantilla_data)
+                resultado['importadas'] += 1
+                nombres_existentes.add(nombre_lower)
+        except Exception as e:
+            resultado['errores'].append(f"Plantilla '{plantilla_data.get('nombre', 'Sin nombre')}': {str(e)}")
+    
+    return resultado
+
 def _limpiar_valor_monetario(valor):
     """Convierte valores monetarios en texto a float (ej: 'US $556,00' -> 556.0, '-US $700,00' -> -700.0)"""
     if pd.isna(valor):

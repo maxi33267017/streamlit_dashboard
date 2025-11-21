@@ -56,7 +56,8 @@ from database import (
     update_venta, update_gasto,
     get_plantillas_gastos, get_plantilla_gasto_by_id,
     insert_plantilla_gasto, update_plantilla_gasto, delete_plantilla_gasto,
-    eliminar_todos_los_registros
+    eliminar_todos_los_registros,
+    exportar_plantillas_gastos, importar_plantillas_gastos
 )
 from gastos_automaticos import obtener_gastos_totales_con_automaticos
 from calculos_financieros import (
@@ -1252,6 +1253,72 @@ elif page == "⚙️ Plantillas Gastos":
     with tab1:
         st.subheader("Plantillas Existentes")
         df_plantillas = get_plantillas_gastos()
+        
+        # Sección de Exportar/Importar Plantillas
+        st.divider()
+        st.subheader("💾 Exportar/Importar Plantillas")
+        st.info("💡 **Exporta tus plantillas** para transferirlas a otra instancia (ej: Streamlit Cloud) o **importa plantillas** desde un archivo JSON.")
+        
+        col_exp1, col_exp2 = st.columns(2)
+        
+        with col_exp1:
+            st.markdown("#### 📤 Exportar Plantillas")
+            if len(df_plantillas) > 0:
+                # Exportar a JSON
+                plantillas_data = exportar_plantillas_gastos()
+                json_data = json.dumps(plantillas_data, indent=2, ensure_ascii=False)
+                
+                st.download_button(
+                    label="📥 Descargar Plantillas (JSON)",
+                    data=json_data,
+                    file_name=f"plantillas_gastos_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                    mime="application/json",
+                    help=f"Descarga {len(plantillas_data)} plantillas en formato JSON"
+                )
+                st.caption(f"Total: {len(plantillas_data)} plantillas disponibles para exportar")
+            else:
+                st.info("No hay plantillas para exportar")
+        
+        with col_exp2:
+            st.markdown("#### 📥 Importar Plantillas")
+            archivo_json = st.file_uploader("Subir archivo JSON de plantillas", type=['json'], key="import_plantillas")
+            
+            if archivo_json is not None:
+                sobrescribir = st.checkbox("Sobrescribir plantillas existentes con el mismo nombre", value=False)
+                
+                if st.button("📥 Importar Plantillas", key="btn_importar_plantillas"):
+                    try:
+                        # Leer JSON
+                        contenido = archivo_json.read().decode('utf-8')
+                        plantillas_data = json.loads(contenido)
+                        
+                        if not isinstance(plantillas_data, list):
+                            st.error("❌ El archivo JSON debe contener una lista de plantillas")
+                        else:
+                            with st.spinner(f"Importando {len(plantillas_data)} plantillas..."):
+                                resultado = importar_plantillas_gastos(plantillas_data, sobrescribir=sobrescribir)
+                                
+                                if resultado['importadas'] > 0 or resultado['actualizadas'] > 0:
+                                    st.success(f"✅ Importación completada:")
+                                    if resultado['importadas'] > 0:
+                                        st.write(f"- ✅ {resultado['importadas']} plantillas importadas")
+                                    if resultado['actualizadas'] > 0:
+                                        st.write(f"- 🔄 {resultado['actualizadas']} plantillas actualizadas")
+                                    if resultado['omitidas'] > 0:
+                                        st.write(f"- ⏭️ {resultado['omitidas']} plantillas omitidas (ya existían)")
+                                    if resultado['errores']:
+                                        st.warning(f"⚠️ {len(resultado['errores'])} errores:")
+                                        for error in resultado['errores'][:5]:
+                                            st.write(f"  - {error}")
+                                    st.rerun()
+                                else:
+                                    st.warning("⚠️ No se importaron plantillas. Verifica el archivo JSON.")
+                    except json.JSONDecodeError as e:
+                        st.error(f"❌ Error al leer el archivo JSON: {e}")
+                    except Exception as e:
+                        st.error(f"❌ Error al importar: {e}")
+        
+        st.divider()
         
         if len(df_plantillas) > 0:
             buscar_plantilla = st.text_input("🔍 Buscar plantilla", placeholder="Buscar por clasificación, proveedor, sucursal, área, tipo...")
