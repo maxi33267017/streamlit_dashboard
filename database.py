@@ -592,6 +592,9 @@ def import_gastos_from_excel(excel_path):
         # Mostrar columnas encontradas para debug
         print(f"Columnas encontradas en REGISTRO GASTOS: {list(df.columns)}")
         
+        # Detectar si el Excel tiene formato de exportación (nombres de columnas de BD)
+        es_formato_exportacion = 'total_usd' in df.columns or 'total_pct_se' in df.columns
+        
         # Buscar columnas por nombre flexible (case-insensitive)
         def get_col_value(df, row, posibles_nombres, default=None):
             # Primero buscar coincidencia exacta
@@ -625,49 +628,86 @@ def import_gastos_from_excel(excel_path):
                 
                 fecha = pd.to_datetime(row[fecha_col]).date()
                 
-                # Buscar Total USD (puede venir como texto "US $20,87")
-                total_usd_val = get_col_value(df, row, ['Total USD', 'TOTAL USD', 'Total US$'], 0)
-                total_usd = _limpiar_valor_monetario(total_usd_val)
+                # Si es formato de exportación (nombres de columnas de BD), usar directamente
+                if es_formato_exportacion:
+                    total_usd = float(row.get('total_usd', 0)) if pd.notna(row.get('total_usd')) else 0
+                    total_pct_se = float(row.get('total_pct_se', 0)) if pd.notna(row.get('total_pct_se')) else 0
+                    total_pct_re = float(row.get('total_pct_re', 0)) if pd.notna(row.get('total_pct_re')) else 0
+                    total_pct = float(row.get('total_pct', 0)) if pd.notna(row.get('total_pct')) else (total_pct_se + total_pct_re)
+                    pct_postventa = float(row.get('pct_postventa', 0)) if pd.notna(row.get('pct_postventa')) else 0
+                    pct_servicios = float(row.get('pct_servicios', 0)) if pd.notna(row.get('pct_servicios')) else 0
+                    pct_repuestos = float(row.get('pct_repuestos', 0)) if pd.notna(row.get('pct_repuestos')) else 0
+                else:
+                    # Formato original: buscar Total USD (puede venir como texto "US $20,87")
+                    total_usd_val = get_col_value(df, row, ['Total USD', 'TOTAL USD', 'Total US$'], 0)
+                    total_usd = _limpiar_valor_monetario(total_usd_val)
+                    
+                    # Buscar porcentajes (pueden venir sin espacio: %POSTVENTA)
+                    pct_postventa = _limpiar_valor_monetario(get_col_value(df, row, ['% Postventa', '%POSTVENTA', '% POSTVENTA'], 0))
+                    pct_servicios = _limpiar_valor_monetario(get_col_value(df, row, ['% Servicios', '%SERVICIOS', '% SERVICIOS'], 0))
+                    pct_repuestos = _limpiar_valor_monetario(get_col_value(df, row, ['% Repuestos', '%REPUESTOS', '% REPUESTOS'], 0))
+                    
+                    total_pct = total_usd * (pct_postventa / 100) if pct_postventa > 0 else 0
+                    total_pct_se = total_pct * (pct_servicios / 100) if pct_servicios > 0 else 0
+                    total_pct_re = total_pct * (pct_repuestos / 100) if pct_repuestos > 0 else 0
+                    
+                    # Si hay valores en TOTAL %SE y TOTAL %RE, usarlos directamente
+                    total_pct_se_val = get_col_value(df, row, ['TOTAL %SE', 'Total %SE', 'TOTAL % SE'], None)
+                    total_pct_re_val = get_col_value(df, row, ['TOTAL %RE', 'Total %RE', 'TOTAL % RE'], None)
+                    
+                    if total_pct_se_val is not None:
+                        total_pct_se = _limpiar_valor_monetario(total_pct_se_val)
+                    if total_pct_re_val is not None:
+                        total_pct_re = _limpiar_valor_monetario(total_pct_re_val)
                 
-                if total_usd == 0:
-                    continue  # Saltar si no hay total USD
+                if total_usd == 0 and total_pct_se == 0 and total_pct_re == 0:
+                    continue  # Saltar si no hay valores
                 
-                # Buscar porcentajes (pueden venir sin espacio: %POSTVENTA)
-                pct_postventa = _limpiar_valor_monetario(get_col_value(df, row, ['% Postventa', '%POSTVENTA', '% POSTVENTA'], 0))
-                pct_servicios = _limpiar_valor_monetario(get_col_value(df, row, ['% Servicios', '%SERVICIOS', '% SERVICIOS'], 0))
-                pct_repuestos = _limpiar_valor_monetario(get_col_value(df, row, ['% Repuestos', '%REPUESTOS', '% REPUESTOS'], 0))
-                
-                total_pct = total_usd * (pct_postventa / 100) if pct_postventa > 0 else 0
-                total_pct_se = total_pct * (pct_servicios / 100) if pct_servicios > 0 else 0
-                total_pct_re = total_pct * (pct_repuestos / 100) if pct_repuestos > 0 else 0
-                
-                # Si hay valores en TOTAL %SE y TOTAL %RE, usarlos directamente
-                total_pct_se_val = get_col_value(df, row, ['TOTAL %SE', 'Total %SE', 'TOTAL % SE'], None)
-                total_pct_re_val = get_col_value(df, row, ['TOTAL %RE', 'Total %RE', 'TOTAL % RE'], None)
-                
-                if total_pct_se_val is not None:
-                    total_pct_se = _limpiar_valor_monetario(total_pct_se_val)
-                if total_pct_re_val is not None:
-                    total_pct_re = _limpiar_valor_monetario(total_pct_re_val)
-                
-                gasto_data = {
-                    'mes': fecha.strftime("%B%y"),
-                    'fecha': fecha,
-                    'sucursal': str(get_col_value(df, row, ['Sucursal', 'SUCURSAL'], '')).strip() or None,
-                    'area': str(get_col_value(df, row, ['Area', 'Área', 'AREA'], '')).strip() or None,
-                    'pct_postventa': pct_postventa,
-                    'pct_servicios': pct_servicios,
-                    'pct_repuestos': pct_repuestos,
-                    'tipo': str(get_col_value(df, row, ['Tipo', 'TIPO'], '')).strip() or None,
-                    'clasificacion': str(get_col_value(df, row, ['Clasificación', 'Clasificacion', 'CLASIFICACION', 'CLASIFICACIÓN'], '')).strip() or None,
-                    'proveedor': str(get_col_value(df, row, ['Proveedor', 'PROVEEDOR'], '')).strip() or None,
-                    'total_pesos': _limpiar_valor_monetario(get_col_value(df, row, ['Total Pesos', 'TOTAL PESOS'], 0)) or None,
-                    'total_usd': total_usd,
-                    'total_pct': total_pct,
-                    'total_pct_se': total_pct_se,
-                    'total_pct_re': total_pct_re,
-                    'detalles': str(get_col_value(df, row, ['Detalles', 'DETALLES'], '')).strip() or None
-                }
+                # Obtener otros campos según el formato
+                if es_formato_exportacion:
+                    mes_val = row.get('mes', '')
+                    if pd.notna(mes_val) and mes_val:
+                        mes = str(mes_val)
+                    else:
+                        mes = fecha.strftime("%B%y")
+                    
+                    gasto_data = {
+                        'mes': mes,
+                        'fecha': fecha,
+                        'sucursal': str(row.get('sucursal', '')).strip() if pd.notna(row.get('sucursal')) else None,
+                        'area': str(row.get('area', '')).strip() if pd.notna(row.get('area')) else None,
+                        'pct_postventa': pct_postventa,
+                        'pct_servicios': pct_servicios,
+                        'pct_repuestos': pct_repuestos,
+                        'tipo': str(row.get('tipo', '')).strip() if pd.notna(row.get('tipo')) else None,
+                        'clasificacion': str(row.get('clasificacion', '')).strip() if pd.notna(row.get('clasificacion')) else None,
+                        'proveedor': str(row.get('proveedor', '')).strip() if pd.notna(row.get('proveedor')) else None,
+                        'total_pesos': float(row.get('total_pesos', 0)) if pd.notna(row.get('total_pesos')) else None,
+                        'total_usd': total_usd,
+                        'total_pct': total_pct,
+                        'total_pct_se': total_pct_se,
+                        'total_pct_re': total_pct_re,
+                        'detalles': str(row.get('detalles', '')).strip() if pd.notna(row.get('detalles')) else None
+                    }
+                else:
+                    gasto_data = {
+                        'mes': fecha.strftime("%B%y"),
+                        'fecha': fecha,
+                        'sucursal': str(get_col_value(df, row, ['Sucursal', 'SUCURSAL'], '')).strip() or None,
+                        'area': str(get_col_value(df, row, ['Area', 'Área', 'AREA'], '')).strip() or None,
+                        'pct_postventa': pct_postventa,
+                        'pct_servicios': pct_servicios,
+                        'pct_repuestos': pct_repuestos,
+                        'tipo': str(get_col_value(df, row, ['Tipo', 'TIPO'], '')).strip() or None,
+                        'clasificacion': str(get_col_value(df, row, ['Clasificación', 'Clasificacion', 'CLASIFICACION', 'CLASIFICACIÓN'], '')).strip() or None,
+                        'proveedor': str(get_col_value(df, row, ['Proveedor', 'PROVEEDOR'], '')).strip() or None,
+                        'total_pesos': _limpiar_valor_monetario(get_col_value(df, row, ['Total Pesos', 'TOTAL PESOS'], 0)) or None,
+                        'total_usd': total_usd,
+                        'total_pct': total_pct,
+                        'total_pct_se': total_pct_se,
+                        'total_pct_re': total_pct_re,
+                        'detalles': str(get_col_value(df, row, ['Detalles', 'DETALLES'], '')).strip() or None
+                    }
                 
                 insert_gasto(gasto_data)
                 count += 1
