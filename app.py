@@ -66,7 +66,7 @@ from calculos_financieros import (
     calcular_factor_absorcion_postventa,
     calcular_punto_equilibrio
 )
-from ai_analysis import get_ai_summary, test_gemini_connection
+from ai_analysis import get_ai_summary
 try:
     from ai_analysis import GEMINI_AVAILABLE
 except ImportError:
@@ -2706,14 +2706,20 @@ elif page == "🤖 Análisis IA":
             if st.sidebar.button("🧪 Probar Conexión Gemini", use_container_width=True, key="test_gemini"):
                 with st.sidebar:
                     with st.spinner("Probando conexión..."):
-                        test_result = test_gemini_connection(gemini_api_key)
-                        if test_result['success']:
-                            st.success(f"✅ {test_result['message']}")
-                            st.caption(f"Modelo: {test_result.get('model', 'N/A')}")
-                        else:
-                            st.error(f"❌ Error: {test_result.get('error', 'Desconocido')}")
-                            if 'Librería' in test_result.get('error', ''):
-                                st.info("💡 Instala la librería: `pip install google-generativeai`")
+                        try:
+                            from ai_analysis import test_gemini_connection
+                            test_result = test_gemini_connection(gemini_api_key)
+                            if test_result['success']:
+                                st.success(f"✅ {test_result['message']}")
+                                st.caption(f"Modelo: {test_result.get('model', 'N/A')}")
+                            else:
+                                st.error(f"❌ Error: {test_result.get('error', 'Desconocido')}")
+                                if 'Librería' in test_result.get('error', ''):
+                                    st.info("💡 Instala la librería: `pip install google-generativeai`")
+                        except ImportError:
+                            st.error("❌ Función de prueba no disponible")
+                        except Exception as e:
+                            st.error(f"❌ Error al probar conexión: {str(e)}")
             
             if st.sidebar.button("🗑️ Eliminar API Key", key="eliminar_gemini_key"):
                 st.session_state['gemini_api_key'] = ''
