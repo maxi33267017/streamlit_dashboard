@@ -479,6 +479,53 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# ==================== AUTENTICACIÓN ====================
+CLAVE_ACCESO = "2815"
+
+def verificar_autenticacion():
+    """Verifica si el usuario está autenticado"""
+    if 'autenticado' not in st.session_state:
+        st.session_state['autenticado'] = False
+    
+    return st.session_state['autenticado']
+
+def mostrar_pantalla_login():
+    """Muestra la pantalla de login"""
+    # Centrar el contenido
+    col1, col2, col3 = st.columns([1, 2, 1])
+    
+    with col2:
+        st.markdown("""
+        <div style='text-align: center; padding: 50px 0;'>
+            <h1 style='color: #1f77b4; margin-bottom: 30px;'>🔐 Acceso al Sistema</h1>
+            <p style='font-size: 18px; color: #666; margin-bottom: 40px;'>
+                Sistema de Gestión de Postventa
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        with st.form("login_form"):
+            clave = st.text_input("🔑 Ingrese la clave de acceso", type="password", placeholder="Clave de acceso")
+            submit = st.form_submit_button("🚪 Ingresar", use_container_width=True)
+            
+            if submit:
+                if clave == CLAVE_ACCESO:
+                    st.session_state['autenticado'] = True
+                    st.rerun()
+                else:
+                    st.error("❌ Clave incorrecta. Intente nuevamente.")
+        
+        st.markdown("""
+        <div style='text-align: center; margin-top: 50px; color: #999; font-size: 12px;'>
+            Sistema de Gestión de Postventa © 2025
+        </div>
+        """, unsafe_allow_html=True)
+
+# Verificar autenticación antes de mostrar el contenido
+if not verificar_autenticacion():
+    mostrar_pantalla_login()
+    st.stop()  # Detener la ejecución si no está autenticado
+
 # Inicializar base de datos
 if 'db_initialized' not in st.session_state:
     init_database()
@@ -486,6 +533,11 @@ if 'db_initialized' not in st.session_state:
 
 # Sidebar navigation
 st.sidebar.title("📊 Gestión Postventa")
+
+# Botón para cerrar sesión en el sidebar
+if st.sidebar.button("🚪 Cerrar Sesión", use_container_width=True, key="cerrar_sesion_btn"):
+    st.session_state['autenticado'] = False
+    st.rerun()
 page = st.sidebar.radio(
     "Navegación",
     ["🏠 Dashboard", "💰 Registrar Venta", "💸 Registrar Gasto", "⚙️ Plantillas Gastos", "📥 Importar Excel", "📋 Ver Registros", "📈 Reportes", "🤖 Análisis IA", "🔍 Probar Extracción PDF"]
