@@ -1,5 +1,6 @@
 """
 Módulo de gestión de base de datos SQLite
+Soporta backup automático y bases de datos persistentes para Streamlit Cloud
 """
 import sqlite3
 import pandas as pd
@@ -8,8 +9,23 @@ import json
 from datetime import datetime
 from pathlib import Path
 import os
+import shutil
 
-DB_PATH = Path("postventa.db")
+# Detectar si estamos en Streamlit Cloud
+IS_STREAMLIT_CLOUD = os.environ.get('STREAMLIT_SERVER_ENVIRONMENT') == 'cloud'
+
+# Configurar ruta de base de datos
+# En Streamlit Cloud, intentar usar un directorio persistente si está disponible
+if IS_STREAMLIT_CLOUD:
+    # Streamlit Cloud tiene un directorio /mount que es persistente
+    # Pero no siempre está disponible, así que usamos el directorio actual con backups
+    DB_PATH = Path("postventa.db")
+    BACKUP_DIR = Path("backups")
+    BACKUP_DIR.mkdir(exist_ok=True)
+else:
+    DB_PATH = Path("postventa.db")
+    BACKUP_DIR = Path("backups")
+    BACKUP_DIR.mkdir(exist_ok=True)
 
 def get_connection():
     """Obtiene una conexión a la base de datos"""
@@ -1069,3 +1085,123 @@ def get_resumen_mensual_analisis_ia(mes: int = None, año: int = None):
             }
     
     return resumen
+
+def crear_backup_db():
+    """
+    Crea un backup de la base de datos.
+    
+    Returns:
+        str: Ruta del archivo de backup creado, o None si falla
+    """
+    if not DB_PATH.exists():
+        return None
+    
+    try:
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        backup_path = BACKUP_DIR / f"postventa_backup_{timestamp}.db"
+        
+        # Copiar archivo de base de datos
+        shutil.copy2(DB_PATH, backup_path)
+        
+        return str(backup_path)
+    except Exception as e:
+        print(f"Error al crear backup: {e}")
+        return None
+
+def restaurar_backup_db(backup_path: str):
+    """
+    Restaura la base de datos desde un backup.
+    
+    Args:
+        backup_path: Ruta del archivo de backup
+    
+    Returns:
+        bool: True si se restauró correctamente, False en caso contrario
+    """
+    try:
+        backup_file = Path(backup_path)
+        if not backup_file.exists():
+            return False
+        
+        # Hacer backup del archivo actual si existe
+        if DB_PATH.exists():
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            old_backup = BACKUP_DIR / f"postventa_old_{timestamp}.db"
+            shutil.copy2(DB_PATH, old_backup)
+        
+        # Restaurar desde backup
+        shutil.copy2(backup_file, DB_PATH)
+        
+        return True
+    except Exception as e:
+        print(f"Error al restaurar backup: {e}")
+        return False
+
+def listar_backups():
+    """
+    Lista todos los backups disponibles.
+    
+    Returns:
+        list: Lista de diccionarios con información de cada backup
+    """
+    backups = []
+    
+    if not BACKUP_DIR.exists():
+        return backups
+    
+    for backup_file in sorted(BACKUP_DIR.glob("postventa_backup_*.db"), reverse=True):
+        try:
+            stat = backup_file.stat()
+            backups.append({
+                'nombre': backup_file.name,
+                'ruta': str(backup_file),
+                'fecha': datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M:%S'),
+                'tamaño': stat.st_size
+            })
+        except Exception:
+            continue
+    
+    return backups
+
+def exportar_db_a_bytes():
+    """
+    Exporta la base de datos completa a bytes para descarga.
+    
+    Returns:
+        bytes: Contenido de la base de datos, o None si falla
+    """
+    if not DB_PATH.exists():
+        return None
+    
+    try:
+        with open(DB_PATH, 'rb') as f:
+            return f.read()
+    except Exception as e:
+        print(f"Error al exportar base de datos: {e}")
+        return None
+
+def importar_db_desde_bytes(db_bytes: bytes):
+    """
+    Importa una base de datos desde bytes.
+    
+    Args:
+        db_bytes: Contenido de la base de datos en bytes
+    
+    Returns:
+        bool: True si se importó correctamente, False en caso contrario
+    """
+    try:
+        # Hacer backup del archivo actual si existe
+        if DB_PATH.exists():
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            old_backup = BACKUP_DIR / f"postventa_old_{timestamp}.db"
+            shutil.copy2(DB_PATH, old_backup)
+        
+        # Escribir nueva base de datos
+        with open(DB_PATH, 'wb') as f:
+            f.write(db_bytes)
+        
+        return True
+    except Exception as e:
+        print(f"Error al importar base de datos: {e}")
+        return False

@@ -58,7 +58,9 @@ from database import (
     insert_plantilla_gasto, update_plantilla_gasto, delete_plantilla_gasto,
     eliminar_todos_los_registros,
     exportar_plantillas_gastos, importar_plantillas_gastos,
-    guardar_analisis_ia, get_historial_analisis_ia, get_resumen_mensual_analisis_ia
+    guardar_analisis_ia, get_historial_analisis_ia, get_resumen_mensual_analisis_ia,
+    crear_backup_db, restaurar_backup_db, listar_backups,
+    exportar_db_a_bytes, importar_db_desde_bytes, IS_STREAMLIT_CLOUD
 )
 from gastos_automaticos import obtener_gastos_totales_con_automaticos
 from calculos_financieros import (
@@ -536,6 +538,10 @@ if not verificar_autenticacion():
 if 'db_initialized' not in st.session_state:
     init_database()
     st.session_state.db_initialized = True
+    
+    # Advertencia sobre persistencia en Streamlit Cloud
+    if IS_STREAMLIT_CLOUD:
+        st.sidebar.warning("⚠️ **Streamlit Cloud**: La base de datos se reinicia con cada deploy. Usa la sección de Backups para guardar tus datos.")
 
 # Sidebar navigation
 st.sidebar.title("📊 Gestión Postventa")
@@ -1669,6 +1675,74 @@ elif page == "📥 Importar Excel":
                     st.rerun()
                 else:
                     st.error(f"❌ Error al eliminar: {resultado.get('error', 'Error desconocido')}")
+    
+    st.divider()
+    
+    # Sección de Backup y Restore
+    st.subheader("💾 Backup y Restore de Base de Datos")
+    
+    if IS_STREAMLIT_CLOUD:
+        st.warning("⚠️ **IMPORTANTE**: En Streamlit Cloud, la base de datos se reinicia con cada deploy. **Haz backup regularmente** para no perder tus datos.")
+    
+    col_backup1, col_backup2 = st.columns(2)
+    
+    with col_backup1:
+        st.write("**📥 Crear Backup**")
+        if st.button("💾 Crear Backup Ahora", help="Crea una copia de seguridad de toda la base de datos"):
+            backup_path = crear_backup_db()
+            if backup_path:
+                st.success(f"✅ Backup creado exitosamente: `{Path(backup_path).name}`")
+                st.info("💡 Descarga el archivo completo de la base de datos abajo para guardarlo fuera de Streamlit Cloud.")
+            else:
+                st.error("❌ Error al crear backup. Verifica que la base de datos exista.")
+        
+        # Descargar base de datos completa
+        db_bytes = exportar_db_a_bytes()
+        if db_bytes:
+            st.download_button(
+                label="📥 Descargar Base de Datos Completa",
+                data=db_bytes,
+                file_name=f"postventa_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db",
+                mime="application/x-sqlite3",
+                help="Descarga la base de datos completa para guardarla fuera de Streamlit Cloud"
+            )
+    
+    with col_backup2:
+        st.write("**📤 Restaurar desde Backup**")
+        archivo_backup = st.file_uploader(
+            "Subir archivo de backup (.db)",
+            type=['db'],
+            help="Sube un archivo de backup para restaurar la base de datos"
+        )
+        
+        if archivo_backup is not None:
+            if st.button("🔄 Restaurar desde Archivo", type="primary"):
+                with st.spinner("Restaurando base de datos..."):
+                    db_bytes_restore = archivo_backup.read()
+                    if importar_db_desde_bytes(db_bytes_restore):
+                        st.success("✅ Base de datos restaurada exitosamente!")
+                        st.info("🔄 Recarga la página para ver los cambios.")
+                        st.rerun()
+                    else:
+                        st.error("❌ Error al restaurar. Verifica que el archivo sea válido.")
+    
+    # Listar backups locales
+    backups = listar_backups()
+    if backups:
+        st.write("**📋 Backups Locales Disponibles:**")
+        for backup in backups[:5]:  # Mostrar solo los últimos 5
+            col1, col2, col3 = st.columns([3, 2, 1])
+            with col1:
+                st.write(f"📄 {backup['nombre']}")
+            with col2:
+                st.caption(f"📅 {backup['fecha']}")
+            with col3:
+                if st.button("🔄 Restaurar", key=f"restore_{backup['nombre']}"):
+                    if restaurar_backup_db(backup['ruta']):
+                        st.success("✅ Backup restaurado! Recarga la página.")
+                        st.rerun()
+                    else:
+                        st.error("❌ Error al restaurar.")
     
     st.divider()
     
