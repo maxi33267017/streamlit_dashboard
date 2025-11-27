@@ -2618,6 +2618,35 @@ elif page == "📈 Reportes":
                 
                 st.divider()
                 
+                # Contar servicios (SE) por sucursal
+                st.write("**🔧 Cantidad de Servicios (SE) por Sucursal**")
+                servicios_por_sucursal = df_ventas[df_ventas['tipo_re_se'] == 'SE'].groupby('sucursal').size().sort_values(ascending=False)
+                
+                if len(servicios_por_sucursal) > 0:
+                    # Mostrar en columnas
+                    num_cols = min(len(servicios_por_sucursal), 4)
+                    cols_servicios = st.columns(num_cols)
+                    
+                    for idx, (sucursal, cantidad) in enumerate(servicios_por_sucursal.items()):
+                        with cols_servicios[idx % num_cols]:
+                            st.metric(
+                                f"🔧 {sucursal if sucursal else 'Sin Sucursal'}",
+                                f"{cantidad} servicios",
+                                help=f"Total de servicios tipo SE realizados en {sucursal if sucursal else 'Sin Sucursal'}"
+                            )
+                    
+                    # Mostrar también en tabla
+                    st.caption("📊 Resumen:")
+                    df_servicios_sucursal = pd.DataFrame({
+                        'Sucursal': servicios_por_sucursal.index,
+                        'Cantidad de Servicios': servicios_por_sucursal.values
+                    })
+                    st.dataframe(df_servicios_sucursal, use_container_width=True, hide_index=True)
+                else:
+                    st.info("📭 No hay servicios (SE) registrados en el período seleccionado")
+                
+                st.divider()
+                
                 # Mostrar métricas de otros componentes
                 st.write("**💰 Otros Componentes de Ventas**")
                 col1, col2, col3 = st.columns(3)
