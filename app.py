@@ -2821,29 +2821,184 @@ elif page == "📈 Reportes":
             if len(df_ventas) > 0 and len(df_gastos) > 0:
                 ingresos_servicios = df_ventas[df_ventas['tipo_re_se'] == 'SE']['total'].sum()
                 ingresos_repuestos = df_ventas[df_ventas['tipo_re_se'] == 'RE']['total'].sum()
-                gastos_se = df_gastos['total_pct_se'].sum()
-                gastos_re = df_gastos['total_pct_re'].sum()
                 
-                st.write("**Análisis por Segmento**")
+                # Obtener gastos totales con automáticos
+                gastos_totales = obtener_gastos_totales_con_automaticos(str(fecha_inicio), str(fecha_fin))
+                gastos_se = gastos_totales['gastos_postventa_total'] * (gastos_totales['gastos_registrados']['total_pct_se'].sum() / gastos_totales['gastos_postventa_total'] if gastos_totales['gastos_postventa_total'] > 0 else 0)
+                gastos_re = gastos_totales['gastos_postventa_total'] * (gastos_totales['gastos_registrados']['total_pct_re'].sum() / gastos_totales['gastos_postventa_total'] if gastos_totales['gastos_postventa_total'] > 0 else 0)
+                
+                # Calcular gastos SE y RE correctamente
+                df_gastos_totales = pd.concat([
+                    gastos_totales['gastos_registrados'],
+                    gastos_totales['gastos_automaticos']
+                ], ignore_index=True) if len(gastos_totales['gastos_automaticos']) > 0 else gastos_totales['gastos_registrados']
+                
+                gastos_se_total = df_gastos_totales['total_pct_se'].sum() if len(df_gastos_totales) > 0 else 0
+                gastos_re_total = df_gastos_totales['total_pct_re'].sum() if len(df_gastos_totales) > 0 else 0
+                
+                st.write("**Análisis por Segmento (Total)**")
                 
                 analisis_data = {
-                    'Segmento': ['Servicios', 'Repuestos', 'Total'],
+                    'Segmento': ['Servicios (SE)', 'Repuestos (RE)', 'Total'],
                     'Ingresos': [ingresos_servicios, ingresos_repuestos, ingresos_servicios + ingresos_repuestos],
-                    'Gastos': [gastos_se, gastos_re, gastos_se + gastos_re],
+                    'Gastos': [gastos_se_total, gastos_re_total, gastos_se_total + gastos_re_total],
                     'Resultado': [
-                        ingresos_servicios - gastos_se,
-                        ingresos_repuestos - gastos_re,
-                        (ingresos_servicios + ingresos_repuestos) - (gastos_se + gastos_re)
+                        ingresos_servicios - gastos_se_total,
+                        ingresos_repuestos - gastos_re_total,
+                        (ingresos_servicios + ingresos_repuestos) - (gastos_se_total + gastos_re_total)
                     ]
                 }
                 
                 df_analisis = pd.DataFrame(analisis_data)
                 df_analisis['Margen %'] = (df_analisis['Resultado'] / df_analisis['Ingresos'] * 100).round(2)
-                # Formatear columnas monetarias
-                df_analisis['Ingresos'] = df_analisis['Ingresos'].apply(lambda x: formatear_moneda(x))
-                df_analisis['Gastos'] = df_analisis['Gastos'].apply(lambda x: formatear_moneda(x))
-                df_analisis['Resultado'] = df_analisis['Resultado'].apply(lambda x: formatear_moneda(x))
-                st.dataframe(df_analisis, use_container_width=True)
+                df_analisis['Margen %'] = df_analisis['Margen %'].fillna(0)
+                
+                # Guardar valores numéricos para cálculos
+                ingresos_servicios_num = ingresos_servicios
+                ingresos_repuestos_num = ingresos_repuestos
+                gastos_se_num = gastos_se_total
+                gastos_re_num = gastos_re_total
+                
+                # Formatear columnas monetarias para mostrar
+                df_analisis_display = df_analisis.copy()
+                df_analisis_display['Ingresos'] = df_analisis_display['Ingresos'].apply(lambda x: formatear_moneda(x))
+                df_analisis_display['Gastos'] = df_analisis_display['Gastos'].apply(lambda x: formatear_moneda(x))
+                df_analisis_display['Resultado'] = df_analisis_display['Resultado'].apply(lambda x: formatear_moneda(x))
+                df_analisis_display['Margen %'] = df_analisis_display['Margen %'].apply(lambda x: f"{x:.2f}%")
+                st.dataframe(df_analisis_display, use_container_width=True, hide_index=True)
+                
+                st.divider()
+                
+                # Análisis por Sucursal
+                st.write("**📊 Análisis por Sucursal**")
+                
+                todas_sucursales = sorted(df_ventas['sucursal'].dropna().unique().tolist())
+                
+                if len(todas_sucursales) > 0:
+                    datos_sucursal = []
+                    
+                    for sucursal in todas_sucursales:
+                        # Ventas por sucursal
+                        ventas_sucursal = df_ventas[df_ventas['sucursal'] == sucursal]
+                        ventas_se_sucursal = ventas_sucursal[ventas_sucursal['tipo_re_se'] == 'SE']
+                        ventas_re_sucursal = ventas_sucursal[ventas_sucursal['tipo_re_se'] == 'RE']
+                        
+                        ingresos_se_sucursal = ventas_se_sucursal['total'].sum() if len(ventas_se_sucursal) > 0 else 0
+                        ingresos_re_sucursal = ventas_re_sucursal['total'].sum() if len(ventas_re_sucursal) > 0 else 0
+                        ingresos_totales_sucursal = ingresos_se_sucursal + ingresos_re_sucursal
+                        
+                        # Cantidad de ventas
+                        cantidad_se_sucursal = len(ventas_se_sucursal)
+                        cantidad_re_sucursal = len(ventas_re_sucursal)
+                        cantidad_total_sucursal = cantidad_se_sucursal + cantidad_re_sucursal
+                        
+                        # Ticket promedio
+                        ticket_promedio_se_sucursal = (ingresos_se_sucursal / cantidad_se_sucursal) if cantidad_se_sucursal > 0 else 0
+                        ticket_promedio_re_sucursal = (ingresos_re_sucursal / cantidad_re_sucursal) if cantidad_re_sucursal > 0 else 0
+                        ticket_promedio_total_sucursal = (ingresos_totales_sucursal / cantidad_total_sucursal) if cantidad_total_sucursal > 0 else 0
+                        
+                        # Gastos por sucursal
+                        gastos_sucursal = df_gastos_totales[df_gastos_totales['sucursal'] == sucursal] if len(df_gastos_totales) > 0 else pd.DataFrame()
+                        gastos_se_sucursal = gastos_sucursal['total_pct_se'].sum() if len(gastos_sucursal) > 0 else 0
+                        gastos_re_sucursal = gastos_sucursal['total_pct_re'].sum() if len(gastos_sucursal) > 0 else 0
+                        gastos_totales_sucursal = gastos_se_sucursal + gastos_re_sucursal
+                        
+                        # Resultado
+                        resultado_se_sucursal = ingresos_se_sucursal - gastos_se_sucursal
+                        resultado_re_sucursal = ingresos_re_sucursal - gastos_re_sucursal
+                        resultado_total_sucursal = ingresos_totales_sucursal - gastos_totales_sucursal
+                        
+                        # Margen %
+                        margen_se_sucursal = (resultado_se_sucursal / ingresos_se_sucursal * 100) if ingresos_se_sucursal > 0 else 0
+                        margen_re_sucursal = (resultado_re_sucursal / ingresos_re_sucursal * 100) if ingresos_re_sucursal > 0 else 0
+                        margen_total_sucursal = (resultado_total_sucursal / ingresos_totales_sucursal * 100) if ingresos_totales_sucursal > 0 else 0
+                        
+                        datos_sucursal.append({
+                            'Sucursal': sucursal,
+                            'Ingresos SE': ingresos_se_sucursal,
+                            'Ingresos RE': ingresos_re_sucursal,
+                            'Ingresos Total': ingresos_totales_sucursal,
+                            'Cantidad SE': cantidad_se_sucursal,
+                            'Cantidad RE': cantidad_re_sucursal,
+                            'Cantidad Total': cantidad_total_sucursal,
+                            'Ticket Promedio SE': ticket_promedio_se_sucursal,
+                            'Ticket Promedio RE': ticket_promedio_re_sucursal,
+                            'Ticket Promedio Total': ticket_promedio_total_sucursal,
+                            'Gastos SE': gastos_se_sucursal,
+                            'Gastos RE': gastos_re_sucursal,
+                            'Gastos Total': gastos_totales_sucursal,
+                            'Resultado SE': resultado_se_sucursal,
+                            'Resultado RE': resultado_re_sucursal,
+                            'Resultado Total': resultado_total_sucursal,
+                            'Margen % SE': margen_se_sucursal,
+                            'Margen % RE': margen_re_sucursal,
+                            'Margen % Total': margen_total_sucursal
+                        })
+                    
+                    # Crear DataFrame
+                    df_analisis_sucursal = pd.DataFrame(datos_sucursal)
+                    
+                    # Mostrar tabla resumen compacta
+                    st.write("**📋 Resumen por Sucursal**")
+                    df_resumen_sucursal = df_analisis_sucursal[[
+                        'Sucursal', 'Ingresos Total', 'Gastos Total', 'Resultado Total', 'Margen % Total',
+                        'Cantidad SE', 'Cantidad RE', 'Cantidad Total'
+                    ]].copy()
+                    
+                    # Formatear valores
+                    df_resumen_sucursal['Ingresos Total'] = df_resumen_sucursal['Ingresos Total'].apply(lambda x: formatear_moneda(x))
+                    df_resumen_sucursal['Gastos Total'] = df_resumen_sucursal['Gastos Total'].apply(lambda x: formatear_moneda(x))
+                    df_resumen_sucursal['Resultado Total'] = df_resumen_sucursal['Resultado Total'].apply(lambda x: formatear_moneda(x))
+                    df_resumen_sucursal['Margen % Total'] = df_resumen_sucursal['Margen % Total'].apply(lambda x: f"{x:.2f}%")
+                    df_resumen_sucursal.columns = ['Sucursal', '💰 Ingresos', '💸 Gastos', '📊 Resultado', '📈 Margen %', '🔧 SE', '📦 RE', '📋 Total']
+                    
+                    st.dataframe(df_resumen_sucursal, use_container_width=True, hide_index=True)
+                    
+                    st.divider()
+                    
+                    # Desglose detallado por sucursal
+                    st.write("**🔍 Desglose Detallado por Sucursal**")
+                    
+                    for sucursal in todas_sucursales:
+                        datos = df_analisis_sucursal[df_analisis_sucursal['Sucursal'] == sucursal].iloc[0]
+                        
+                        with st.expander(f"🏢 {sucursal} - {formatear_moneda(datos['Ingresos Total'])}", expanded=False):
+                            col1, col2 = st.columns(2)
+                            
+                            with col1:
+                                st.write("**💰 Ventas de Servicios (SE)**")
+                                st.metric("Ingresos", formatear_moneda(datos['Ingresos SE']))
+                                st.metric("Cantidad", f"{int(datos['Cantidad SE'])} servicios")
+                                st.metric("Ticket Promedio", formatear_moneda(datos['Ticket Promedio SE']))
+                                st.metric("Gastos", formatear_moneda(datos['Gastos SE']))
+                                st.metric("Resultado", formatear_moneda(datos['Resultado SE']), 
+                                         delta=f"{datos['Margen % SE']:.2f}%")
+                            
+                            with col2:
+                                st.write("**📦 Ventas de Repuestos (RE)**")
+                                st.metric("Ingresos", formatear_moneda(datos['Ingresos RE']))
+                                st.metric("Cantidad", f"{int(datos['Cantidad RE'])} ventas")
+                                st.metric("Ticket Promedio", formatear_moneda(datos['Ticket Promedio RE']))
+                                st.metric("Gastos", formatear_moneda(datos['Gastos RE']))
+                                st.metric("Resultado", formatear_moneda(datos['Resultado RE']), 
+                                         delta=f"{datos['Margen % RE']:.2f}%")
+                            
+                            st.divider()
+                            
+                            st.write("**📊 Totales**")
+                            col_tot1, col_tot2, col_tot3 = st.columns(3)
+                            with col_tot1:
+                                st.metric("Ingresos Total", formatear_moneda(datos['Ingresos Total']))
+                                st.caption(f"SE: {formatear_moneda(datos['Ingresos SE'])} | RE: {formatear_moneda(datos['Ingresos RE'])}")
+                            with col_tot2:
+                                st.metric("Gastos Total", formatear_moneda(datos['Gastos Total']))
+                                st.caption(f"SE: {formatear_moneda(datos['Gastos SE'])} | RE: {formatear_moneda(datos['Gastos RE'])}")
+                            with col_tot3:
+                                resultado_color = "✅" if datos['Resultado Total'] >= 0 else "❌"
+                                st.metric("Resultado Total", f"{resultado_color} {formatear_moneda(datos['Resultado Total'])}", 
+                                         delta=f"{datos['Margen % Total']:.2f}%")
+                else:
+                    st.info("No hay datos de sucursales para mostrar")
             else:
                 st.info("Se necesitan datos de ventas y gastos para el análisis")
         
