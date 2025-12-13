@@ -61,8 +61,24 @@ NAVIGATION = {
 st.sidebar.title("Menú principal")
 current_page = st.sidebar.radio("Navegación", list(NAVIGATION.keys()))
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY")
-# Indicador explícito de qué base de datos está activa
-st.sidebar.info("DB: Postgres" if database.USE_POSTGRES else "DB: SQLite")
+
+# Indicadores de entorno / DB para debug en Cloud
+def _render_env_debug():
+    secret_has_postgres = False
+    secret_postgres_keys: list[str] = []
+    try:
+        secret_has_postgres = "postgres" in st.secrets
+        if secret_has_postgres and isinstance(st.secrets["postgres"], dict):
+            secret_postgres_keys = list(st.secrets["postgres"].keys())
+    except Exception:
+        secret_has_postgres = False
+        secret_postgres_keys = []
+    st.sidebar.info("DB: Postgres" if database.USE_POSTGRES else "DB: SQLite")
+    st.sidebar.caption(f"Secret [postgres] presente: {secret_has_postgres}")
+    if secret_postgres_keys:
+        st.sidebar.caption(f"Claves en postgres: {', '.join(secret_postgres_keys)}")
+
+_render_env_debug()
 
 def get_summary(period_label: str = "Período completo") -> dict:
     df_ventas = get_ventas()
