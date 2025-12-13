@@ -18,9 +18,10 @@ def obtener_gastos_automaticos(fecha_inicio: str = None, fecha_fin: str = None) 
     if len(df_ventas) == 0:
         return pd.DataFrame()
     
-    # Asegurar que la columna fecha esté en formato datetime
+    # Asegurar que la columna fecha esté en formato datetime; coerciar inválidos
     if 'fecha' in df_ventas.columns:
-        df_ventas['fecha'] = pd.to_datetime(df_ventas['fecha'])
+        df_ventas['fecha'] = pd.to_datetime(df_ventas['fecha'], errors='coerce')
+        df_ventas = df_ventas.dropna(subset=['fecha'])
     
     gastos_automaticos = []
     
