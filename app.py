@@ -19,6 +19,7 @@ from datetime import date, datetime
 from fpdf import FPDF
 from gastos_automaticos import obtener_gastos_totales_con_automaticos
 from ai_analysis import get_ai_summary
+import database
 
 from database import (
     delete_gasto,
@@ -60,6 +61,8 @@ NAVIGATION = {
 st.sidebar.title("Menú principal")
 current_page = st.sidebar.radio("Navegación", list(NAVIGATION.keys()))
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY")
+# Indicador explícito de qué base de datos está activa
+st.sidebar.info("DB: Postgres" if database.USE_POSTGRES else "DB: SQLite")
 
 def get_summary(period_label: str = "Período completo") -> dict:
     df_ventas = get_ventas()

@@ -14,8 +14,10 @@ import pandas as pd
 
 try:
     import streamlit as st  # Disponible cuando la app corre en Streamlit
+    from streamlit.errors import StreamlitSecretNotFoundError
 except ModuleNotFoundError:
     st = None
+    StreamlitSecretNotFoundError = None
 
 
 def _load_postgres_url():
@@ -28,8 +30,15 @@ def _load_postgres_url():
         return url
 
     secrets_cfg = None
-    if st is not None and "postgres" in st.secrets:
-        secrets_cfg = st.secrets["postgres"]
+    if st is not None:
+        try:
+            if "postgres" in st.secrets:
+                secrets_cfg = st.secrets["postgres"]
+        except StreamlitSecretNotFoundError:
+            # Sin archivo de secrets disponible: usar SQLite
+            return None
+        except Exception:
+            secrets_cfg = None
 
     if secrets_cfg:
         if isinstance(secrets_cfg, str):
