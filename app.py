@@ -81,8 +81,15 @@ def get_summary(period_label: str = "Período completo") -> dict:
         "gastos_count": len(df_gastos),
     }
 
-def format_currency(value: float) -> str:
-    return f"${value:,.2f}"
+def format_currency(value) -> str:
+    """Formatea a moneda; acepta float, int, Decimal o str numérico."""
+    try:
+        num = pd.to_numeric(value, errors="coerce")
+    except Exception:
+        num = None
+    if num is None or (hasattr(num, "isna") and pd.isna(num)):
+        num = 0.0
+    return f"${float(num):,.2f}"
 
 
 def format_percentage(value: float) -> str:
