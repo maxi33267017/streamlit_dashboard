@@ -77,6 +77,15 @@ def _render_env_debug():
     st.sidebar.caption(f"Secret [postgres] presente: {secret_has_postgres}")
     if secret_postgres_keys:
         st.sidebar.caption(f"Claves en postgres: {', '.join(secret_postgres_keys)}")
+    # Contadores rápidos para verificar lectura de datos
+    try:
+        st.sidebar.caption(f"Ventas: {len(get_ventas())}")
+    except Exception:
+        st.sidebar.caption("Ventas: error al leer")
+    try:
+        st.sidebar.caption(f"Gastos: {len(get_gastos())}")
+    except Exception:
+        st.sidebar.caption("Gastos: error al leer")
 
 _render_env_debug()
 
@@ -103,7 +112,7 @@ def format_currency(value) -> str:
         num = pd.to_numeric(value, errors="coerce")
     except Exception:
         num = None
-    if num is None or (hasattr(num, "isna") and pd.isna(num)):
+    if num is None or pd.isna(num) or (hasattr(num, "isna") and pd.isna(num)):
         num = 0.0
     return f"${float(num):,.2f}"
 
