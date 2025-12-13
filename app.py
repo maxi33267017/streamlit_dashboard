@@ -1925,18 +1925,16 @@ def get_month_to_date_overview(reference_date: date | None = None) -> dict:
     end_str = today.isoformat()
 
     df_ventas = get_ventas(start_str, end_str)
+    total_bruto = 0.0
     if len(df_ventas):
-        # Asegurar numérico para evitar errores si la columna es object/str
         total_bruto = pd.to_numeric(df_ventas.get("total"), errors="coerce").fillna(0).sum()
-    else:
-        total_bruto = 0.0
-    iibb = total_bruto * 0.045
-    total_neto = total_bruto - iibb
+    iibb = float(total_bruto) * 0.045
+    total_neto = float(total_bruto) - iibb
 
     gastos_totales = obtener_gastos_totales_con_automaticos(start_str, end_str)
-    gastos_postventa = gastos_totales.get("gastos_postventa_total", 0.0)
+    gastos_postventa = float(gastos_totales.get("gastos_postventa_total", 0.0) or 0.0)
 
-    resultado = total_neto - gastos_postventa
+    resultado = float(total_neto) - gastos_postventa
 
     return {
         "bruto": total_bruto,
