@@ -350,6 +350,16 @@ def render_reports_gastos():
     gastos_totales = obtener_gastos_totales_con_automaticos(str(fecha_inicio), str(fecha_fin))
     df_gastos_calc = gastos_totales["gastos_automaticos"]
 
+    def _coerce_numeric(df, cols):
+        for c in cols:
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors="coerce")
+        return df
+
+    num_cols = ["total_pct", "total_pct_se", "total_pct_re", "total_usd", "total_pesos"]
+    df_gastos = _coerce_numeric(df_gastos, num_cols)
+    df_gastos_calc = _coerce_numeric(df_gastos_calc, num_cols)
+
     if len(df_gastos) == 0 and len(df_gastos_calc) == 0:
         st.info("No hay gastos para el período seleccionado.")
         return
@@ -1933,13 +1943,17 @@ def get_month_to_date_overview(reference_date: date | None = None) -> dict:
 
     gastos_totales = obtener_gastos_totales_con_automaticos(start_str, end_str)
     gastos_val = gastos_totales.get("gastos_postventa_total", 0.0)
+    # Manejar scalars, Series o listas con coerción robusta
     try:
-        if not np.isscalar(gastos_val):
-            gastos_postventa = float(pd.to_numeric(gastos_val, errors="coerce").fillna(0).sum())
+        if np.isscalar(gastos_val):
+            gastos_postventa = float(pd.to_numeric(gastos_val, errors="coerce") or 0.0)
         else:
-            gastos_postventa = float(gastos_val or 0.0)
+            gastos_postventa = float(pd.to_numeric(gastos_val, errors="coerce").fillna(0).sum())
     except Exception:
-        gastos_postventa = float(pd.to_numeric(gastos_val, errors="coerce").sum()) if gastos_val is not None else 0.0
+        try:
+            gastos_postventa = float(pd.to_numeric(gastos_val, errors="coerce").fillna(0).sum())
+        except Exception:
+            gastos_postventa = 0.0
 
     resultado = float(total_neto) - float(gastos_postventa)
 
