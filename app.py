@@ -1925,7 +1925,11 @@ def get_month_to_date_overview(reference_date: date | None = None) -> dict:
     end_str = today.isoformat()
 
     df_ventas = get_ventas(start_str, end_str)
-    total_bruto = df_ventas["total"].sum() if len(df_ventas) else 0.0
+    if len(df_ventas):
+        # Asegurar numérico para evitar errores si la columna es object/str
+        total_bruto = pd.to_numeric(df_ventas.get("total"), errors="coerce").fillna(0).sum()
+    else:
+        total_bruto = 0.0
     iibb = total_bruto * 0.045
     total_neto = total_bruto - iibb
 
