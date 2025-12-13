@@ -1,34 +1,280 @@
 """
-Módulo de gestión de base de datos SQLite
-Soporta backup automático y bases de datos persistentes para Streamlit Cloud
+Módulo de gestión de base de datos con soporte para SQLite y PostgreSQL.
+Soporta backup automático y bases de datos persistentes para Streamlit Cloud.
 """
-import sqlite3
-import pandas as pd
-import re
+import os
 import json
+import re
+import shutil
+import sqlite3
 from datetime import datetime
 from pathlib import Path
-import os
-import shutil
+
+import pandas as pd
+
+try:
+    import streamlit as st  # Disponible cuando la app corre en Streamlit
+except ModuleNotFoundError:
+    st = None
+
+
+def _load_postgres_url():
+    """
+    Construye la URL de conexión a PostgreSQL leyendo primero variables de entorno
+    y luego st.secrets['postgres'] (si Streamlit está disponible).
+    """
+    url = os.environ.get("POSTGRES_URL") or os.environ.get("DATABASE_URL")
+    if url:
+        return url
+
+    secrets_cfg = None
+    if st is not None and "postgres" in st.secrets:
+        secrets_cfg = st.secrets["postgres"]
+
+    if secrets_cfg:
+        if isinstance(secrets_cfg, str):
+            return secrets_cfg
+        if "url" in secrets_cfg:
+            return secrets_cfg["url"]
+        host = secrets_cfg.get("host")
+        database = secrets_cfg.get("database")
+        user = secrets_cfg.get("user")
+        password = secrets_cfg.get("password")
+        port = secrets_cfg.get("port", 5432)
+        sslmode = secrets_cfg.get("sslmode", "require")
+        if host and database and user and password:
+            return f"postgresql://{user}:{password}@{host}:{port}/{database}?sslmode={sslmode}"
+    return None
+
+
+POSTGRES_URL = _load_postgres_url()
+USE_POSTGRES = bool(POSTGRES_URL)
+
+if USE_POSTGRES:
+    try:
+        import psycopg2
+        import psycopg2.extras
+    except ImportError as exc:
+        raise RuntimeError(
+            "psycopg2-binary es requerido para conectarse a PostgreSQL. "
+            "Agrega la dependencia e instala los requirements."
+        ) from exc
+
 
 # Detectar si estamos en Streamlit Cloud
-IS_STREAMLIT_CLOUD = os.environ.get('STREAMLIT_SERVER_ENVIRONMENT') == 'cloud'
+IS_STREAMLIT_CLOUD = os.environ.get("STREAMLIT_SERVER_ENVIRONMENT") == "cloud"
 
-# Configurar ruta de base de datos
-# En Streamlit Cloud, intentar usar un directorio persistente si está disponible
-if IS_STREAMLIT_CLOUD:
-    # Streamlit Cloud tiene un directorio /mount que es persistente
-    # Pero no siempre está disponible, así que usamos el directorio actual con backups
-    DB_PATH = Path("postventa.db")
-    BACKUP_DIR = Path("backups")
-    BACKUP_DIR.mkdir(exist_ok=True)
-else:
-    DB_PATH = Path("postventa.db")
-    BACKUP_DIR = Path("backups")
-    BACKUP_DIR.mkdir(exist_ok=True)
+# Configurar ruta de base de datos SQLite (fallback local)
+DB_PATH = Path("postventa.db")
+BACKUP_DIR = Path("backups")
+BACKUP_DIR.mkdir(exist_ok=True)
+
+
+VENTAS_TABLE_SQLITE = """
+    CREATE TABLE IF NOT EXISTS ventas (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        mes TEXT,
+        fecha DATE NOT NULL,
+        sucursal TEXT,
+        cliente TEXT,
+        pin TEXT,
+        comprobante TEXT,
+        tipo_comprobante TEXT,
+        trabajo TEXT,
+        n_comprobante TEXT,
+        tipo_re_se TEXT,
+        mano_obra REAL DEFAULT 0,
+        asistencia REAL DEFAULT 0,
+        repuestos REAL DEFAULT 0,
+        terceros REAL DEFAULT 0,
+        descuento REAL DEFAULT 0,
+        total REAL NOT NULL,
+        detalles TEXT,
+        archivo_comprobante TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+"""
+
+VENTAS_TABLE_PG = """
+    CREATE TABLE IF NOT EXISTS ventas (
+        id SERIAL PRIMARY KEY,
+        mes TEXT,
+        fecha DATE NOT NULL,
+        sucursal TEXT,
+        cliente TEXT,
+        pin TEXT,
+        comprobante TEXT,
+        tipo_comprobante TEXT,
+        trabajo TEXT,
+        n_comprobante TEXT,
+        tipo_re_se TEXT,
+        mano_obra DOUBLE PRECISION DEFAULT 0,
+        asistencia DOUBLE PRECISION DEFAULT 0,
+        repuestos DOUBLE PRECISION DEFAULT 0,
+        terceros DOUBLE PRECISION DEFAULT 0,
+        descuento DOUBLE PRECISION DEFAULT 0,
+        total DOUBLE PRECISION NOT NULL,
+        detalles TEXT,
+        archivo_comprobante TEXT,
+        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+    )
+"""
+
+GASTOS_TABLE_SQLITE = """
+    CREATE TABLE IF NOT EXISTS gastos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        mes TEXT,
+        fecha DATE NOT NULL,
+        sucursal TEXT,
+        area TEXT,
+        pct_postventa REAL DEFAULT 0,
+        pct_servicios REAL DEFAULT 0,
+        pct_repuestos REAL DEFAULT 0,
+        tipo TEXT,
+        clasificacion TEXT,
+        proveedor TEXT,
+        total_pesos REAL,
+        total_usd REAL NOT NULL,
+        total_pct REAL,
+        total_pct_se REAL,
+        total_pct_re REAL,
+        detalles TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+"""
+
+GASTOS_TABLE_PG = """
+    CREATE TABLE IF NOT EXISTS gastos (
+        id SERIAL PRIMARY KEY,
+        mes TEXT,
+        fecha DATE NOT NULL,
+        sucursal TEXT,
+        area TEXT,
+        pct_postventa DOUBLE PRECISION DEFAULT 0,
+        pct_servicios DOUBLE PRECISION DEFAULT 0,
+        pct_repuestos DOUBLE PRECISION DEFAULT 0,
+        tipo TEXT,
+        clasificacion TEXT,
+        proveedor TEXT,
+        total_pesos DOUBLE PRECISION,
+        total_usd DOUBLE PRECISION NOT NULL,
+        total_pct DOUBLE PRECISION,
+        total_pct_se DOUBLE PRECISION,
+        total_pct_re DOUBLE PRECISION,
+        detalles TEXT,
+        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+    )
+"""
+
+PLANTILLAS_TABLE_SQLITE = """
+    CREATE TABLE IF NOT EXISTS plantillas_gastos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nombre TEXT NOT NULL UNIQUE,
+        descripcion TEXT,
+        sucursal TEXT,
+        area TEXT,
+        pct_postventa REAL DEFAULT 0,
+        pct_servicios REAL DEFAULT 0,
+        pct_repuestos REAL DEFAULT 0,
+        tipo TEXT,
+        clasificacion TEXT,
+        proveedor TEXT,
+        detalles TEXT,
+        activa INTEGER DEFAULT 1,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+"""
+
+PLANTILLAS_TABLE_PG = """
+    CREATE TABLE IF NOT EXISTS plantillas_gastos (
+        id SERIAL PRIMARY KEY,
+        nombre TEXT NOT NULL UNIQUE,
+        descripcion TEXT,
+        sucursal TEXT,
+        area TEXT,
+        pct_postventa DOUBLE PRECISION DEFAULT 0,
+        pct_servicios DOUBLE PRECISION DEFAULT 0,
+        pct_repuestos DOUBLE PRECISION DEFAULT 0,
+        tipo TEXT,
+        clasificacion TEXT,
+        proveedor TEXT,
+        detalles TEXT,
+        activa BOOLEAN DEFAULT TRUE,
+        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+    )
+"""
+
+HISTORIAL_TABLE_SQLITE = """
+    CREATE TABLE IF NOT EXISTS historial_analisis_ia (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fecha_hora TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        tipo_analisis TEXT NOT NULL,
+        fuente TEXT NOT NULL,
+        contenido TEXT NOT NULL,
+        metadata TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+"""
+
+HISTORIAL_TABLE_PG = """
+    CREATE TABLE IF NOT EXISTS historial_analisis_ia (
+        id SERIAL PRIMARY KEY,
+        fecha_hora TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        tipo_analisis TEXT NOT NULL,
+        fuente TEXT NOT NULL,
+        contenido TEXT NOT NULL,
+        metadata TEXT,
+        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+    )
+"""
+
+
+def _prepare_query(query: str) -> str:
+    if USE_POSTGRES:
+        return query.replace("?", "%s")
+    return query
+
+
+def _convert_params(params):
+    if not USE_POSTGRES or params is None:
+        return params
+    if isinstance(params, list):
+        return tuple(params)
+    return params
+
+
+def _execute(cursor, query: str, params=None):
+    query = _prepare_query(query)
+    if params is None:
+        cursor.execute(query)
+    else:
+        cursor.execute(query, _convert_params(params))
+
+
+def _read_sql(query: str, conn, params=None):
+    query = _prepare_query(query)
+    return pd.read_sql_query(query, conn, params=_convert_params(params))
+
+
+def _fetch_scalar(cursor, default=0):
+    row = cursor.fetchone()
+    if row is None:
+        return default
+    if isinstance(row, dict):
+        return next(iter(row.values()))
+    return row[0]
+
 
 def get_connection():
     """Obtiene una conexión a la base de datos"""
+    if USE_POSTGRES:
+        conn = psycopg2.connect(
+            POSTGRES_URL,
+            cursor_factory=psycopg2.extras.RealDictCursor,
+        )
+        return conn
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
@@ -37,96 +283,23 @@ def init_database():
     """Inicializa las tablas de la base de datos"""
     conn = get_connection()
     cursor = conn.cursor()
-    
-    # Tabla de ventas
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS ventas (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            mes TEXT,
-            fecha DATE NOT NULL,
-            sucursal TEXT,
-            cliente TEXT,
-            pin TEXT,
-            comprobante TEXT,
-            tipo_comprobante TEXT,
-            trabajo TEXT,
-            n_comprobante TEXT,
-            tipo_re_se TEXT,
-            mano_obra REAL DEFAULT 0,
-            asistencia REAL DEFAULT 0,
-            repuestos REAL DEFAULT 0,
-            terceros REAL DEFAULT 0,
-            descuento REAL DEFAULT 0,
-            total REAL NOT NULL,
-            detalles TEXT,
-            archivo_comprobante TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    
-    # Agregar columna archivo_comprobante si no existe (para bases de datos existentes)
-    try:
-        cursor.execute("ALTER TABLE ventas ADD COLUMN archivo_comprobante TEXT")
-    except sqlite3.OperationalError:
-        pass  # La columna ya existe
-    
-    # Tabla de gastos
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS gastos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            mes TEXT,
-            fecha DATE NOT NULL,
-            sucursal TEXT,
-            area TEXT,
-            pct_postventa REAL DEFAULT 0,
-            pct_servicios REAL DEFAULT 0,
-            pct_repuestos REAL DEFAULT 0,
-            tipo TEXT,
-            clasificacion TEXT,
-            proveedor TEXT,
-            total_pesos REAL,
-            total_usd REAL NOT NULL,
-            total_pct REAL,
-            total_pct_se REAL,
-            total_pct_re REAL,
-            detalles TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    
-    # Tabla de plantillas de gastos
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS plantillas_gastos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            nombre TEXT NOT NULL UNIQUE,
-            descripcion TEXT,
-            sucursal TEXT,
-            area TEXT,
-            pct_postventa REAL DEFAULT 0,
-            pct_servicios REAL DEFAULT 0,
-            pct_repuestos REAL DEFAULT 0,
-            tipo TEXT,
-            clasificacion TEXT,
-            proveedor TEXT,
-            detalles TEXT,
-            activa INTEGER DEFAULT 1,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    
-    # Tabla de historial de análisis IA
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS historial_analisis_ia (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            fecha_hora TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            tipo_analisis TEXT NOT NULL,
-            fuente TEXT NOT NULL,
-            contenido TEXT NOT NULL,
-            metadata TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
+
+    if USE_POSTGRES:
+        _execute(cursor, VENTAS_TABLE_PG)
+        _execute(cursor, "ALTER TABLE IF EXISTS ventas ADD COLUMN IF NOT EXISTS archivo_comprobante TEXT")
+        _execute(cursor, GASTOS_TABLE_PG)
+        _execute(cursor, PLANTILLAS_TABLE_PG)
+        _execute(cursor, HISTORIAL_TABLE_PG)
+    else:
+        _execute(cursor, VENTAS_TABLE_SQLITE)
+        # Agregar columna archivo_comprobante si no existe (para bases de datos existentes)
+        try:
+            _execute(cursor, "ALTER TABLE ventas ADD COLUMN archivo_comprobante TEXT")
+        except sqlite3.OperationalError:
+            pass  # La columna ya existe
+        _execute(cursor, GASTOS_TABLE_SQLITE)
+        _execute(cursor, PLANTILLAS_TABLE_SQLITE)
+        _execute(cursor, HISTORIAL_TABLE_SQLITE)
     
     conn.commit()
     conn.close()
@@ -148,7 +321,7 @@ def get_ventas(fecha_inicio=None, fecha_fin=None):
     
     query += " ORDER BY fecha DESC, id DESC"
     
-    df = pd.read_sql_query(query, conn, params=params)
+    df = _read_sql(query, conn, params)
     conn.close()
     
     return df
@@ -157,7 +330,7 @@ def get_venta_by_id(venta_id):
     """Obtiene una venta por su ID"""
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM ventas WHERE id = ?", (venta_id,))
+    _execute(cursor, "SELECT * FROM ventas WHERE id = ?", (venta_id,))
     row = cursor.fetchone()
     conn.close()
     
@@ -170,13 +343,14 @@ def insert_venta(venta_data):
     conn = get_connection()
     cursor = conn.cursor()
     
-    cursor.execute("""
+    insert_sql = """
         INSERT INTO ventas (
             mes, fecha, sucursal, cliente, pin, comprobante, tipo_comprobante,
             trabajo, n_comprobante, tipo_re_se, mano_obra, asistencia,
             repuestos, terceros, descuento, total, detalles, archivo_comprobante
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
+    """
+    params = (
         venta_data.get('mes'),
         venta_data.get('fecha'),
         venta_data.get('sucursal'),
@@ -195,9 +369,15 @@ def insert_venta(venta_data):
         venta_data.get('total', 0),
         venta_data.get('detalles'),
         venta_data.get('archivo_comprobante')
-    ))
-    
-    venta_id = cursor.lastrowid
+    )
+
+    if USE_POSTGRES:
+        insert_sql = insert_sql.replace("?)", "?) RETURNING id")
+        _execute(cursor, insert_sql, params)
+        venta_id = cursor.fetchone()["id"]
+    else:
+        _execute(cursor, insert_sql, params)
+        venta_id = cursor.lastrowid
     conn.commit()
     conn.close()
     
@@ -208,7 +388,7 @@ def update_venta(venta_id, venta_data):
     conn = get_connection()
     cursor = conn.cursor()
     
-    cursor.execute("""
+    _execute(cursor, """
         UPDATE ventas SET
             mes = ?, fecha = ?, sucursal = ?, cliente = ?, pin = ?,
             comprobante = ?, tipo_comprobante = ?, trabajo = ?,
@@ -247,18 +427,25 @@ def delete_venta(venta_id):
     cursor = conn.cursor()
     
     # Obtener información de la venta para eliminar archivo adjunto si existe
-    cursor.execute("SELECT archivo_comprobante FROM ventas WHERE id = ?", (venta_id,))
+    _execute(cursor, "SELECT archivo_comprobante FROM ventas WHERE id = ?", (venta_id,))
     row = cursor.fetchone()
     
-    if row and row[0]:
-        archivo_path = Path(row[0])
+    archivo_value = None
+    if row:
+        if isinstance(row, dict):
+            archivo_value = row.get("archivo_comprobante")
+        else:
+            archivo_value = row[0]
+    
+    if archivo_value:
+        archivo_path = Path(archivo_value)
         if archivo_path.exists():
             try:
                 archivo_path.unlink()
             except:
                 pass
     
-    cursor.execute("DELETE FROM ventas WHERE id = ?", (venta_id,))
+    _execute(cursor, "DELETE FROM ventas WHERE id = ?", (venta_id,))
     conn.commit()
     conn.close()
 
@@ -279,16 +466,32 @@ def get_gastos(fecha_inicio=None, fecha_fin=None):
     
     query += " ORDER BY fecha DESC, id DESC"
     
-    df = pd.read_sql_query(query, conn, params=params)
+    df = _read_sql(query, conn, params)
     conn.close()
     
     return df
+
+
+def delete_gastos_por_clasificacion(clasificaciones):
+    """Elimina todos los gastos cuya clasificación coincida con la lista proporcionada."""
+    if not clasificaciones:
+        return 0
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    placeholders = ",".join("?" for _ in clasificaciones)
+    query = f"DELETE FROM gastos WHERE clasificacion IN ({placeholders})"
+    _execute(cursor, query, clasificaciones)
+    eliminados = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return eliminados
 
 def get_gasto_by_id(gasto_id):
     """Obtiene un gasto por su ID"""
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM gastos WHERE id = ?", (gasto_id,))
+    _execute(cursor, "SELECT * FROM gastos WHERE id = ?", (gasto_id,))
     row = cursor.fetchone()
     conn.close()
     
@@ -301,13 +504,14 @@ def insert_gasto(gasto_data):
     conn = get_connection()
     cursor = conn.cursor()
     
-    cursor.execute("""
+    insert_sql = """
         INSERT INTO gastos (
             mes, fecha, sucursal, area, pct_postventa, pct_servicios,
             pct_repuestos, tipo, clasificacion, proveedor, total_pesos,
             total_usd, total_pct, total_pct_se, total_pct_re, detalles
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
+    """
+    params = (
         gasto_data.get('mes'),
         gasto_data.get('fecha'),
         gasto_data.get('sucursal'),
@@ -324,9 +528,15 @@ def insert_gasto(gasto_data):
         gasto_data.get('total_pct_se', 0),
         gasto_data.get('total_pct_re', 0),
         gasto_data.get('detalles')
-    ))
-    
-    gasto_id = cursor.lastrowid
+    )
+
+    if USE_POSTGRES:
+        insert_sql = insert_sql.replace("?)", "?) RETURNING id")
+        _execute(cursor, insert_sql, params)
+        gasto_id = cursor.fetchone()["id"]
+    else:
+        _execute(cursor, insert_sql, params)
+        gasto_id = cursor.lastrowid
     conn.commit()
     conn.close()
     
@@ -337,7 +547,7 @@ def update_gasto(gasto_id, gasto_data):
     conn = get_connection()
     cursor = conn.cursor()
     
-    cursor.execute("""
+    _execute(cursor, """
         UPDATE gastos SET
             mes = ?, fecha = ?, sucursal = ?, area = ?, pct_postventa = ?,
             pct_servicios = ?, pct_repuestos = ?, tipo = ?, clasificacion = ?,
@@ -371,7 +581,7 @@ def delete_gasto(gasto_id):
     """Elimina un gasto"""
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM gastos WHERE id = ?", (gasto_id,))
+    _execute(cursor, "DELETE FROM gastos WHERE id = ?", (gasto_id,))
     conn.commit()
     conn.close()
 
@@ -384,7 +594,7 @@ def get_plantillas_gastos(activas_only=False):
         query += " WHERE activa = 1"
     query += " ORDER BY nombre"
     
-    df = pd.read_sql_query(query, conn)
+    df = _read_sql(query, conn)
     conn.close()
     
     return df
@@ -393,7 +603,7 @@ def get_plantilla_gasto_by_id(plantilla_id):
     """Obtiene una plantilla de gasto por su ID"""
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM plantillas_gastos WHERE id = ?", (plantilla_id,))
+    _execute(cursor, "SELECT * FROM plantillas_gastos WHERE id = ?", (plantilla_id,))
     row = cursor.fetchone()
     conn.close()
     
@@ -406,12 +616,13 @@ def insert_plantilla_gasto(plantilla_data):
     conn = get_connection()
     cursor = conn.cursor()
     
-    cursor.execute("""
+    insert_sql = """
         INSERT INTO plantillas_gastos (
             nombre, descripcion, sucursal, area, pct_postventa, pct_servicios,
             pct_repuestos, tipo, clasificacion, proveedor, detalles, activa
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
+    """
+    params = (
         plantilla_data.get('nombre'),
         plantilla_data.get('descripcion'),
         plantilla_data.get('sucursal'),
@@ -424,9 +635,15 @@ def insert_plantilla_gasto(plantilla_data):
         plantilla_data.get('proveedor'),
         plantilla_data.get('detalles'),
         plantilla_data.get('activa', 1)
-    ))
+    )
     
-    plantilla_id = cursor.lastrowid
+    if USE_POSTGRES:
+        insert_sql = insert_sql.replace("?)", "?) RETURNING id")
+        _execute(cursor, insert_sql, params)
+        plantilla_id = cursor.fetchone()["id"]
+    else:
+        _execute(cursor, insert_sql, params)
+        plantilla_id = cursor.lastrowid
     conn.commit()
     conn.close()
     
@@ -437,7 +654,7 @@ def update_plantilla_gasto(plantilla_id, plantilla_data):
     conn = get_connection()
     cursor = conn.cursor()
     
-    cursor.execute("""
+    _execute(cursor, """
         UPDATE plantillas_gastos SET
             nombre = ?, descripcion = ?, sucursal = ?, area = ?,
             pct_postventa = ?, pct_servicios = ?, pct_repuestos = ?,
@@ -467,7 +684,7 @@ def delete_plantilla_gasto(plantilla_id):
     """Elimina una plantilla de gasto"""
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM plantillas_gastos WHERE id = ?", (plantilla_id,))
+    _execute(cursor, "DELETE FROM plantillas_gastos WHERE id = ?", (plantilla_id,))
     conn.commit()
     conn.close()
 
@@ -897,26 +1114,39 @@ def eliminar_todos_los_registros(eliminar_plantillas=False):
     
     try:
         # Contar registros antes de eliminar
-        cursor.execute("SELECT COUNT(*) FROM ventas")
-        count_ventas = cursor.fetchone()[0]
+        _execute(cursor, "SELECT COUNT(*) FROM ventas")
+        count_ventas = _fetch_scalar(cursor, 0)
         
-        cursor.execute("SELECT COUNT(*) FROM gastos")
-        count_gastos = cursor.fetchone()[0]
+        _execute(cursor, "SELECT COUNT(*) FROM gastos")
+        count_gastos = _fetch_scalar(cursor, 0)
         
         count_plantillas = 0
         if eliminar_plantillas:
-            cursor.execute("SELECT COUNT(*) FROM plantillas_gastos")
-            count_plantillas = cursor.fetchone()[0]
+            _execute(cursor, "SELECT COUNT(*) FROM plantillas_gastos")
+            count_plantillas = _fetch_scalar(cursor, 0)
         
         # Eliminar registros
-        cursor.execute("DELETE FROM ventas")
-        cursor.execute("DELETE FROM gastos")
+        _execute(cursor, "DELETE FROM ventas")
+        _execute(cursor, "DELETE FROM gastos")
         
         if eliminar_plantillas:
-            cursor.execute("DELETE FROM plantillas_gastos")
+            _execute(cursor, "DELETE FROM plantillas_gastos")
         
-        # Resetear los autoincrement IDs (opcional, pero útil para empezar desde 1)
-        cursor.execute("DELETE FROM sqlite_sequence WHERE name IN ('ventas', 'gastos', 'plantillas_gastos')")
+        # Resetear los autoincrement IDs
+        if USE_POSTGRES:
+            tablas = ["ventas", "gastos"]
+            if eliminar_plantillas:
+                tablas.append("plantillas_gastos")
+            for tabla in tablas:
+                _execute(
+                    cursor,
+                    f"SELECT setval(pg_get_serial_sequence('{tabla}', 'id'), COALESCE((SELECT MAX(id) FROM {tabla}), 1), true)"
+                )
+        else:
+            _execute(
+                cursor,
+                "DELETE FROM sqlite_sequence WHERE name IN ('ventas', 'gastos', 'plantillas_gastos')"
+            )
         
         conn.commit()
         
@@ -953,12 +1183,19 @@ def guardar_analisis_ia(tipo_analisis: str, fuente: str, contenido: str, metadat
     
     metadata_json = json.dumps(metadata) if metadata else None
     
-    cursor.execute("""
+    insert_sql = """
         INSERT INTO historial_analisis_ia (tipo_analisis, fuente, contenido, metadata)
         VALUES (?, ?, ?, ?)
-    """, (tipo_analisis, fuente, contenido, metadata_json))
-    
-    registro_id = cursor.lastrowid
+    """
+    params = (tipo_analisis, fuente, contenido, metadata_json)
+
+    if USE_POSTGRES:
+        insert_sql = insert_sql.replace("?)", "?) RETURNING id")
+        _execute(cursor, insert_sql, params)
+        registro_id = cursor.fetchone()["id"]
+    else:
+        _execute(cursor, insert_sql, params)
+        registro_id = cursor.lastrowid
     conn.commit()
     conn.close()
     
@@ -992,7 +1229,7 @@ def get_historial_analisis_ia(limit: int = 50, tipo_analisis: str = None, fuente
     query += " ORDER BY fecha_hora DESC LIMIT ?"
     params.append(limit)
     
-    df = pd.read_sql_query(query, conn, params=params)
+    df = _read_sql(query, conn, params)
     conn.close()
     
     return df
@@ -1018,14 +1255,24 @@ def get_resumen_mensual_analisis_ia(mes: int = None, año: int = None):
     conn = get_connection()
     
     # Obtener todos los registros del mes
-    query = """
-        SELECT * FROM historial_analisis_ia 
-        WHERE strftime('%Y', fecha_hora) = ? 
-        AND strftime('%m', fecha_hora) = ?
-        ORDER BY fecha_hora DESC
-    """
+    if USE_POSTGRES:
+        query = """
+            SELECT * FROM historial_analisis_ia 
+            WHERE EXTRACT(YEAR FROM fecha_hora) = %s 
+              AND EXTRACT(MONTH FROM fecha_hora) = %s
+            ORDER BY fecha_hora DESC
+        """
+        params = (año, mes)
+    else:
+        query = """
+            SELECT * FROM historial_analisis_ia 
+            WHERE strftime('%Y', fecha_hora) = ? 
+              AND strftime('%m', fecha_hora) = ?
+            ORDER BY fecha_hora DESC
+        """
+        params = (str(año), f"{mes:02d}")
     
-    df = pd.read_sql_query(query, conn, params=(str(año), f"{mes:02d}"))
+    df = _read_sql(query, conn, params)
     conn.close()
     
     if len(df) == 0:
@@ -1093,6 +1340,9 @@ def crear_backup_db():
     Returns:
         str: Ruta del archivo de backup creado, o None si falla
     """
+    if USE_POSTGRES:
+        # Los backups deben realizarse desde el servicio gestionado
+        return None
     if not DB_PATH.exists():
         return None
     
@@ -1118,6 +1368,8 @@ def restaurar_backup_db(backup_path: str):
     Returns:
         bool: True si se restauró correctamente, False en caso contrario
     """
+    if USE_POSTGRES:
+        return False
     try:
         backup_file = Path(backup_path)
         if not backup_file.exists():
@@ -1146,6 +1398,9 @@ def listar_backups():
     """
     backups = []
     
+    if USE_POSTGRES:
+        return backups
+    
     if not BACKUP_DIR.exists():
         return backups
     
@@ -1170,7 +1425,7 @@ def exportar_db_a_bytes():
     Returns:
         bytes: Contenido de la base de datos, o None si falla
     """
-    if not DB_PATH.exists():
+    if USE_POSTGRES or not DB_PATH.exists():
         return None
     
     try:
@@ -1190,6 +1445,8 @@ def importar_db_desde_bytes(db_bytes: bytes):
     Returns:
         bool: True si se importó correctamente, False en caso contrario
     """
+    if USE_POSTGRES:
+        return False
     try:
         # Hacer backup del archivo actual si existe
         if DB_PATH.exists():

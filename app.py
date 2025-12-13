@@ -1,3777 +1,2526 @@
-"""
-Aplicación de Gestión de Postventa
-Registro de ventas, gastos y reportes con KPIs
-"""
-import streamlit as st
+"""Streamlit Postventa - rewrite branch skeleton"""
+import os
+import tempfile
+
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
-from io import BytesIO
-from datetime import datetime, date
-import os
-import shutil
-import base64
-import json
-import re
-from pathlib import Path
+import streamlit as st
+import numpy as np
+import matplotlib.pyplot as plt
+plt.switch_backend("Agg")
 
-# Imports opcionales para extracción de PDFs
-try:
-    import PyPDF2
-    PDF2_AVAILABLE = True
-except ImportError:
-    PDF2_AVAILABLE = False
+JD_BRAND_COLORS = {
+    "negro": "#212121",
+    "amarillo": "#ffcd00",
+    "gris": "#7a7a7a",
+}
 
-try:
-    import pdfplumber
-    PDFPLUMBER_AVAILABLE = True
-except ImportError:
-    PDFPLUMBER_AVAILABLE = False
-
-try:
-    from openai import OpenAI
-    OPENAI_AVAILABLE = True
-except ImportError:
-    OPENAI_AVAILABLE = False
-
-try:
-    import anthropic
-    ANTHROPIC_AVAILABLE = True
-except ImportError:
-    ANTHROPIC_AVAILABLE = False
-
-try:
-    from google.cloud import documentai
-    from google.oauth2 import service_account
-    GOOGLE_DOCAI_AVAILABLE = True
-except ImportError:
-    GOOGLE_DOCAI_AVAILABLE = False
+from datetime import date, datetime
+from fpdf import FPDF
+from gastos_automaticos import obtener_gastos_totales_con_automaticos
+from ai_analysis import get_ai_summary
 
 from database import (
-    init_database, insert_venta, insert_gasto,
-    get_ventas, get_gastos,
-    import_ventas_from_excel, import_gastos_from_excel,
-    delete_venta, delete_gasto,
-    get_venta_by_id, get_gasto_by_id,
-    update_venta, update_gasto,
-    get_plantillas_gastos, get_plantilla_gasto_by_id,
-    insert_plantilla_gasto, update_plantilla_gasto, delete_plantilla_gasto,
-    eliminar_todos_los_registros,
-    exportar_plantillas_gastos, importar_plantillas_gastos,
-    guardar_analisis_ia, get_historial_analisis_ia, get_resumen_mensual_analisis_ia,
-    crear_backup_db, restaurar_backup_db, listar_backups,
-    exportar_db_a_bytes, importar_db_desde_bytes, IS_STREAMLIT_CLOUD
+    delete_gasto,
+    delete_venta,
+    get_gasto_by_id,
+    get_gastos,
+    get_venta_by_id,
+    get_ventas,
+    init_database,
+    insert_gasto,
+    insert_venta,
+    update_gasto,
+    update_venta,
 )
-from gastos_automaticos import obtener_gastos_totales_con_automaticos
-from calculos_financieros import (
-    calcular_factor_absorcion_servicios,
-    calcular_factor_absorcion_repuestos,
-    calcular_factor_absorcion_postventa,
-    calcular_punto_equilibrio
-)
-from ai_analysis import get_ai_summary
-try:
-    from ai_analysis import GEMINI_AVAILABLE
-except ImportError:
-    GEMINI_AVAILABLE = False
 
-def analizar_texto_pdf(texto: str) -> dict:
-    """
-    Analiza el texto extraído de un PDF de comprobante y extrae datos estructurados
-    usando patrones y reglas básicas (sin IA)
-    """
-    datos = {
-        'cliente': None,
-        'numero_comprobante': None,
-        'fecha': None,
-        'total': 0.0,
-        'mano_obra': 0.0,
-        'asistencia': 0.0,
-        'repuestos': 0.0,
-        'terceros': 0.0,
-        'descuento': 0.0,
-        'pin': None,
-        'tipo_re_se': 'SE',  # Por defecto SE
-        'sucursal': None,
-        'tipo_comprobante': 'FACTURA VENTA',
-        'items': []
-    }
-    
-    texto_upper = texto.upper()
-    texto_original = texto  # Mantener texto original para búsquedas más precisas
-    
-    # 1. Extraer CLIENTE (evitar confundirlo con PATAGONIA que es el proveedor y con direcciones)
-    # Estrategia general:
-    # - El cliente está después de los datos de la empresa (PATAGONIA, CUIT, etc.)
-    # - El cliente está ANTES de la dirección (que tiene patrones como números, códigos postales, "Nro.:", etc.)
-    # - El cliente es un nombre completo en mayúsculas (razón social o nombre completo)
-    # - El cliente puede estar en la misma línea que "FACTURA DE VENTA" o en una línea separada
-    
-    # Palabras clave que indican datos de la empresa (NO es cliente)
-    palabras_empresa = ['PATAGONIA', 'MAQUINARIAS', 'RUTA', 'TIERRA DEL FUEGO', 'ARGENTINA', 'CUIT', '02964', '999-129115', 'Ing. brutos', 'Página']
-    
-    # Patrones que indican dirección (NO es cliente)
-    patrones_direccion = [
-        r'Nro\.?\s*:?\s*\d+',  # "Nro.: 138" o "Nro 138"
-        r'\(\d{4,5}\)',  # Códigos postales como "(9420)"
-        r'\d{4,5}-\d{6,8}',  # Teléfonos como "02964-446019"
-        r'CUIT\s*:?\s*\d{2}-\d{8}-\d{1}',  # CUIT del cliente
-        r'Forma de pago',  # "Forma de pago CUENTA CORRIENTE"
-        r'Entregar a:',  # "Entregar a: Vendedor"
-    ]
-    
-    # Patrón 1: Buscar nombre ANTES de "FACTURA DE VENTA" en la misma línea
-    # El cliente puede estar en la misma línea que "FACTURA DE VENTA"
-    patron_cliente1 = re.search(r'^([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s]{5,50}?)\s+FACTURA\s+DE\s+VENTA', texto_original, re.MULTILINE | re.IGNORECASE)
-    if patron_cliente1:
-        cliente = patron_cliente1.group(1).strip()
-        cliente = re.sub(r'\s+', ' ', cliente)
-        # Verificar que NO sea datos de empresa
-        if (len(cliente) > 5 and 
-            not any(palabra in cliente.upper() for palabra in palabras_empresa) and
-            'FACTURA' not in cliente.upper()):
-            datos['cliente'] = cliente.title()
-    
-    # Patrón 2: Buscar nombre en línea completa que esté ANTES de patrones de dirección
-    # Buscar líneas que terminen y luego tengan patrones de dirección en la siguiente línea
-    if not datos['cliente']:
-        # Buscar nombre que esté antes de una línea con patrones de dirección
-        patron_direccion_combinado = '|'.join(patrones_direccion)
-        patron_cliente2 = re.search(r'^([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s]{5,50}?)\s*\n\s*(?:' + patron_direccion_combinado + ')', texto_original, re.MULTILINE | re.IGNORECASE)
-        if patron_cliente2:
-            cliente = patron_cliente2.group(1).strip()
-            cliente = re.sub(r'\s+', ' ', cliente)
-            # Verificar que NO sea datos de empresa
-            if (len(cliente) > 5 and 
-                not any(palabra in cliente.upper() for palabra in palabras_empresa) and
-                not any(re.search(patron, cliente, re.IGNORECASE) for patron in patrones_direccion)):
-                datos['cliente'] = cliente.title()
-    
-    # Patrón 3: Buscar después de datos de empresa pero antes de "FACTURA DE VENTA" o direcciones
-    # Buscar entre datos de empresa (CUIT, Ing. brutos, Página) y antes de "FACTURA" o patrones de dirección
-    if not datos['cliente']:
-        patron_direccion_combinado = '|'.join(patrones_direccion)
-        patron_cliente3 = re.search(r'(?:CUIT:\s*\d{2}-\d{8}-\d{1}|Ing\.\s*brutos|Página:)[\s\S]{0,300}?^([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s]{5,50}?)\s*(?:FACTURA|' + patron_direccion_combinado + ')', texto_original, re.MULTILINE | re.IGNORECASE)
-        if patron_cliente3:
-            cliente = patron_cliente3.group(1).strip()
-            cliente = re.sub(r'\s+', ' ', cliente)
-            # Si contiene "FACTURA", extraer solo la parte antes de "FACTURA"
-            if 'FACTURA' in cliente.upper():
-                cliente = re.split(r'\s+FACTURA', cliente, flags=re.IGNORECASE)[0].strip()
-            # Verificar que NO sea datos de empresa o dirección
-            if (len(cliente) > 5 and 
-                not any(palabra in cliente.upper() for palabra in palabras_empresa) and
-                not any(re.search(patron, cliente, re.IGNORECASE) for patron in patrones_direccion)):
-                datos['cliente'] = cliente.title()
-    
-    # Patrón 4: Buscar explícitamente "CLIENTE:"
-    if not datos['cliente']:
-        patron_cliente4 = re.search(r'CLIENTE\s*:?\s*([A-ZÁÉÍÓÚÑ\s]{5,}?)(?:\n|CUIT|Nro|Fecha)', texto_upper)
-        if patron_cliente4:
-            cliente = patron_cliente4.group(1).strip()
-            cliente = re.sub(r'\s+', ' ', cliente)
-            if len(cliente) > 3 and 'PATAGONIA' not in cliente.upper():
-                datos['cliente'] = cliente.title()
-    
-    # 2. Extraer NÚMERO DE COMPROBANTE
-    # Buscar patrones como "A 0002 - 00011587" o "# A 0002-00011587"
-    patron_numero1 = re.search(r'(?:FACTURA\s+DE\s+VENTA\s+DOL\s*#?\s*|COMPROBANTE|#)\s*([A-Z]?\s*\d{4,6}\s*[-]?\s*\d{4,8})', texto_upper)
-    if patron_numero1:
-        numero = patron_numero1.group(1).strip()
-        numero = re.sub(r'\s+', ' ', numero)
-        datos['numero_comprobante'] = numero
-    else:
-        # Patrón alternativo: "Nro.: 138"
-        patron_numero2 = re.search(r'(?:Nro\.?|Número)\s*:?\s*([A-Z]?\s*\d+[\s\-]?\d*)', texto_upper)
-        if patron_numero2:
-            numero = patron_numero2.group(1).strip()
-            numero = re.sub(r'\s+', ' ', numero)
-            datos['numero_comprobante'] = numero
-    
-    # 3. Extraer FECHA
-    # Buscar patrones como "Noviembre 18, 2025" o "18/11/2025"
-    patron_fecha1 = re.search(r'(\w+\s+\d{1,2},?\s+\d{4})', texto)
-    patron_fecha2 = re.search(r'(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})', texto)
-    if patron_fecha1:
-        datos['fecha'] = patron_fecha1.group(1)
-    elif patron_fecha2:
-        datos['fecha'] = patron_fecha2.group(1)
-    
-    # 4. Extraer TOTAL
-    # Buscar "TOTAL U$S 85.76" o "TOTAL U$S 2,321.81" (con comas como separador de miles)
-    # Mejorar patrón para capturar mejor el total, incluso si hay espacios o saltos de línea
-    patron_total = re.search(r'TOTAL\s*(?:U\$S|USD|\$)?\s*:?\s*([\d,\.]+)', texto_upper)
-    if patron_total:
-        total_str = patron_total.group(1).strip()
-        # Manejar formato con comas como separador de miles: "2,321.81" -> "2321.81"
-        # Si tiene comas Y punto, las comas son miles y el punto es decimal
-        if ',' in total_str and '.' in total_str:
-            # Formato: "2,321.81" -> quitar comas, mantener punto
-            total_str = total_str.replace(',', '')
-        # Si solo tiene comas, pueden ser miles o decimales (asumir miles si hay más de 3 dígitos)
-        elif ',' in total_str and '.' not in total_str:
-            # Si tiene más de 3 dígitos antes de la coma, probablemente es separador de miles
-            if len(total_str.split(',')[0]) > 3:
-                total_str = total_str.replace(',', '')
-            else:
-                # Si tiene pocos dígitos, la coma probablemente es decimal
-                total_str = total_str.replace(',', '.')
-        try:
-            datos['total'] = float(total_str)
-        except:
-            pass
-    else:
-        # Patrón alternativo: buscar "TOTAL" en una línea y el monto en la siguiente o misma línea
-        patron_total_alt = re.search(r'TOTAL\s*(?:U\$S|USD|\$)?\s*:?\s*[\s\n]+([\d,\.]+)', texto_upper, re.MULTILINE)
-        if patron_total_alt:
-            total_str = patron_total_alt.group(1).strip()
-            if ',' in total_str and '.' in total_str:
-                total_str = total_str.replace(',', '')
-            elif ',' in total_str and '.' not in total_str:
-                if len(total_str.split(',')[0]) > 3:
-                    total_str = total_str.replace(',', '')
-                else:
-                    total_str = total_str.replace(',', '.')
-            try:
-                datos['total'] = float(total_str)
-            except:
-                pass
-    
-    # 5. Extraer PIN (si existe)
-    patron_pin = re.search(r'PIN\s*:?\s*(\d+)', texto_upper)
-    if patron_pin:
-        datos['pin'] = patron_pin.group(1)
-        datos['tipo_re_se'] = 'SE'  # Si hay PIN, probablemente es servicio
-    
-    # 6. Detectar SUCURSAL
-    if 'RIO GRANDE' in texto_upper:
-        datos['sucursal'] = 'RIO GRANDE'
-    elif 'COMODORO' in texto_upper:
-        datos['sucursal'] = 'COMODORO'
-    elif 'RIO GALLEGOS' in texto_upper:
-        datos['sucursal'] = 'RIO GALLEGOS'
-    
-    # 7. Analizar ITEMS y clasificarlos
-    # Buscar todos los items en el texto usando regex más robusto
-    # Patrón: código (letras+números) seguido de descripción, cantidad y precio
-    # Ejemplo: "AT332908 FILTRO AIRE PRIM J 1.00 U$S 56.60" o "RE504836 FILTRO DE ACEITE RE541420 1.00 U$S 29.16"
-    
-    # Palabras clave para clasificar items
-    palabras_repuestos = ['FILTRO', 'REPUESTO', 'PARTE', 'PIEZA', 'COMPONENTE', 'ACEITE', 'LUBRICANTE', 'AIRE', 'RETEN', 'ANILLO', 'ARANDELA', 'EMPAQUETADURA']
-    palabras_mano_obra = ['HORA', 'HORAS', 'MANO DE OBRA', 'TRABAJO', 'REPARACIÓN', 'SERVICIO TÉCNICO', 'MECÁNICO']
-    palabras_asistencia = ['ASISTENCIA', 'VISITA', 'ATENCIÓN', 'CONSULTA']
-    palabras_terceros = ['FRETE', 'TRANSPORTE', 'FLETE', 'ENVÍO', 'TERCERO', 'EXTERNO']
-    
-    items_encontrados = []
-    
-    # 7.1. Buscar items especiales sin código (MANO DE OBRA, ASISTENCIA, etc.)
-    # Patrón: "MANO DE OBRA U$S 1,260.00" o "ASISTENCIA U$S 500.00"
-    # Mejorar patrón para ser más flexible con espacios y formato
-    patron_especiales = re.finditer(r'(MANO\s+DE\s+OBRA|ASISTENCIA|TERCEROS?|FRETE|TRANSPORTE)\s+U\$S\s+([\d,\.]+)', texto_upper, re.MULTILINE)
-    for match in patron_especiales:
-        descripcion = match.group(1).strip()
-        monto_str = match.group(2).strip()
-        # Manejar formato con comas como separador de miles
-        if ',' in monto_str and '.' in monto_str:
-            monto_str = monto_str.replace(',', '')
-        elif ',' in monto_str and '.' not in monto_str:
-            if len(monto_str.split(',')[0]) > 3:
-                monto_str = monto_str.replace(',', '')
-            else:
-                monto_str = monto_str.replace(',', '.')
-        try:
-            monto = float(monto_str)
-            items_encontrados.append({
-                'codigo': None,
-                'descripcion': descripcion.title(),
-                'cantidad': 1.0,
-                'precio': monto,
-                'monto': monto
-            })
-        except:
-            pass
-    
-    # 7.1b. Buscar "MANO DE OBRA" en formato de tabla (puede estar en una línea separada o con espacios variables)
-    # Ejemplo: "MANO DE OBRA U$S 1,260.00" o "MANO DE OBRA" en una línea y "U$S 1,260.00" en la siguiente
-    # Hacer el patrón más flexible para capturar diferentes formatos
-    patron_mano_obra_variantes = [
-        r'MANO\s+DE\s+OBRA\s+U\$S\s*([\d,\.]+)',  # Misma línea: "MANO DE OBRA U$S 1,260.00"
-        r'MANO\s+DE\s+OBRA\s*\n\s*U\$S\s*([\d,\.]+)',  # Líneas separadas: "MANO DE OBRA\nU$S 1,260.00"
-        r'MANO\s+DE\s+OBRA\s+([\d,\.]+)\s*U\$S',  # Formato alternativo: "MANO DE OBRA 1,260.00 U$S"
-    ]
-    
-    for patron_variante in patron_mano_obra_variantes:
-        match_mano_obra = re.search(patron_variante, texto_upper, re.MULTILINE | re.DOTALL)
-        if match_mano_obra:
-            monto_str = match_mano_obra.group(1).strip()
-            if ',' in monto_str and '.' in monto_str:
-                monto_str = monto_str.replace(',', '')
-            elif ',' in monto_str and '.' not in monto_str:
-                if len(monto_str.split(',')[0]) > 3:
-                    monto_str = monto_str.replace(',', '')
-                else:
-                    monto_str = monto_str.replace(',', '.')
-            try:
-                monto = float(monto_str)
-                # Verificar que no esté ya en items_encontrados
-                if not any(item.get('descripcion', '').upper() == 'MANO DE OBRA' for item in items_encontrados):
-                    items_encontrados.append({
-                        'codigo': None,
-                        'descripcion': 'Mano De Obra',
-                        'cantidad': 1.0,
-                        'precio': monto,
-                        'monto': monto
-                    })
-                    break  # Si encontramos uno, no buscar más variantes
-            except:
-                continue
-    
-    # Buscar items usando regex en todo el texto
-    # Patrón mejorado: código (2-10 letras + 4-10 números), descripción, cantidad, U$S, precio
-    # Ejemplo: "AT332908 FILTRO AIRE PRIM J 1.00 U$S 56.60" o "RE504836 FILTRO DE ACEITE RE541420 1.00 U$S 29.16"
-    # El patrón debe ser más flexible para capturar variaciones en el formato
-    
-    # 7.2. Buscar items normales con código (repuestos, etc.)
-    # Patrón principal: código seguido de descripción (puede tener códigos adicionales), cantidad, U$S, precio
-    # Mejorar el patrón para manejar precios con comas como separador de miles: "33.01" o "1,260.00"
-    # Hacer el patrón más flexible para códigos que pueden tener letras al final (ej: "AJM2026LITRO") o números al principio (ej: "40M7048")
-    patron_items = re.finditer(r'([A-Z0-9]{4,15})\s+([A-ZÁÉÍÓÚÑ0-9\s]{5,80}?)\s+(\d+[,\d]*\.?\d*)\s+U\$S\s+([\d,\.]+)', texto_upper)
-    
-    for match in patron_items:
-        codigo = match.group(1).strip()
-        descripcion = match.group(2).strip()
-        # Limpiar descripción: quitar códigos adicionales al final (como "RE541420")
-        # También quitar números sueltos que puedan ser parte de otro código
-        descripcion = re.sub(r'\s+[A-Z]{2,10}\d{4,10}$', '', descripcion).strip()
-        descripcion = re.sub(r'\s+\d{4,10}$', '', descripcion).strip()
-        # Limpiar espacios múltiples
-        descripcion = ' '.join(descripcion.split())
-        
-        # Procesar cantidad (puede tener comas como separador de miles)
-        cantidad_str = match.group(3).replace(',', '')
-        cantidad = float(cantidad_str)
-        
-        # Procesar precio (puede tener comas como separador de miles)
-        precio_str = match.group(4).strip()
-        if ',' in precio_str and '.' in precio_str:
-            precio_str = precio_str.replace(',', '')
-        elif ',' in precio_str and '.' not in precio_str:
-            if len(precio_str.split(',')[0]) > 3:
-                precio_str = precio_str.replace(',', '')
-            else:
-                precio_str = precio_str.replace(',', '.')
-        precio = float(precio_str)
-        monto = cantidad * precio
-        
-        # Solo agregar si la descripción tiene sentido (más de 3 caracteres después de limpiar)
-        if len(descripcion) > 3:
-            items_encontrados.append({
-                'codigo': codigo,
-                'descripcion': descripcion.title(),
-                'cantidad': cantidad,
-                'precio': precio,
-                'monto': monto
-            })
-    
-    # 7.3. Si no se encontraron items con el patrón principal, buscar patrón alternativo
-    if len(items_encontrados) == 0:
-        # Patrón alternativo: buscar líneas con código y precio al final
-        lineas = texto.split('\n')
-        for linea in lineas:
-            linea_upper = linea.upper()
-            # Buscar: código, descripción, U$S, precio
-            patron_alt = re.search(r'([A-Z0-9]{6,})\s+([A-ZÁÉÍÓÚÑ0-9\s]{5,}?)\s+U\$S\s+([\d,\.]+)', linea_upper)
-            if patron_alt:
-                codigo = patron_alt.group(1).strip()
-                descripcion = patron_alt.group(2).strip()
-                # Limpiar descripción
-                descripcion = re.sub(r'\s+[A-Z]{2,10}\d{4,10}$', '', descripcion).strip()
-                # Procesar monto (puede tener comas como separador de miles)
-                monto_str = patron_alt.group(3).strip()
-                if ',' in monto_str and '.' in monto_str:
-                    monto_str = monto_str.replace(',', '')
-                elif ',' in monto_str and '.' not in monto_str:
-                    if len(monto_str.split(',')[0]) > 3:
-                        monto_str = monto_str.replace(',', '')
-                    else:
-                        monto_str = monto_str.replace(',', '.')
-                monto = float(monto_str)
-                
-                items_encontrados.append({
-                    'codigo': codigo,
-                    'descripcion': descripcion.title(),
-                    'cantidad': 1.0,
-                    'precio': monto,
-                    'monto': monto
-                })
-    
-    # Guardar items en datos
-    datos['items'] = items_encontrados
-    
-    # Clasificar items encontrados
-    for item in items_encontrados:
-        desc = item['descripcion'].upper()
-        monto = item['monto']
-        
-        # Clasificar por palabras clave
-        if any(palabra in desc for palabra in palabras_repuestos):
-            datos['repuestos'] += monto
-        elif any(palabra in desc for palabra in palabras_mano_obra):
-            datos['mano_obra'] += monto
-        elif any(palabra in desc for palabra in palabras_asistencia):
-            datos['asistencia'] += monto
-        elif any(palabra in desc for palabra in palabras_terceros):
-            datos['terceros'] += monto
-        else:
-            # Si no se puede clasificar, asumir repuesto por defecto
-            datos['repuestos'] += monto
-    
-    # Detectar tipo RE/SE basado en los items encontrados
-    # Si hay mano de obra o asistencia, es SE (servicio)
-    if datos['mano_obra'] > 0 or datos['asistencia'] > 0 or datos['pin']:
-        datos['tipo_re_se'] = 'SE'
-    # Si solo hay repuestos y no hay PIN, probablemente es RE
-    elif datos['repuestos'] > 0 and datos['mano_obra'] == 0 and datos['asistencia'] == 0 and not datos['pin']:
-        datos['tipo_re_se'] = 'RE'
-    
-    # 8. Buscar DESCUENTO
-    patron_descuento = re.search(r'DESCUENTO\s*:?\s*([\d,\.]+)', texto_upper)
-    if patron_descuento:
-        descuento_str = patron_descuento.group(1).strip()
-        # Manejar formato con comas como separador de miles
-        if ',' in descuento_str and '.' in descuento_str:
-            descuento_str = descuento_str.replace(',', '')
-        elif ',' in descuento_str and '.' not in descuento_str:
-            if len(descuento_str.split(',')[0]) > 3:
-                descuento_str = descuento_str.replace(',', '')
-            else:
-                descuento_str = descuento_str.replace(',', '.')
-        try:
-            datos['descuento'] = float(descuento_str)
-        except:
-            pass
-    
-    # 9. Detectar TIPO DE COMPROBANTE
-    if 'NOTA DE CREDITO' in texto_upper or 'NOTA DE CRÉDITO' in texto_upper:
-        datos['tipo_comprobante'] = 'NOTA DE CREDITO'
-    elif 'FACTURA' in texto_upper:
-        datos['tipo_comprobante'] = 'FACTURA VENTA'
-    
-    return datos
-
-def formatear_moneda(valor: float) -> str:
-    """Formatea un valor numérico como moneda: $22.423,45"""
-    try:
-        if pd.isna(valor) or valor is None:
-            return "$0,00"
-        valor = float(valor)
-        # Formatear con punto como separador de miles y coma como decimal
-        valor_str = f"{valor:,.2f}"
-        # Reemplazar separadores: . por , y , por .
-        partes = valor_str.split('.')
-        if len(partes) == 2:
-            return f"${partes[0].replace(',', '.')},{partes[1]}"
-        return f"${valor_str.replace(',', '.')},00"
-    except:
-        return "$0,00"
-
-# Crear carpeta para almacenar comprobantes
-COMPROBANTES_DIR = Path("comprobantes")
-COMPROBANTES_DIR.mkdir(exist_ok=True)
-
-# Configuración de la página
 st.set_page_config(
-    page_title="Gestión Postventa",
+    page_title="Postventa FY - Rewrite",
     page_icon="📊",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
-# ==================== AUTENTICACIÓN ====================
-CLAVE_ACCESO = "2815"
-
-def verificar_autenticacion():
-    """Verifica si el usuario está autenticado"""
-    if 'autenticado' not in st.session_state:
-        st.session_state['autenticado'] = False
-    
-    return st.session_state['autenticado']
-
-def mostrar_pantalla_login():
-    """Muestra la pantalla de login"""
-    # Centrar el contenido
-    col1, col2, col3 = st.columns([1, 2, 1])
-    
-    with col2:
-        st.markdown("""
-        <div style='text-align: center; padding: 50px 0;'>
-            <h1 style='color: #1f77b4; margin-bottom: 30px;'>🔐 Acceso al Sistema</h1>
-            <p style='font-size: 18px; color: #666; margin-bottom: 40px;'>
-                Sistema de Gestión de Postventa
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        with st.form("login_form"):
-            clave = st.text_input("🔑 Ingrese la clave de acceso", type="password", placeholder="Clave de acceso")
-            submit = st.form_submit_button("🚪 Ingresar", use_container_width=True)
-            
-            if submit:
-                if clave == CLAVE_ACCESO:
-                    st.session_state['autenticado'] = True
-                    st.rerun()
-                else:
-                    st.error("❌ Clave incorrecta. Intente nuevamente.")
-        
-        st.markdown("""
-        <div style='text-align: center; margin-top: 50px; color: #999; font-size: 12px;'>
-            Sistema de Gestión de Postventa © 2025
-        </div>
-        """, unsafe_allow_html=True)
-
-# Verificar autenticación antes de mostrar el contenido
-if not verificar_autenticacion():
-    mostrar_pantalla_login()
-    st.stop()  # Detener la ejecución si no está autenticado
-
-# Inicializar base de datos
-if 'db_initialized' not in st.session_state:
+@st.cache_resource(show_spinner=False)
+def bootstrap_database():
+    """Ensure the SQLite database exists before the UI renders."""
     init_database()
-    st.session_state.db_initialized = True
-    
-    # Advertencia sobre persistencia en Streamlit Cloud
-    if IS_STREAMLIT_CLOUD:
-        st.sidebar.warning("⚠️ **Streamlit Cloud**: La base de datos se reinicia con cada deploy. Usa la sección de Backups para guardar tus datos.")
+    return True
 
-# Sidebar navigation
-st.sidebar.title("📊 Gestión Postventa")
+bootstrap_database()
 
-# Botón para cerrar sesión en el sidebar
-if st.sidebar.button("🚪 Cerrar Sesión", use_container_width=True, key="cerrar_sesion_btn"):
-    st.session_state['autenticado'] = False
-    st.rerun()
-page = st.sidebar.radio(
-    "Navegación",
-    ["🏠 Dashboard", "💰 Registrar Venta", "💸 Registrar Gasto", "⚙️ Plantillas Gastos", "📥 Importar Excel", "📋 Ver Registros", "📈 Reportes", "🤖 Análisis IA", "🔍 Probar Extracción PDF"]
-)
+NAVIGATION = {
+    "📊 Dashboard": "overview",
+    "💰 Ventas": "sales",
+    "💸 Gastos": "expenses",
+    "📈 Reportes": "reports",
+    "⚙️ Configuración": "settings",
+}
 
-# ==================== DASHBOARD ====================
-if page == "🏠 Dashboard":
-    st.title("🏠 Dashboard - KPIs y Métricas")
-    
-    # Filtros de fecha
-    col1, col2 = st.columns(2)
-    with col1:
-        fecha_inicio = st.date_input("Fecha Inicio", value=date(2025, 11, 1))
-    with col2:
-        fecha_fin = st.date_input("Fecha Fin", value=date.today())
-    
-    # Obtener datos
-    df_ventas = get_ventas(str(fecha_inicio), str(fecha_fin))
-    df_gastos = get_gastos(str(fecha_inicio), str(fecha_fin))
-    
-    if len(df_ventas) == 0 and len(df_gastos) == 0:
-        st.info("📊 No hay datos para el período seleccionado. Importa datos desde Excel o registra nuevas ventas/gastos.")
-    else:
-        # KPIs principales
-        st.subheader("📊 Indicadores Principales")
-        
-        # Calcular métricas
-        total_ingresos = df_ventas['total'].sum() if len(df_ventas) > 0 else 0
-        ingresos_servicios = df_ventas[df_ventas['tipo_re_se'] == 'SE']['total'].sum() if len(df_ventas) > 0 else 0
-        ingresos_repuestos = df_ventas[df_ventas['tipo_re_se'] == 'RE']['total'].sum() if len(df_ventas) > 0 else 0
-        
-        # Obtener gastos incluyendo los calculados automáticamente
-        gastos_totales = obtener_gastos_totales_con_automaticos(str(fecha_inicio), str(fecha_fin))
-        
-        # Gastos totales (todos los períodos)
-        gastos_totales_todos = obtener_gastos_totales_con_automaticos()
-        gastos_postventa_total = gastos_totales_todos['gastos_postventa_total']
-        gastos_se_todos = gastos_totales_todos['gastos_se_total']
-        gastos_re_todos = gastos_totales_todos['gastos_re_total']
-        
-        # Gastos del período filtrado
-        gastos_se = gastos_totales['gastos_se_total']
-        gastos_re = gastos_totales['gastos_re_total']
-        gastos_postventa = gastos_totales['gastos_postventa_total']
-        
-        resultado_total = total_ingresos - gastos_postventa_total
-        margen_total = (resultado_total / total_ingresos * 100) if total_ingresos > 0 else 0
-        
-        resultado_servicios = ingresos_servicios - gastos_se_todos
-        resultado_repuestos = ingresos_repuestos - gastos_re_todos
-        margen_servicios = (resultado_servicios / ingresos_servicios * 100) if ingresos_servicios > 0 else 0
-        margen_repuestos = (resultado_repuestos / ingresos_repuestos * 100) if ingresos_repuestos > 0 else 0
-        
-        # Mostrar KPIs
-        kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-        
-        with kpi1:
-            st.metric("💰 Total Ingresos", f"{formatear_moneda(total_ingresos)} USD")
-        
-        with kpi2:
-            # Calcular gastos registrados (sin automáticos) y automáticos por separado
-            gastos_registrados_total = gastos_totales_todos['gastos_registrados']['total_pct_se'].sum() + gastos_totales_todos['gastos_registrados']['total_pct_re'].sum() if len(gastos_totales_todos['gastos_registrados']) > 0 else 0
-            gastos_automaticos_total = gastos_totales_todos['gastos_automaticos']['total_pct_se'].sum() + gastos_totales_todos['gastos_automaticos']['total_pct_re'].sum() if len(gastos_totales_todos['gastos_automaticos']) > 0 else 0
-            
-            st.metric("💸 Gastos Postventa", f"{formatear_moneda(gastos_postventa_total)} USD", 
-                     delta=f"Período: {formatear_moneda(gastos_postventa)}")
-            st.caption(f"📝 Registrados: {formatear_moneda(gastos_registrados_total)} | 🤖 Automáticos: {formatear_moneda(gastos_automaticos_total)}")
-        
-        with kpi3:
-            st.metric("📈 Resultado Neto", f"{formatear_moneda(resultado_total)} USD", 
-                     delta=f"{margen_total:.1f}%")
-        
-        with kpi4:
-            st.metric("📊 Total Registros", f"{len(df_ventas) + len(df_gastos)}")
-        
-        # Objetivo de ventas de repuestos FY26
-        st.divider()
-        st.subheader("🎯 Objetivo de Ventas de Repuestos - FY26")
-        
-        # Objetivo: $1,300,000 USD para el año fiscal (Nov 2025 - Oct 2026)
-        OBJETIVO_REPUESTOS_FY26 = 1300000.0
-        
-        # Calcular total de repuestos vendidos desde inicio del año fiscal (Nov 2025)
-        fecha_inicio_fy26 = date(2025, 11, 1)
-        fecha_fin_actual = fecha_fin if fecha_fin else date.today()
-        
-        # Obtener todas las ventas desde inicio del año fiscal
-        df_ventas_fy26 = get_ventas(str(fecha_inicio_fy26), str(fecha_fin_actual))
-        
-        if len(df_ventas_fy26) > 0:
-            # Calcular repuestos vendidos (RE + repuestos en SE)
-            ventas_re_fy26 = df_ventas_fy26[df_ventas_fy26['tipo_re_se'] == 'RE']
-            ventas_se_fy26 = df_ventas_fy26[df_ventas_fy26['tipo_re_se'] == 'SE']
-            
-            total_re_fy26 = ventas_re_fy26['total'].sum() if len(ventas_re_fy26) > 0 else 0
-            repuestos_se_fy26 = ventas_se_fy26['repuestos'].sum() if len(ventas_se_fy26) > 0 and 'repuestos' in ventas_se_fy26.columns else 0
-            total_repuestos_vendidos_fy26 = total_re_fy26 + repuestos_se_fy26
-            
-            # Calcular porcentaje completado
-            porcentaje_completado = (total_repuestos_vendidos_fy26 / OBJETIVO_REPUESTOS_FY26 * 100) if OBJETIVO_REPUESTOS_FY26 > 0 else 0
-            monto_restante = OBJETIVO_REPUESTOS_FY26 - total_repuestos_vendidos_fy26
-            
-            # Mostrar métricas
-            col_obj1, col_obj2, col_obj3 = st.columns(3)
-            
-            with col_obj1:
-                st.metric(
-                    "💰 Vendido hasta ahora",
-                    formatear_moneda(total_repuestos_vendidos_fy26),
-                    help="Total de repuestos vendidos desde Noviembre 2025"
-                )
-            
-            with col_obj2:
-                st.metric(
-                    "🎯 Objetivo FY26",
-                    formatear_moneda(OBJETIVO_REPUESTOS_FY26),
-                    delta=f"{porcentaje_completado:.1f}% completado"
-                )
-            
-            with col_obj3:
-                color_delta = "normal" if monto_restante > 0 else "inverse"
-                st.metric(
-                    "📊 Restante",
-                    formatear_moneda(abs(monto_restante)),
-                    delta=f"{'Faltan' if monto_restante > 0 else 'Superado por'}: {formatear_moneda(abs(monto_restante))}"
-                )
-            
-            # Barra de progreso visual
-            st.write("**Progreso del Objetivo**")
-            
-            # Crear barra de progreso con colores
-            if porcentaje_completado >= 100:
-                color_barra = "🟢"  # Verde si se alcanzó o superó
-                porcentaje_mostrar = 100
-            elif porcentaje_completado >= 75:
-                color_barra = "🟡"  # Amarillo si está cerca
-                porcentaje_mostrar = porcentaje_completado
+st.sidebar.title("Menú principal")
+current_page = st.sidebar.radio("Navegación", list(NAVIGATION.keys()))
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY")
+
+def get_summary(period_label: str = "Período completo") -> dict:
+    df_ventas = get_ventas()
+    df_gastos = get_gastos()
+
+    total_ingresos = df_ventas["total"].sum() if len(df_ventas) else 0.0
+    total_gastos = (df_gastos["total_pct_se"].fillna(0) + df_gastos["total_pct_re"].fillna(0)).sum() if len(df_gastos) else 0.0
+    resultado = total_ingresos - total_gastos
+
+    return {
+        "label": period_label,
+        "ingresos": total_ingresos,
+        "gastos": total_gastos,
+        "resultado": resultado,
+        "ventas_count": len(df_ventas),
+        "gastos_count": len(df_gastos),
+    }
+
+def format_currency(value: float) -> str:
+    return f"${value:,.2f}"
+
+
+def format_percentage(value: float) -> str:
+    return f"{value:.1f}%"
+
+
+def sanitize_latin1(text: str | None) -> str:
+    """Remueve caracteres fuera de latin-1 para evitar errores en FPDF."""
+    if text is None:
+        return ""
+    if not isinstance(text, str):
+        text = str(text)
+    return text.encode("latin-1", "ignore").decode("latin-1")
+
+
+def sanitize_list_latin1(items: list[str] | None, limit: int | None = None) -> list[str]:
+    if not items:
+        return []
+    cleaned = [sanitize_latin1(item) for item in items if item]
+    return cleaned[:limit] if limit else cleaned
+
+
+def sanitize_top_clients(records: list[dict] | None, limit: int = 10) -> list[dict]:
+    sanitized = []
+    for row in records or []:
+        sanitized.append(
+            {
+                "cliente": sanitize_latin1(row.get("cliente")),
+                "sucursal": sanitize_latin1(row.get("sucursal")),
+                "total": float(row.get("total", 0.0) or 0.0),
+            }
+        )
+        if len(sanitized) >= limit:
+            break
+    return sanitized
+
+
+def create_stacked_chart_image(labels: list[str], series: list[dict], ylabel: str, figsize=(7.2, 2.9)) -> str | None:
+    if not labels or not series:
+        return None
+    fig, ax = plt.subplots(figsize=figsize)
+    x = np.arange(len(labels))
+    bottom = np.zeros(len(labels))
+    totales = np.zeros(len(labels))
+    handled = False
+    color_cycle = [
+        JD_BRAND_COLORS["negro"],
+        JD_BRAND_COLORS["amarillo"],
+        JD_BRAND_COLORS["gris"],
+    ]
+    for idx, serie in enumerate(series):
+        values = np.array(serie.get("values", []), dtype=float)
+        if len(values) == 0:
+            continue
+        color = color_cycle[idx % len(color_cycle)]
+        ax.bar(
+            x,
+            values,
+            bottom=bottom,
+            label=serie.get("label", "Serie"),
+            color=color,
+        )
+        bottom += values
+        totales += values
+        handled = True
+    if not handled:
+        plt.close(fig)
+        return None
+    ax.set_ylabel(ylabel)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=45, ha="right")
+    ax.legend(loc="upper left", bbox_to_anchor=(1.01, 1), fontsize=8)
+    ax.grid(axis="y", linestyle="--", alpha=0.3)
+    max_total = totales.max() if len(totales) else 0
+    for idx, total in enumerate(totales):
+        ax.text(
+            x[idx],
+            total + (max_total * 0.01 if max_total else 1000),
+            f"{total:,.0f}",
+            ha="center",
+            va="bottom",
+            fontsize=7,
+        )
+    tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+    fig.tight_layout()
+    fig.savefig(tmp_file.name, dpi=140)
+    plt.close(fig)
+    return tmp_file.name
+
+
+def create_line_chart_image(labels: list[str], series: list[dict], ylabel: str, figsize=(7.2, 2.9)) -> str | None:
+    if not labels or not series:
+        return None
+    fig, ax = plt.subplots(figsize=figsize)
+    x = np.arange(len(labels))
+    handled = False
+    color_cycle = [
+        JD_BRAND_COLORS["negro"],
+        JD_BRAND_COLORS["amarillo"],
+        JD_BRAND_COLORS["gris"],
+    ]
+    for idx, serie in enumerate(series):
+        values = np.array(serie.get("values", []), dtype=float)
+        if len(values) == 0:
+            continue
+        color = color_cycle[idx % len(color_cycle)]
+        ax.plot(
+            x,
+            values,
+            marker='o',
+            label=serie.get("label", "Serie"),
+            color=color,
+        )
+        handled = True
+    if not handled:
+        plt.close(fig)
+        return None
+    ax.set_ylabel(ylabel)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=45, ha="right")
+    ax.legend(loc="upper left", bbox_to_anchor=(1.01, 1), fontsize=8)
+    ax.grid(True, linestyle="--", alpha=0.3)
+    tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+    fig.tight_layout()
+    fig.savefig(tmp_file.name, dpi=140)
+    plt.close(fig)
+    return tmp_file.name
+
+
+def build_historic_distributions(hist_start: date, hist_end: date) -> dict | None:
+    df_hist_ventas = get_ventas(str(hist_start), str(hist_end))
+    gastos_hist = obtener_gastos_totales_con_automaticos(str(hist_start), str(hist_end))
+    df_hist_gastos = gastos_hist["gastos_todos"]
+
+    if len(df_hist_ventas) == 0 and len(df_hist_gastos) == 0:
+        return None
+
+    months = pd.period_range(hist_start, hist_end, freq="M")
+    month_labels = [m.strftime("%b %y") for m in months]
+
+    ventas_hist = df_hist_ventas.copy()
+    if len(ventas_hist):
+        ventas_hist["fecha"] = pd.to_datetime(ventas_hist["fecha"])
+        ventas_hist["month"] = ventas_hist["fecha"].dt.to_period("M")
+        ventas_hist["sucursal"] = ventas_hist["sucursal"].fillna("SIN SUC")
+        ventas_hist = ventas_hist[~ventas_hist["sucursal"].str.upper().eq("COMPARTIDOS")]
+    branches = ["COMODORO", "RIO GRANDE", "RIO GALLEGOS"]
+    other_branches = [
+        suc
+        for suc in ventas_hist["sucursal"].unique()
+        if suc not in branches
+    ] if len(ventas_hist) else []
+    branch_order = [s for s in branches if len(ventas_hist) and s in ventas_hist["sucursal"].unique()] + other_branches[:3]
+    ventas_series = []
+    for branch in branch_order:
+        values = []
+        branch_mask = (
+            ventas_hist["sucursal"].str.upper().eq(branch.upper()) if len(ventas_hist) else None
+        )
+        for month in months:
+            if len(ventas_hist):
+                month_mask = ventas_hist["month"] == month
+                val = ventas_hist.loc[month_mask & branch_mask, "total"].sum()
             else:
-                color_barra = "🔴"  # Rojo si está lejos
-                porcentaje_mostrar = porcentaje_completado
-            
-            # Usar st.progress para la barra visual
-            st.progress(min(porcentaje_completado / 100, 1.0))
-            
-            # Mostrar información adicional
-            col_info1, col_info2 = st.columns(2)
-            with col_info1:
-                st.caption(f"📅 Período: {fecha_inicio_fy26.strftime('%d/%m/%Y')} - {fecha_fin_actual.strftime('%d/%m/%Y')}")
-                st.caption(f"📦 Ventas RE: {formatear_moneda(total_re_fy26)}")
-            with col_info2:
-                st.caption(f"🔩 Repuestos en SE: {formatear_moneda(repuestos_se_fy26)}")
-                st.caption(f"⏱️ Tiempo transcurrido: {((fecha_fin_actual - fecha_inicio_fy26).days / 365) * 100:.1f}% del año fiscal")
-        else:
-            st.info("📊 No hay ventas registradas desde el inicio del año fiscal (Noviembre 2025)")
-        
-        st.divider()
-        
-        # Gráficos
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.subheader("💰 Ingresos por Tipo")
-            if len(df_ventas) > 0:
-                ingresos_tipo = df_ventas.groupby('tipo_re_se')['total'].sum()
-                fig = px.pie(values=ingresos_tipo.values, names=ingresos_tipo.index, 
-                           title="Distribución de Ingresos")
-                st.plotly_chart(fig, use_container_width=True)
-        
-        with col2:
-            st.subheader("🏢 Ingresos por Sucursal")
-            if len(df_ventas) > 0:
-                ingresos_sucursal = df_ventas.groupby('sucursal')['total'].sum()
-                fig = px.bar(x=ingresos_sucursal.index, y=ingresos_sucursal.values,
-                           title="Ingresos por Sucursal")
-                st.plotly_chart(fig, use_container_width=True)
-        
-        # Resumen por segmento
-        st.subheader("📊 Resumen por Segmento")
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.write("**Servicios (SE)**")
-            st.metric("Ingresos", formatear_moneda(ingresos_servicios))
-            
-            # Desglose de gastos SE
-            gastos_se_registrados = gastos_totales_todos['gastos_registrados']['total_pct_se'].sum() if len(gastos_totales_todos['gastos_registrados']) > 0 else 0
-            gastos_se_automaticos = gastos_totales_todos['gastos_automaticos']['total_pct_se'].sum() if len(gastos_totales_todos['gastos_automaticos']) > 0 else 0
-            
-            st.metric("Gastos", formatear_moneda(gastos_se_todos))
-            st.caption(f"📝 Registrados: {formatear_moneda(gastos_se_registrados)} | 🤖 Automáticos: {formatear_moneda(gastos_se_automaticos)}")
-            
-            st.metric("Resultado", formatear_moneda(resultado_servicios), 
-                     delta=f"{margen_servicios:.1f}%")
-        
-        with col2:
-            st.write("**Repuestos (RE)**")
-            st.metric("Ingresos", formatear_moneda(ingresos_repuestos))
-            
-            # Desglose de gastos RE
-            gastos_re_registrados = gastos_totales_todos['gastos_registrados']['total_pct_re'].sum() if len(gastos_totales_todos['gastos_registrados']) > 0 else 0
-            gastos_re_automaticos = gastos_totales_todos['gastos_automaticos']['total_pct_re'].sum() if len(gastos_totales_todos['gastos_automaticos']) > 0 else 0
-            
-            st.metric("Gastos", formatear_moneda(gastos_re_todos))
-            st.caption(f"📝 Registrados: {formatear_moneda(gastos_re_registrados)} | 🤖 Automáticos: {formatear_moneda(gastos_re_automaticos)}")
-            
-            st.metric("Resultado", formatear_moneda(resultado_repuestos), 
-                     delta=f"{margen_repuestos:.1f}%")
+                val = 0.0
+            values.append(float(val))
+        ventas_series.append({"label": branch.title(), "values": values})
 
-# ==================== REGISTRAR VENTA ====================
-elif page == "💰 Registrar Venta":
-    st.title("💰 Registrar Nueva Venta")
-    
-    # Verificar si hay datos de PDF para prellenar
-    datos_pdf = st.session_state.get('venta_desde_pdf', None)
-    archivo_pdf_venta = st.session_state.get('archivo_pdf_venta', None)
-    
-    if datos_pdf:
-        st.success("📄 Datos detectados desde PDF! Los campos se prellenarán automáticamente.")
-        if st.button("❌ Limpiar datos del PDF"):
-            del st.session_state['venta_desde_pdf']
-            if 'archivo_pdf_venta' in st.session_state:
-                del st.session_state['archivo_pdf_venta']
-            st.rerun()
-    
-    # Inicializar valores en session_state si no existen o usar datos del PDF
-    if datos_pdf:
-        st.session_state.venta_mano_obra = datos_pdf.get('mano_obra', 0.0)
-        st.session_state.venta_asistencia = datos_pdf.get('asistencia', 0.0)
-        st.session_state.venta_repuestos = datos_pdf.get('repuestos', 0.0)
-        st.session_state.venta_terceros = datos_pdf.get('terceros', 0.0)
-        st.session_state.venta_descuento = datos_pdf.get('descuento', 0.0)
+    gastos_fixed = []
+    gastos_variable = []
+    resultados_series_map = {branch: [] for branch in branch_order}
+
+    for month in months:
+        month_start = month.to_timestamp(how="start").date()
+        month_end = month.to_timestamp(how="end").date()
+        gastos_mes = obtener_gastos_totales_con_automaticos(str(month_start), str(month_end))
+        df_gastos_mes = gastos_mes["gastos_todos"].copy()
+        df_gastos_mes["monto"] = (
+            df_gastos_mes["total_pct_se"].fillna(0) + df_gastos_mes["total_pct_re"].fillna(0)
+        )
+        total_mes = df_gastos_mes["monto"].sum()
+        df_reg_mes = gastos_mes["gastos_registrados"].copy()
+        df_reg_mes["monto"] = (
+            df_reg_mes["total_pct_se"].fillna(0) + df_reg_mes["total_pct_re"].fillna(0)
+        )
+        fijo_mes = df_reg_mes.loc[df_reg_mes["tipo"].fillna("").str.upper().eq("FIJO"), "monto"].sum()
+        gastos_fixed.append(float(fijo_mes))
+        gastos_variable.append(float(max(total_mes - fijo_mes, 0.0)))
+
+        for branch in branch_order:
+            ingresos_branch = 0.0
+            if len(ventas_hist):
+                ingresos_branch = ventas_hist.loc[
+                    (ventas_hist["month"] == month)
+                    & ventas_hist["sucursal"].str.upper().eq(branch.upper()),
+                    "total",
+                ].sum()
+            gastos_branch = df_gastos_mes.loc[
+                df_gastos_mes["sucursal"].fillna("").str.upper().eq(branch.upper()),
+                "monto",
+            ].sum()
+            resultados_series_map[branch].append(float(ingresos_branch - gastos_branch))
+
+    resultados_series = [{"label": branch.title(), "values": resultados_series_map[branch]} for branch in branch_order]
+
+    return {
+        "labels": month_labels,
+        "ventas": {"series": ventas_series},
+        "gastos": {"fixed": gastos_fixed, "variable": gastos_variable},
+        "resultados": {"series": resultados_series},
+    }
+
+
+def compute_working_hours(start_date: date, end_date: date) -> tuple[float, int]:
+    """
+    Calcula las horas hábiles totales (considerando 9 h de lunes a viernes y 4 h los sábados)
+    y la cantidad de días trabajados dentro del período seleccionado.
+    """
+    if start_date > end_date:
+        return 0.0, 0
+
+    day_range = pd.date_range(start_date, end_date, freq="D")
+    total_hours = 0.0
+    working_days = 0
+
+    for day in day_range:
+        weekday = day.weekday()
+        if weekday < 5:  # Lunes a viernes
+            total_hours += 9
+            working_days += 1
+        elif weekday == 5:  # Sábados
+            total_hours += 4
+            working_days += 1
+        # Domingos no suman
+
+    return total_hours, working_days
+
+
+def render_reports_gastos():
+    st.caption("Explora gastos fijos y variables registrados y calculados.")
+
+    col_f1, col_f2 = st.columns(2)
+    with col_f1:
+        fecha_inicio = st.date_input(
+            "Fecha inicio",
+            value=date(date.today().year, date.today().month, 1),
+            key="gastos_fecha_inicio",
+        )
+    with col_f2:
+        fecha_fin = st.date_input(
+            "Fecha fin",
+            value=date.today(),
+            key="gastos_fecha_fin",
+        )
+
+    horas_disponibles_total = 0.0
+    horas_habiles_periodo = 0.0
+    dias_habiles_periodo = 0
+
+    if fecha_inicio > fecha_fin:
+        st.error("La fecha de inicio no puede ser mayor a la fecha fin.")
+        return
+
+    df_gastos = get_gastos(str(fecha_inicio), str(fecha_fin))
+    gastos_totales = obtener_gastos_totales_con_automaticos(str(fecha_inicio), str(fecha_fin))
+    df_gastos_calc = gastos_totales["gastos_automaticos"]
+
+    if len(df_gastos) == 0 and len(df_gastos_calc) == 0:
+        st.info("No hay gastos para el período seleccionado.")
+        return
+
+    df_gastos = df_gastos.copy()
+    if len(df_gastos) > 0 and "total_pct" not in df_gastos.columns:
+        df_gastos["total_pct"] = df_gastos["total_pct_se"].fillna(0) + df_gastos["total_pct_re"].fillna(0)
+
+    if len(df_gastos_calc) > 0:
+        df_todos = pd.concat([df_gastos, df_gastos_calc], ignore_index=True)
     else:
-        if 'venta_mano_obra' not in st.session_state:
-            st.session_state.venta_mano_obra = 0.0
-        if 'venta_asistencia' not in st.session_state:
-            st.session_state.venta_asistencia = 0.0
-        if 'venta_repuestos' not in st.session_state:
-            st.session_state.venta_repuestos = 0.0
-        if 'venta_terceros' not in st.session_state:
-            st.session_state.venta_terceros = 0.0
-        if 'venta_descuento' not in st.session_state:
-            st.session_state.venta_descuento = 0.0
-    
-    # Campos numéricos FUERA del formulario para que se actualicen en tiempo real
-    st.subheader("💰 Montos de la Venta")
-    col_montos1, col_montos2 = st.columns(2)
-    
-    with col_montos1:
-        mano_obra = st.number_input(
-            "Mano de Obra (USD)", 
-            min_value=0.0, 
-            value=st.session_state.venta_mano_obra, 
-            step=0.01,
-            key="input_mano_obra"
-        )
-        repuestos = st.number_input(
-            "Repuestos (USD)", 
-            min_value=0.0, 
-            value=st.session_state.venta_repuestos, 
-            step=0.01,
-            key="input_repuestos"
-        )
-        descuento = st.number_input(
-            "Descuento (USD)", 
-            min_value=0.0, 
-            value=st.session_state.venta_descuento, 
-            step=0.01,
-            key="input_descuento"
-        )
-    
-    with col_montos2:
-        asistencia = st.number_input(
-            "Asistencia (USD)", 
-            min_value=0.0, 
-            value=st.session_state.venta_asistencia, 
-            step=0.01,
-            key="input_asistencia"
-        )
-        terceros = st.number_input(
-            "Terceros (USD)", 
-            min_value=0.0, 
-            value=st.session_state.venta_terceros, 
-            step=0.01,
-            key="input_terceros"
-        )
-    
-    # Calcular total en tiempo real (usar valores actuales de los inputs)
-    total_calculado = mano_obra + asistencia + repuestos + terceros - descuento
-    
-    # Actualizar session_state con los valores actuales para mantenerlos
-    st.session_state.venta_mano_obra = mano_obra
-    st.session_state.venta_asistencia = asistencia
-    st.session_state.venta_repuestos = repuestos
-    st.session_state.venta_terceros = terceros
-    st.session_state.venta_descuento = descuento
-    
-    # Mostrar total calculado
-    st.metric("💰 Total Calculado", f"{formatear_moneda(total_calculado)} USD", 
-             delta=f"Mano Obra: {formatear_moneda(mano_obra)} + Asistencia: {formatear_moneda(asistencia)} + Repuestos: {formatear_moneda(repuestos)} + Terceros: {formatear_moneda(terceros)} - Descuento: {formatear_moneda(descuento)}")
-    
-    st.info("ℹ️ **Nota:** Si seleccionas 'NOTA DE CREDITO' como tipo de comprobante, el total se convertirá automáticamente a negativo al guardar.")
-    
+        df_todos = df_gastos.copy()
+
+    total_registrado = (
+        df_gastos["total_pct_se"].fillna(0) + df_gastos["total_pct_re"].fillna(0)
+    ).sum() if len(df_gastos) else 0.0
+    total_calculado = (
+        df_gastos_calc["total_pct_se"].fillna(0) + df_gastos_calc["total_pct_re"].fillna(0)
+    ).sum() if len(df_gastos_calc) else 0.0
+
+    df_reg_fijo = df_gastos[df_gastos["tipo"] == "FIJO"] if "tipo" in df_gastos.columns else pd.DataFrame()
+    df_reg_variable = df_gastos[df_gastos["tipo"] == "VARIABLE"] if "tipo" in df_gastos.columns else pd.DataFrame()
+
+    gasto_fijo_total = (
+        df_reg_fijo["total_pct_se"].fillna(0).sum() + df_reg_fijo["total_pct_re"].fillna(0).sum()
+    ) if len(df_reg_fijo) else 0.0
+    gasto_variable_total = (
+        df_reg_variable["total_pct_se"].fillna(0).sum() + df_reg_variable["total_pct_re"].fillna(0).sum()
+    ) if len(df_reg_variable) else 0.0
+    gasto_variable_total += total_calculado
+
+    total_general = gasto_fijo_total + gasto_variable_total
+
+    col_top1, col_top2, col_top3 = st.columns(3)
+    col_top1.metric("Gasto total", format_currency(total_general))
+    col_top2.metric("Gasto fijo total", format_currency(gasto_fijo_total))
+    col_top3.metric("Gasto variable total", format_currency(gasto_variable_total))
+
     st.divider()
+    st.subheader("Impacto real Servicios vs Repuestos (según % asignado)")
+    impacto_servicios = df_todos["total_pct_se"].fillna(0).sum()
+    impacto_repuestos = df_todos["total_pct_re"].fillna(0).sum()
+
+    servicios_fijo = df_reg_fijo["total_pct_se"].fillna(0).sum()
+    servicios_variable_reg = df_reg_variable["total_pct_se"].fillna(0).sum()
+    servicios_variable_calc = df_gastos_calc["total_pct_se"].fillna(0).sum() if len(df_gastos_calc) else 0.0
+    servicios_variable = servicios_variable_reg + servicios_variable_calc
+
+    repuestos_fijo = df_reg_fijo["total_pct_re"].fillna(0).sum()
+    repuestos_variable_reg = df_reg_variable["total_pct_re"].fillna(0).sum()
+    repuestos_variable_calc = df_gastos_calc["total_pct_re"].fillna(0).sum() if len(df_gastos_calc) else 0.0
+    repuestos_variable = repuestos_variable_reg + repuestos_variable_calc
+
+    total_subareas = impacto_servicios + impacto_repuestos
+    col_sub1, col_sub2 = st.columns(2)
+    col_sub1.metric(
+        "Impacto Servicios",
+        format_currency(impacto_servicios),
+        delta=f"{(impacto_servicios / total_subareas * 100):.1f}%" if total_subareas else None,
+    )
+    col_sub2.metric(
+        "Impacto Repuestos",
+        format_currency(impacto_repuestos),
+        delta=f"{(impacto_repuestos / total_subareas * 100):.1f}%" if total_subareas else None,
+    )
+
+    col_det1, col_det2 = st.columns(2)
+    col_det1.metric(
+        "Servicios Fijo",
+        format_currency(servicios_fijo),
+        delta=f"{(servicios_fijo / impacto_servicios * 100):.1f}% del impacto SE" if impacto_servicios else None,
+    )
+    col_det1.metric(
+        "Servicios Variable",
+        format_currency(servicios_variable),
+        delta=f"{(servicios_variable / impacto_servicios * 100):.1f}% del impacto SE"
+        if impacto_servicios
+        else None,
+    )
+    col_det2.metric(
+        "Repuestos Fijo",
+        format_currency(repuestos_fijo),
+        delta=f"{(repuestos_fijo / impacto_repuestos * 100):.1f}% del impacto RE" if impacto_repuestos else None,
+    )
+    col_det2.metric(
+        "Repuestos Variable",
+        format_currency(repuestos_variable),
+        delta=f"{(repuestos_variable / impacto_repuestos * 100):.1f}% del impacto RE"
+        if impacto_repuestos
+        else None,
+    )
+
+    fig_sub = px.pie(
+        pd.DataFrame(
+            {"Subárea": ["Servicios", "Repuestos"], "Monto USD": [impacto_servicios, impacto_repuestos]}
+        ),
+        values="Monto USD",
+        names="Subárea",
+        title="Distribución final por subárea",
+        hole=0.45,
+    )
+    st.plotly_chart(fig_sub, use_container_width=True, key="gastos_subareas_pie")
+    st.caption("Incluye tanto gastos registrados como los calculados automáticamente.")
+
+    st.subheader("Gasto fijo por sucursal")
+
+    if len(df_reg_fijo) > 0:
+        gasto_fijo_sucursal = (
+            df_reg_fijo.groupby("sucursal")["total_pct_se"].sum()
+            + df_reg_fijo.groupby("sucursal")["total_pct_re"].sum()
+        )
+        gasto_fijo_sucursal = gasto_fijo_sucursal.reset_index(name="Monto USD")
+        fig_fijo = px.bar(
+            gasto_fijo_sucursal,
+            x="sucursal",
+            y="Monto USD",
+            labels={"sucursal": "Sucursal", "Monto USD": "USD"},
+            title="Gasto fijo por sucursal",
+            color="Monto USD",
+            color_continuous_scale="Blues",
+        )
+        st.plotly_chart(fig_fijo, use_container_width=True, key="gastos_fijos_sucursal")
+    else:
+        st.caption("No se registran gastos fijos en el período.")
+
+    st.subheader("Gasto variable por sucursal (registrado + calculado)")
+    df_variable_all = pd.concat(
+        [
+            df_reg_variable,
+            df_gastos_calc.assign(tipo="VARIABLE(CALC)"),
+        ],
+        ignore_index=True,
+    ) if len(df_reg_variable) or len(df_gastos_calc) else pd.DataFrame()
+
+    if len(df_variable_all):
+        gasto_variable_sucursal = (
+            df_variable_all.groupby("sucursal")["total_pct_se"].sum()
+            + df_variable_all.groupby("sucursal")["total_pct_re"].sum()
+        )
+        gasto_variable_sucursal = gasto_variable_sucursal.reset_index(name="Monto USD")
+        fig_var = px.bar(
+            gasto_variable_sucursal,
+            x="sucursal",
+            y="Monto USD",
+            labels={"sucursal": "Sucursal", "Monto USD": "USD"},
+            title="Gasto variable por sucursal",
+            color="Monto USD",
+            color_continuous_scale="Greens",
+        )
+        st.plotly_chart(fig_var, use_container_width=True, key="gastos_variable_sucursal")
+    else:
+        st.caption("No se registran gastos variables en el período.")
+
+    st.divider()
+    st.subheader("Composición de gastos - Fijo vs Variable")
+
+    composicion_tipo = pd.DataFrame(
+        [
+            {"Tipo": "Fijo", "Monto USD": gasto_fijo_total},
+            {"Tipo": "Variable", "Monto USD": gasto_variable_total},
+        ]
+    )
+    composicion_tipo["Porcentaje"] = (
+        composicion_tipo["Monto USD"] / composicion_tipo["Monto USD"].sum() * 100
+    ).round(1)
+
+    fig_pie_tipo = px.pie(
+        composicion_tipo,
+        values="Monto USD",
+        names="Tipo",
+        title="Composición Fijo vs Variable",
+        hole=0.45,
+    )
+    st.plotly_chart(fig_pie_tipo, use_container_width=True)
+    st.divider()
+    st.subheader("Composición por clasificación")
+
+    if len(df_todos) > 0:
+        df_clasificacion = df_todos.copy()
+        df_clasificacion["clasificacion"] = df_clasificacion["clasificacion"].fillna("Sin clasificación")
+        df_clasificacion["Monto USD"] = (
+            df_clasificacion["total_pct_se"].fillna(0) + df_clasificacion["total_pct_re"].fillna(0)
+        )
+        resumen_clasificacion = (
+            df_clasificacion.groupby("clasificacion")["Monto USD"].sum().reset_index()
+        )
+        resumen_clasificacion = resumen_clasificacion.sort_values("Monto USD", ascending=False)
+
+        fig_clasif = px.bar(
+            resumen_clasificacion.head(10),
+            x="clasificacion",
+            y="Monto USD",
+            title="Top 10 clasificaciones por gasto",
+            labels={"clasificacion": "Clasificación", "Monto USD": "USD"},
+        )
+        st.plotly_chart(fig_clasif, use_container_width=True, key="gastos_top_clasificacion")
+
+        st.caption("Participación por clasificación")
+        resumen_clasificacion["Porcentaje"] = (
+            resumen_clasificacion["Monto USD"] / resumen_clasificacion["Monto USD"].sum() * 100
+        ).round(1)
+        st.dataframe(
+            resumen_clasificacion.assign(
+                **{
+                    "Monto USD": resumen_clasificacion["Monto USD"].apply(format_currency),
+                    "Porcentaje": resumen_clasificacion["Porcentaje"].apply(lambda x: f"{x}%"),
+                }
+            ),
+            use_container_width=True,
+        )
+    else:
+        st.caption("No hay clasificaciones para mostrar.")
+
+
+def render_reports_operativo():
+    st.caption("Compara ingresos, gastos y punto de equilibrio.")
+
+    col_f1, col_f2 = st.columns(2)
+    with col_f1:
+        fecha_inicio = st.date_input(
+            "Fecha inicio",
+            value=date(date.today().year, date.today().month, 1),
+            key="operativo_fecha_inicio",
+        )
+    with col_f2:
+        fecha_fin = st.date_input(
+            "Fecha fin",
+            value=date.today(),
+            key="operativo_fecha_fin",
+        )
+
+    col_cfg1, col_cfg2 = st.columns(2)
+    with col_cfg1:
+        tecnicos_activos = st.number_input(
+            "Técnicos disponibles",
+            min_value=1,
+            max_value=50,
+            value=7,
+            step=1,
+            key="operativo_tecnicos_count",
+            help="Cantidad de técnicos operativos en el período.",
+        )
+    with col_cfg2:
+        tarifa_hora_tecnico = st.number_input(
+            "Tarifa promedio mano de obra (USD/h)",
+            min_value=1.0,
+            max_value=500.0,
+            value=60.0,
+            step=1.0,
+            key="operativo_tarifa_hora",
+            help="Tarifa promedio facturada por hora técnica, usada para estimar horas vendidas.",
+        )
+
+    if fecha_inicio > fecha_fin:
+        st.error("La fecha de inicio no puede ser mayor a la fecha fin.")
+        return
+
+    ingresos_mo_y_asistencia = 0.0
+    horas_vendidas_estimadas = 0.0
+
+    df_ventas = get_ventas(str(fecha_inicio), str(fecha_fin))
+    gastos_totales = obtener_gastos_totales_con_automaticos(str(fecha_inicio), str(fecha_fin))
+    df_gastos_reg = gastos_totales["gastos_registrados"]
+    df_gastos_calc = gastos_totales["gastos_automaticos"]
+    df_gastos_todos = gastos_totales["gastos_todos"]
+
+    for df_target in [df_gastos_reg, df_gastos_todos]:
+        if len(df_target) and "total_pct" not in df_target.columns:
+            df_target["total_pct"] = df_target["total_pct_se"].fillna(0) + df_target["total_pct_re"].fillna(0)
+
+    if len(df_ventas) == 0 and len(df_gastos_todos) == 0:
+        st.info("No hay datos suficientes para este período.")
+        return
+
+    total_ingresos = df_ventas["total"].sum() if len(df_ventas) else 0.0
+    ventas_se = df_ventas[df_ventas["tipo_re_se"] == "SE"] if len(df_ventas) else pd.DataFrame()
+    ventas_re = df_ventas[df_ventas["tipo_re_se"] == "RE"] if len(df_ventas) else pd.DataFrame()
+    ingresos_servicios = ventas_se["total"].sum() if len(ventas_se) else 0.0
+    ingresos_repuestos = ventas_re["total"].sum() if len(ventas_re) else 0.0
+    porcentaje_iibb = 0.045
+    descuento_iibb = total_ingresos * porcentaje_iibb
+    ingresos_netos = total_ingresos - descuento_iibb
+
+    df_gastos_todos = df_gastos_todos.copy()
+    df_gastos_todos["monto"] = df_gastos_todos["total_pct_se"].fillna(0) + df_gastos_todos["total_pct_re"].fillna(0)
+    total_gastos = df_gastos_todos["monto"].sum()
+    resultado = ingresos_netos - total_gastos
+
+    col_sum1, col_sum2, col_sum3 = st.columns(3)
+    col_sum1.metric(
+        "Ingresos netos (post IIBB)",
+        format_currency(ingresos_netos),
+        delta=f"-{format_currency(descuento_iibb)} IIBB",
+    )
+    col_sum2.metric("Gastos totales", format_currency(total_gastos))
+    col_sum3.metric(
+        "Resultado operativo",
+        format_currency(resultado),
+        delta="Positivo" if resultado >= 0 else "Negativo",
+    )
+
+    st.divider()
+    st.subheader("Ingresos vs Gastos por sucursal")
+    comparacion = pd.DataFrame()
+    comparacion_pdf_records: list[dict] = []
+    if len(df_ventas) > 0 or len(df_gastos_todos) > 0:
+        ingresos_sucursal = (
+            df_ventas.groupby("sucursal")["total"].sum().reset_index(name="ingresos")
+            if len(df_ventas)
+            else pd.DataFrame(columns=["sucursal", "ingresos"])
+        )
+        gastos_sucursal = df_gastos_todos.groupby("sucursal")["monto"].sum().reset_index(name="gastos_totales")
+        comparacion = ingresos_sucursal.merge(gastos_sucursal, on="sucursal", how="outer").fillna(0)
+        comparacion = comparacion[~comparacion["sucursal"].fillna("").str.upper().eq("COMPARTIDOS")]
+        comparacion["resultado"] = comparacion["ingresos"] - comparacion["gastos_totales"]
+
+        if len(comparacion):
+            comparacion_pdf_records = comparacion.rename(
+                columns={
+                    "sucursal": "Sucursal",
+                    "ingresos": "Ingresos",
+                    "gastos_totales": "Gastos",
+                    "resultado": "Resultado",
+                }
+            ).to_dict("records")
+
+            comparacion_display = pd.DataFrame(comparacion_pdf_records)
+            comparacion_display["Ingresos"] = comparacion_display["Ingresos"].apply(format_currency)
+            comparacion_display["Gastos"] = comparacion_display["Gastos"].apply(format_currency)
+            comparacion_display["Resultado"] = comparacion_display["Resultado"].apply(format_currency)
+            st.dataframe(comparacion_display, use_container_width=True)
+
+            fig_comp = px.bar(
+                comparacion.melt(id_vars="sucursal", value_vars=["ingresos", "gastos_totales"]),
+                x="sucursal",
+                y="value",
+                color="variable",
+                barmode="group",
+                title="Ingresos vs Gastos por sucursal",
+                labels={"sucursal": "Sucursal", "value": "USD", "variable": ""},
+            )
+            st.plotly_chart(fig_comp, use_container_width=True, key="operativo_ingresos_gastos")
+        else:
+            st.caption("No hay datos de sucursales para mostrar.")
+    else:
+        st.caption("No hay datos de sucursales para mostrar.")
+
+    st.divider()
+    st.subheader("Punto de equilibrio")
+
+    df_fijos_periodo = (
+        df_gastos_reg[df_gastos_reg["tipo"] == "FIJO"].copy()
+        if len(df_gastos_reg) and "tipo" in df_gastos_reg.columns
+        else pd.DataFrame()
+    )
+    if len(df_fijos_periodo):
+        df_fijos_periodo["monto"] = df_fijos_periodo["total_pct_se"].fillna(0) + df_fijos_periodo["total_pct_re"].fillna(0)
+        gastos_fijos_bruto = df_fijos_periodo["monto"].sum()
+    else:
+        gastos_fijos_bruto = 0.0
+
+    direct_classifications = {"SUELDO", "CARGAS SOCIALES", "OBRA SOCIAL"}
+    direct_costos_tecnicos = 0.0
+    if len(df_fijos_periodo):
+        clasif_series = df_fijos_periodo.get("clasificacion", pd.Series(dtype=str)).fillna("").str.upper()
+        proveedor_series = df_fijos_periodo.get("proveedor", pd.Series(dtype=str)).fillna("").str.upper()
+        mask_direct = clasif_series.isin(direct_classifications) & proveedor_series.eq("TECNICOS")
+        if mask_direct.any():
+            direct_costos_tecnicos = df_fijos_periodo.loc[mask_direct, "monto"].fillna(0).sum()
+
+    gastos_fijos_periodo = max(gastos_fijos_bruto - direct_costos_tecnicos, 0.0)
+
+    gastos_fijos_servicios = df_fijos_periodo["total_pct_se"].fillna(0).sum() if len(df_fijos_periodo) else 0.0
+    gastos_fijos_repuestos = df_fijos_periodo["total_pct_re"].fillna(0).sum() if len(df_fijos_periodo) else 0.0
+
+    factor_abs_total = (total_ingresos / gastos_fijos_periodo * 100) if gastos_fijos_periodo else 0.0
+    factor_abs_servicios = (ingresos_servicios / gastos_fijos_servicios * 100) if gastos_fijos_servicios else 0.0
+    factor_abs_repuestos = (ingresos_repuestos / gastos_fijos_repuestos * 100) if gastos_fijos_repuestos else 0.0
+
+    variable_costos_periodo = max(total_gastos - gastos_fijos_periodo, 0.0)
+    contrib_total = ingresos_netos - variable_costos_periodo
+    margen_promedio = (contrib_total / total_ingresos) if total_ingresos else 0
+    ventas_equilibrio = gastos_fijos_periodo / margen_promedio if margen_promedio > 0 else 0
+
+    col_pe1, col_pe2, col_pe3 = st.columns(3)
+    col_pe1.metric("Gastos fijos del período", format_currency(gastos_fijos_periodo))
+    col_pe2.metric("Ventas necesarias (equilibrio)", format_currency(ventas_equilibrio))
+    brecha_vs_ventas = ingresos_netos - ventas_equilibrio
+    col_pe3.metric(
+        "Brecha vs ventas netas",
+        format_currency(brecha_vs_ventas),
+        delta="Superávit" if brecha_vs_ventas >= 0 else "Déficit",
+    )
+
+    st.caption(
+        "El punto de equilibrio usa los gastos fijos registrados y el margen promedio del período. "
+        "Considera RE + SE; puedes estrechar el período arriba."
+    )
+
+    st.subheader("EBIT y factores de absorción")
+    absorcion_rows = [
+        {"Indicador": "EBIT", "Valor": format_currency(resultado)},
+        {"Indicador": "Factor absorción postventa", "Valor": format_percentage(factor_abs_total)},
+        {"Indicador": "Factor absorción repuestos", "Valor": format_percentage(factor_abs_repuestos)},
+        {"Indicador": "Factor absorción servicios", "Valor": format_percentage(factor_abs_servicios)},
+    ]
+    st.table(pd.DataFrame(absorcion_rows))
+
+    st.subheader("Punto de equilibrio por sucursal")
+    pe_pdf_records: list[dict] = []
+    if len(comparacion):
+        if len(df_fijos_periodo):
+            gastos_fijos_suc = (
+                df_fijos_periodo.groupby("sucursal")["monto"].sum().reset_index(name="gastos_fijos")
+            )
+        else:
+            gastos_fijos_suc = pd.DataFrame(columns=["sucursal", "gastos_fijos"])
+
+        comparacion_pe = comparacion.merge(gastos_fijos_suc, on="sucursal", how="left").fillna(0)
+        comparacion_pe["gastos_variables"] = (comparacion_pe["gastos_totales"] - comparacion_pe["gastos_fijos"]).clip(lower=0)
+        comparacion_pe["contribucion"] = comparacion_pe["ingresos"] - comparacion_pe["gastos_variables"]
+        comparacion_pe["margen"] = comparacion_pe.apply(
+            lambda row: (row["contribucion"] / row["ingresos"]) if row["ingresos"] else 0, axis=1
+        )
+        comparacion_pe["ventas_necesarias"] = comparacion_pe.apply(
+            lambda row: row["gastos_fijos"] / row["margen"] if row["margen"] > 0 else 0,
+            axis=1,
+        )
+        comparacion_pe["brecha"] = comparacion_pe["ingresos"] - comparacion_pe["ventas_necesarias"]
+
+        pe_pdf_records = comparacion_pe.rename(
+            columns={
+                "sucursal": "Sucursal",
+                "ingresos": "Ventas actuales",
+                "gastos_fijos": "Gastos fijos",
+                "ventas_necesarias": "Ventas necesarias",
+                "brecha": "Brecha",
+            }
+        ).to_dict("records")
+
+        df_pe_display = pd.DataFrame(pe_pdf_records)
+        df_pe_display["Ventas actuales"] = comparacion_pe["ingresos"].apply(format_currency)
+        df_pe_display["Gastos fijos"] = comparacion_pe["gastos_fijos"].apply(format_currency)
+        df_pe_display["Ventas necesarias"] = comparacion_pe["ventas_necesarias"].apply(format_currency)
+        df_pe_display["Brecha"] = comparacion_pe["brecha"].apply(format_currency)
+
+        st.dataframe(df_pe_display, use_container_width=True)
+    else:
+        st.caption("No hay información por sucursal disponible.")
+
+    periodo_label = f"{fecha_inicio.strftime('%d/%m/%Y')} - {fecha_fin.strftime('%d/%m/%Y')}"
+    ai_state_key = f"ia_operativo_{fecha_inicio.isoformat()}_{fecha_fin.isoformat()}"
+    ai_result = st.session_state.get(ai_state_key)
+
+    should_autorun_ai = (
+        GEMINI_API_KEY
+        and ai_state_key not in st.session_state
+        and (len(df_ventas) or len(df_gastos_todos))
+    )
+    def pct_str(value: float, base: float) -> str:
+        if base <= 0:
+            return "N/A"
+        return f"{value / base:.1%}"
+
+    repuestos_mostrador = 0.0
+    if len(ventas_re):
+        if "repuestos" in ventas_re.columns and ventas_re["repuestos"].notna().any():
+            repuestos_mostrador = ventas_re["repuestos"].fillna(ventas_re["total"]).sum()
+        else:
+            repuestos_mostrador = ventas_re["total"].sum()
+    repuestos_servicios = ventas_se["repuestos"].fillna(0).sum() if "repuestos" in ventas_se.columns else 0.0
+    mano_obra_total = ventas_se["mano_obra"].fillna(0).sum() if "mano_obra" in ventas_se.columns else 0.0
+    asistencia_total = ventas_se["asistencia"].fillna(0).sum() if "asistencia" in ventas_se.columns else 0.0
+    ingresos_servicios_totales = mano_obra_total + asistencia_total
+    terceros_total = ventas_se["terceros"].fillna(0).sum() if "terceros" in ventas_se.columns else 0.0
+    ventas_repuestos_total = repuestos_mostrador + repuestos_servicios
+
+    costo_repuestos_auto = 0.0
+    if len(df_gastos_calc) and "clasificacion" in df_gastos_calc.columns:
+        mask_costo = df_gastos_calc["clasificacion"].str.contains("COSTO DE REPUESTOS", case=False, na=False)
+        costo_repuestos_auto = df_gastos_calc.loc[mask_costo, "total_usd"].fillna(0).sum()
+    if costo_repuestos_auto == 0 and ventas_repuestos_total > 0:
+        costo_repuestos_auto = ventas_repuestos_total * 0.65
+    margen_repuestos_val = ventas_repuestos_total - costo_repuestos_auto
+
+    if len(df_gastos_reg) == 0:
+        df_gastos_reg = pd.DataFrame(columns=df_gastos_todos.columns)
+    costos_tecnicos = 0.0
+    if len(df_gastos_reg):
+        mask_tecnicos = df_gastos_reg.get("area", pd.Series(dtype=str)).str.upper().eq("SERVICIO")
+        costos_tecnicos = (
+            df_gastos_reg.loc[mask_tecnicos, "total_pct"].fillna(0).sum()
+            if mask_tecnicos.any()
+            else 0.0
+        )
+    if costos_tecnicos == 0.0 and len(df_gastos_todos):
+        costos_tecnicos = df_gastos_todos["total_pct_se"].fillna(0).sum()
+    margen_mano_obra = ingresos_servicios_totales - costos_tecnicos
+
+    ticket_se_total = (ventas_se["total"].sum() / len(ventas_se)) if len(ventas_se) else 0.0
+    ticket_re_total = (ventas_re["total"].sum() / len(ventas_re)) if len(ventas_re) else 0.0
+
+    horas_col = next((col for col in ["horas", "hs", "horas_trabajadas"] if col in df_ventas.columns), None)
+    horas_totales = df_ventas[horas_col].fillna(0).sum() if horas_col else None
+    if horas_totales and horas_totales < 0:
+        horas_totales = None
+    horas_promedio = (horas_totales / len(ventas_se)) if horas_totales and len(ventas_se) else None
+    ingreso_total_por_hora = None
+    repuestos_por_hora = None
+    if horas_totales and horas_totales > 0:
+        ingreso_total_por_hora = (mano_obra_total + repuestos_servicios) / horas_totales
+        repuestos_por_hora = repuestos_servicios / horas_totales
+
+    horas_habiles_periodo, dias_habiles_periodo = compute_working_hours(fecha_inicio, fecha_fin)
+    horas_disponibles_total = (
+        horas_habiles_periodo * tecnicos_activos if horas_habiles_periodo and tecnicos_activos else 0.0
+    )
+    ingresos_mo_y_asistencia = mano_obra_total + asistencia_total
+    horas_vendidas_estimadas = ingresos_mo_y_asistencia / tarifa_hora_tecnico if tarifa_hora_tecnico > 0 else 0.0
+    productividad_taller = (
+        (horas_vendidas_estimadas / horas_disponibles_total) if horas_disponibles_total > 0 else 0.0
+    )
+
+    st.subheader("Productividad del taller")
+    col_prod1, col_prod2, col_prod3 = st.columns(3)
+    col_prod1.metric(
+        "Horas vendidas (estimadas)",
+        f"{horas_vendidas_estimadas:,.1f} h" if horas_vendidas_estimadas else "0 h",
+        delta=f"Ingresos MO + Asistencia: {format_currency(ingresos_mo_y_asistencia)}",
+    )
+    horas_disp_label = (
+        f"{horas_disponibles_total:,.1f} h" if horas_disponibles_total else "0 h"
+    )
+    horas_disp_delta = (
+        f"{tecnicos_activos} técnicos x {horas_habiles_periodo:,.1f} h"
+        if horas_habiles_periodo and tecnicos_activos
+        else None
+    )
+    col_prod2.metric("Horas hábiles disponibles", horas_disp_label, delta=horas_disp_delta)
+    col_prod3.metric(
+        "Productividad",
+        format_percentage(productividad_taller * 100),
+        delta=f"{dias_habiles_periodo} días trabajados" if dias_habiles_periodo else None,
+    )
+    st.caption(
+        "Se estiman las horas vendidas dividiendo los ingresos de mano de obra + asistencia por la tarifa promedio."
+    )
+
+    productividad_context = {
+        "ingresos_mo_asistencia": ingresos_mo_y_asistencia,
+        "horas_vendidas": horas_vendidas_estimadas,
+        "horas_disponibles": horas_disponibles_total,
+        "dias_habiles": dias_habiles_periodo,
+        "tecnicos": tecnicos_activos,
+        "tarifa": tarifa_hora_tecnico,
+        "productividad_pct": productividad_taller,
+    }
+
+    if should_autorun_ai:
+        with st.spinner("Calculando insights IA del período..."):
+            auto_ai_payload = get_ai_summary(
+                df_ventas=df_ventas.copy(),
+                df_gastos=df_gastos_todos.copy(),
+                gemini_api_key=GEMINI_API_KEY,
+                fecha_inicio=str(fecha_inicio),
+                fecha_fin=str(fecha_fin),
+                gastos_context=gastos_totales,
+                productividad_context=productividad_context,
+            )
+        st.session_state[ai_state_key] = auto_ai_payload
+        ai_result = auto_ai_payload
+
+    estado_resultados_rows = []
+    if total_ingresos > 0:
+        utilidad_bruta = total_ingresos - variable_costos_periodo
+        resultado_estado = utilidad_bruta - gastos_fijos_periodo
+        estado_resultados_rows = [
+            {
+                "concepto": "(+) Ingresos brutos totales",
+                "monto": total_ingresos,
+                "porcentaje": "100.0%",
+            },
+            {
+                "concepto": "(-) Costos directos de venta (Rep + Tec + Ter)",
+                "monto": variable_costos_periodo,
+                "porcentaje": pct_str(variable_costos_periodo, total_ingresos),
+            },
+            {
+                "concepto": "(=) Utilidad bruta (Margen contribución)",
+                "monto": utilidad_bruta,
+                "porcentaje": pct_str(utilidad_bruta, total_ingresos),
+            },
+            {
+                "concepto": "(-) Gastos de estructura (Adm + Sist)",
+                "monto": gastos_fijos_periodo,
+                "porcentaje": pct_str(gastos_fijos_periodo, total_ingresos),
+            },
+            {
+                "concepto": "(=) Resultado operativo bruto",
+                "monto": resultado_estado,
+                "porcentaje": pct_str(resultado_estado, total_ingresos),
+            },
+        ]
+
+    ventas_suc_resumen = []
+    if len(comparacion_pdf_records) and total_ingresos:
+        ventas_suc_resumen = [
+            {
+                "Sucursal": row["Sucursal"],
+                "Venta": row["Ingresos"],
+                "Porcentaje": pct_str(row["Ingresos"], total_ingresos),
+            }
+            for row in comparacion_pdf_records
+        ]
+
+    resumen_cards = [
+        ("Ingresos netos", format_currency(ingresos_netos)),
+        ("Gastos totales", format_currency(total_gastos)),
+        ("Resultado operativo", format_currency(resultado)),
+        ("Gastos fijos", format_currency(gastos_fijos_periodo)),
+    ]
+    if ventas_repuestos_total > 0:
+        resumen_cards.append(
+            (
+                "Margen repuestos",
+                f"{format_currency(margen_repuestos_val)} ({pct_str(margen_repuestos_val, ventas_repuestos_total)})",
+            )
+        )
+    if ingresos_servicios_totales > 0:
+        resumen_cards.append(
+            (
+                "Margen servicios (MO + Asist)",
+                f"{format_currency(margen_mano_obra)} ({pct_str(margen_mano_obra, ingresos_servicios_totales)})",
+            )
+        )
+    if comparacion_pdf_records:
+        mejor = max(comparacion_pdf_records, key=lambda row: row["Resultado"])
+        peor = min(comparacion_pdf_records, key=lambda row: row["Resultado"])
+        resumen_cards.append(("Mejor sucursal", f"{mejor['Sucursal']} ({format_currency(mejor['Resultado'])})"))
+        if peor["Sucursal"] != mejor["Sucursal"]:
+            resumen_cards.append(("Mayor presión", f"{peor['Sucursal']} ({format_currency(peor['Resultado'])})"))
+
+    HIST_START = date(2025, 11, 1)
+    HIST_END = date(2026, 10, 31)
+    historicos_pdf = build_historic_distributions(HIST_START, HIST_END)
+
+    detalles_pdf = {
+        "empresa": "Patagonia Maquinarias",
+        "moneda": "USD",
+        "estado_resultados": estado_resultados_rows,
+        "ingresos_detalle": {
+            "repuestos_mostrador": repuestos_mostrador,
+            "repuestos_servicios": repuestos_servicios,
+            "mano_obra": mano_obra_total,
+            "asistencia": asistencia_total,
+            "terceros": terceros_total,
+        },
+        "ventas_sucursales": ventas_suc_resumen,
+        "tickets": {
+            "se_total": ticket_se_total,
+            "re_total": ticket_re_total,
+        },
+        "eficiencia": {
+            "tecnicos_activos": None,
+            "ordenes_servicio": len(ventas_se),
+            "ordenes_repuestos": len(ventas_re),
+            "horas_totales": horas_totales,
+            "horas_promedio": horas_promedio,
+            "ingreso_por_hora": ingreso_total_por_hora,
+            "repuestos_por_hora": repuestos_por_hora,
+            "horas_disponibles": horas_disponibles_total,
+            "horas_vendidas_estimadas": horas_vendidas_estimadas,
+            "productividad": productividad_taller,
+            "tarifa_hora": tarifa_hora_tecnico,
+            "tecnicos_config": tecnicos_activos,
+            "dias_habiles": dias_habiles_periodo,
+        },
+        "margenes_negocio": {
+            "repuestos": {
+                "ventas": ventas_repuestos_total,
+                "costo": costo_repuestos_auto,
+                "margen": margen_repuestos_val,
+                "margen_pct": pct_str(margen_repuestos_val, ventas_repuestos_total)
+                if ventas_repuestos_total
+                else "N/A",
+                "comentario": "El mix taller/mostrador permite atar repuestos a mano de obra.",
+            },
+            "servicios": {
+                "ventas": ingresos_servicios_totales,
+                "costo": costos_tecnicos,
+                "margen": margen_mano_obra,
+                "margen_pct": pct_str(margen_mano_obra, ingresos_servicios_totales) if ingresos_servicios_totales else "N/A",
+                "ingresos_por_hora": ingreso_total_por_hora,
+            },
+        },
+        "productividad": {
+            "ingresos_mo_asistencia": ingresos_mo_y_asistencia,
+            "horas_vendidas": horas_vendidas_estimadas,
+            "horas_disponibles": horas_disponibles_total,
+            "dias_habiles": dias_habiles_periodo,
+            "tecnicos": tecnicos_activos,
+            "tarifa": tarifa_hora_tecnico,
+            "ocupacion_pct": productividad_taller,
+        },
+        "resumen_cards": resumen_cards,
+        "historicos": historicos_pdf,
+    }
+
+    ai_section_for_pdf = None
+    if ai_result:
+        insights_for_pdf = ai_result.get("insights", {})
+        ai_section_for_pdf = {
+            "timestamp": sanitize_latin1(ai_result.get("timestamp_analisis")),
+            "tendencias": sanitize_list_latin1(insights_for_pdf.get("tendencias"), limit=4),
+            "alertas": sanitize_list_latin1(insights_for_pdf.get("alertas"), limit=4),
+            "recomendaciones": sanitize_list_latin1(insights_for_pdf.get("recomendaciones"), limit=4),
+            "recomendaciones_extra": sanitize_list_latin1(ai_result.get("recomendaciones"), limit=3),
+            "recomendaciones_sucursales": sanitize_list_latin1(
+                ai_result.get("recomendaciones_sucursales"), limit=4
+            ),
+            "recomendaciones_mix": sanitize_list_latin1(ai_result.get("recomendaciones_mix"), limit=4),
+            "oportunidades": sanitize_list_latin1(ai_result.get("oportunidades"), limit=4),
+            "riesgos": sanitize_list_latin1(ai_result.get("riesgos"), limit=4),
+            "top_clientes": sanitize_top_clients(ai_result.get("top_clientes_detalle")),
+            "prediccion": ai_result.get("prediccion") or {},
+            "alertas_criticas": [
+                {
+                    "titulo": sanitize_latin1(alerta.get("titulo")),
+                    "descripcion": sanitize_latin1(alerta.get("descripcion")),
+                }
+                for alerta in (ai_result.get("alertas_criticas") or [])
+            ],
+            "anomalias": [
+                {
+                    "tipo": sanitize_latin1(anomalia.get("tipo")),
+                    "descripcion": sanitize_latin1(anomalia.get("descripcion")),
+                }
+                for anomalia in (ai_result.get("anomalias") or [])
+            ],
+            "productividad": ai_result.get("productividad"),
+        }
+    detalles_pdf["ai_insights"] = ai_section_for_pdf
+
+    resumen_pdf = {
+        "ingresos_netos": ingresos_netos,
+        "total_ingresos_brutos": total_ingresos,
+        "gastos_totales": total_gastos,
+        "resultado": resultado,
+        "gastos_fijos": gastos_fijos_periodo,
+        "ventas_equilibrio": ventas_equilibrio,
+        "brecha_ventas": brecha_vs_ventas,
+        "margen_promedio": margen_promedio,
+        "variable_costos": variable_costos_periodo,
+        "contribucion_total": contrib_total,
+        "ebit": resultado,
+        "factor_abs_total": factor_abs_total,
+        "factor_abs_repuestos": factor_abs_repuestos,
+        "factor_abs_servicios": factor_abs_servicios,
+        "horas_habiles": horas_habiles_periodo,
+        "horas_disponibles": horas_disponibles_total,
+        "horas_vendidas_estimadas": horas_vendidas_estimadas,
+    }
+    pdf_bytes = build_operativo_pdf(
+        periodo_label,
+        resumen_pdf,
+        comparacion_pdf_records,
+        pe_pdf_records,
+        detalles_pdf,
+    )
+    st.download_button(
+        "📄 Exportar informe (PDF)",
+        data=pdf_bytes,
+        file_name=f"informe_operativo_{fecha_inicio.strftime('%Y%m%d')}_{fecha_fin.strftime('%Y%m%d')}.pdf",
+        mime="application/pdf",
+    )
+
+    st.subheader("📊 Análisis operativo integral")
+    if not GEMINI_API_KEY:
+        st.info("Configura la variable de entorno GEMINI_API_KEY para habilitar el análisis automático.")
+    else:
+        col_ai_btn, col_ai_help = st.columns([1, 3])
+        with col_ai_btn:
+            trigger_ai = st.button(
+                "Actualizar análisis IA",
+                key=f"btn_ai_{ai_state_key}",
+                help="Genera recomendaciones inteligentes para el período mostrado.",
+            )
+        with col_ai_help:
+            st.caption("Gemini analiza ventas, gastos y KPIs para sugerir acciones concretas.")
+
+        if trigger_ai and (len(df_ventas) or len(df_gastos_todos)):
+            with st.spinner("Generando análisis inteligente con Gemini..."):
+                ai_payload = get_ai_summary(
+                    df_ventas=df_ventas.copy(),
+                    df_gastos=df_gastos_todos.copy(),
+                    gemini_api_key=GEMINI_API_KEY,
+                    fecha_inicio=str(fecha_inicio),
+                    fecha_fin=str(fecha_fin),
+                    gastos_context=gastos_totales,
+                    productividad_context=productividad_context,
+                )
+            st.session_state[ai_state_key] = ai_payload
+
+        ai_result = st.session_state.get(ai_state_key)
+        if ai_result:
+            gemini_status = ai_result.get("gemini_status", {})
+            if gemini_status.get("error"):
+                st.warning(
+                    f"No se pudo usar Gemini: {gemini_status['error']}. "
+                    "Se muestran los hallazgos estadísticos locales."
+                )
+            elif gemini_status.get("activo"):
+                st.success("Gemini aportó insights específicos para este período.")
+
+            insights = ai_result.get("insights", {})
+
+            def _render_insight_list(container, title, items):
+                container.markdown(f"**{title}**")
+                if items:
+                    for item in items:
+                        container.write(f"- {item}")
+                else:
+                    container.caption("Sin datos en esta categoría.")
+
+            col_tend, col_alert, col_rec = st.columns(3)
+            _render_insight_list(col_tend, "Tendencias", insights.get("tendencias"))
+            _render_insight_list(col_alert, "Alertas", insights.get("alertas"))
+            _render_insight_list(col_rec, "Recomendaciones", insights.get("recomendaciones"))
+
+            recomendaciones_extra = ai_result.get("recomendaciones", [])
+            if recomendaciones_extra:
+                st.markdown("**Recomendaciones adicionales**")
+                for rec in recomendaciones_extra:
+                    st.write(f"- {rec}")
+
+            extra_sections = [
+                ("Recomendaciones por sucursal", ai_result.get("recomendaciones_sucursales")),
+                ("Recomendaciones mix RE vs SE", ai_result.get("recomendaciones_mix")),
+                ("Oportunidades detectadas", ai_result.get("oportunidades")),
+                ("Riesgos detectados", ai_result.get("riesgos")),
+            ]
+            for title, items in extra_sections:
+                if not items:
+                    continue
+                with st.expander(title, expanded=False):
+                    for item in items:
+                        st.write(f"- {item}")
+
+            prod_ai = ai_result.get("productividad")
+            if prod_ai:
+                with st.expander("Productividad (estimación base)", expanded=False):
+                    st.write(
+                        f"Ingresos MO + asistencia: {format_currency(prod_ai.get('ingresos_mo_asistencia', 0))}."
+                    )
+                    st.write(
+                        f"Horas vendidas: {prod_ai.get('horas_vendidas', 0):,.1f} h | "
+                        f"Horas disponibles: {prod_ai.get('horas_disponibles', 0):,.1f} h "
+                        f"({prod_ai.get('dias_habiles', 0)} días hábiles, {prod_ai.get('tecnicos', 0)} técnicos)."
+                    )
+                    st.write(
+                        f"Ocupación estimada: {format_percentage(prod_ai.get('productividad_pct', 0) * 100)} "
+                        f"con tarifa promedio {format_currency(prod_ai.get('tarifa', 0))}/h."
+                    )
+
+            top_clientes = ai_result.get("top_clientes_detalle") or []
+            if top_clientes:
+                with st.expander("Top 10 clientes del período", expanded=False):
+                    df_top = pd.DataFrame(top_clientes)
+                    if not df_top.empty:
+                        df_top = df_top.rename(columns={"cliente": "Cliente", "sucursal": "Sucursal", "total": "Ventas"})
+                        df_top["Ventas"] = df_top["Ventas"].apply(format_currency)
+                        st.dataframe(df_top, use_container_width=True)
+                    else:
+                        st.caption("Sin datos de clientes para este período.")
+
+            prediccion = ai_result.get("prediccion") or {}
+            if prediccion.get("prediccion"):
+                dias_habiles = prediccion.get("dias_habiles")
+                horizonte = prediccion.get("horizonte_dias", 30)
+                label_pronostico = (
+                    f"Pronóstico {dias_habiles} días hábiles"
+                    if dias_habiles
+                    else "Pronóstico 30 días"
+                )
+                delta_msg = prediccion.get("mensaje", "")
+                if dias_habiles:
+                    delta_msg = f"{delta_msg} | {dias_habiles} días hábiles" if delta_msg else f"{dias_habiles} días hábiles"
+                col_pred, col_conf = st.columns(2)
+                col_pred.metric(
+                    label_pronostico,
+                    format_currency(prediccion["prediccion"]),
+                    delta_msg,
+                )
+                promedio_habil = prediccion.get("promedio_diario_habil")
+                promedio_calendar = prediccion.get("promedio_diario")
+                conf_delta = []
+                if promedio_habil:
+                    conf_delta.append(f"Prom/día hábil: {format_currency(promedio_habil)}")
+                if promedio_calendar and horizonte:
+                    conf_delta.append(f"Prom/calendario: {format_currency(promedio_calendar)}")
+                col_conf.metric(
+                    "Confianza del modelo",
+                    prediccion.get("confianza", "N/A"),
+                    " | ".join(conf_delta) if conf_delta else None,
+                )
+
+            if ai_result.get("alertas_criticas"):
+                with st.expander("Alertas críticas detectadas", expanded=True):
+                    for alerta in ai_result["alertas_criticas"]:
+                        titulo = alerta.get("titulo", "Alerta")
+                        descripcion = alerta.get("descripcion", "")
+                        st.write(f"**{titulo}** — {descripcion}")
+
+            if ai_result.get("anomalias"):
+                with st.expander("Anomalías detectadas"):
+                    for anomalia in ai_result["anomalias"]:
+                        st.write(
+                            f"- {anomalia.get('tipo', 'Anomalía')}: {anomalia.get('descripcion', '')}"
+                        )
+
+
+def render_reports_ventas():
+    st.caption("Analiza las ventas por segmento y sucursal.")
+
+    col_f1, col_f2 = st.columns(2)
+    with col_f1:
+        fecha_inicio = st.date_input(
+            "Fecha inicio",
+            value=date(date.today().year, date.today().month, 1),
+            key="ventas_fecha_inicio",
+        )
+    with col_f2:
+        fecha_fin = st.date_input(
+            "Fecha fin",
+            value=date.today(),
+            key="ventas_fecha_fin",
+        )
+
+    if fecha_inicio > fecha_fin:
+        st.error("La fecha de inicio no puede ser mayor a la fecha fin.")
+        return
     
-    # Formulario para el resto de los campos
-    with st.form("form_venta"):
-        col1, col2 = st.columns(2)
-        
-        # Valores por defecto desde PDF si existen
-        fecha_default = date.today()
-        if datos_pdf and datos_pdf.get('fecha'):
-            try:
-                # Intentar parsear fecha del PDF
-                fecha_str = datos_pdf['fecha']
-                if 'Noviembre' in fecha_str or 'Noviembre' in fecha_str:
-                    # Formato: "Noviembre 18, 2025"
-                    meses = {'enero': 1, 'febrero': 2, 'marzo': 3, 'abril': 4, 'mayo': 5, 'junio': 6,
-                            'julio': 7, 'agosto': 8, 'septiembre': 9, 'octubre': 10, 'noviembre': 11, 'diciembre': 12}
-                    partes = fecha_str.replace(',', '').split()
-                    if len(partes) >= 3:
-                        mes_nombre = partes[0].lower()
-                        dia = int(partes[1])
-                        año = int(partes[2])
-                        if mes_nombre in meses:
-                            fecha_default = date(año, meses[mes_nombre], dia)
-            except:
-                pass
-        
-        sucursal_default = datos_pdf.get('sucursal', 'COMODORO') if datos_pdf else 'COMODORO'
-        cliente_default = datos_pdf.get('cliente', '') if datos_pdf else ''
-        pin_default = datos_pdf.get('pin', '') if datos_pdf else ''
-        n_comprobante_default = datos_pdf.get('numero_comprobante', '') if datos_pdf else ''
-        tipo_re_se_default = datos_pdf.get('tipo_re_se', 'SE') if datos_pdf else 'SE'
-        tipo_comprobante_default = datos_pdf.get('tipo_comprobante', 'FACTURA VENTA') if datos_pdf else 'FACTURA VENTA'
-        
-        with col1:
-            fecha = st.date_input("Fecha *", value=fecha_default)
-            sucursal = st.selectbox("Sucursal", ["COMODORO", "RIO GRANDE", "RIO GALLEGOS"],
-                                   index=["COMODORO", "RIO GRANDE", "RIO GALLEGOS"].index(sucursal_default) 
-                                   if sucursal_default in ["COMODORO", "RIO GRANDE", "RIO GALLEGOS"] else 0)
-            cliente = st.text_input("Cliente *", value=cliente_default)
-            pin = st.text_input("PIN", value=pin_default)
-            comprobante = st.text_input("Comprobante")
+    df_ventas = get_ventas(str(fecha_inicio), str(fecha_fin))
+    if len(df_ventas) == 0:
+        st.info("No hay ventas para el período seleccionado.")
+        return
+
+    total_ventas = df_ventas["total"].sum()
+    ventas_re = df_ventas[df_ventas["tipo_re_se"] == "RE"]
+    ventas_se = df_ventas[df_ventas["tipo_re_se"] == "SE"]
+
+    total_re = ventas_re["total"].sum() if len(ventas_re) else 0.0
+    total_se = ventas_se["total"].sum() if len(ventas_se) else 0.0
+
+    col_top1, col_top2, col_top3 = st.columns(3)
+    col_top1.metric("Ventas totales", format_currency(total_ventas))
+    col_top2.metric("Ventas repuestos (RE)", format_currency(total_re))
+    col_top3.metric("Ventas servicios (SE)", format_currency(total_se))
+
+    st.divider()
+    st.subheader("Ventas totales por sucursal")
+    ventas_sucursal = df_ventas.groupby("sucursal")["total"].sum().reset_index(name="Monto USD")
+    fig_total_suc = px.bar(
+        ventas_sucursal,
+        x="sucursal",
+        y="Monto USD",
+        title="Ventas totales por sucursal",
+        labels={"sucursal": "Sucursal", "Monto USD": "USD"},
+        color="Monto USD",
+        color_continuous_scale="Purples",
+    )
+    st.plotly_chart(fig_total_suc, use_container_width=True)
+
+    st.subheader("Ventas RE vs SE por sucursal")
+    ventas_sucursal_tipo = df_ventas.groupby(["sucursal", "tipo_re_se"])["total"].sum().reset_index()
+    fig_re_se = px.bar(
+        ventas_sucursal_tipo,
+        x="sucursal",
+        y="total",
+        color="tipo_re_se",
+        barmode="group",
+        labels={"sucursal": "Sucursal", "total": "USD", "tipo_re_se": "Tipo"},
+        title="Ventas RE y SE por sucursal",
+    )
+    st.plotly_chart(fig_re_se, use_container_width=True)
+
+    st.divider()
+    st.subheader("Repuestos por sucursal (Mostrador vs Servicios)")
+
+    mostrador = ventas_re.copy()
+    if "repuestos" in mostrador.columns and mostrador["repuestos"].notna().any():
+        mostrador["repuestos_mostrador"] = mostrador["repuestos"].fillna(mostrador["total"])
+    else:
+        mostrador["repuestos_mostrador"] = mostrador["total"]
+
+    repuestos_mostrador = mostrador.groupby("sucursal")["repuestos_mostrador"].sum().reset_index(name="Mostrador")
+    repuestos_servicio = (
+        ventas_se.groupby("sucursal")["repuestos"].sum().reset_index(name="Servicios")
+        if "repuestos" in ventas_se.columns
+        else pd.DataFrame({"sucursal": [], "Servicios": []})
+    )
+    repuestos_servicio["Servicios"] = repuestos_servicio["Servicios"].fillna(0)
+
+    df_repuestos = pd.merge(repuestos_mostrador, repuestos_servicio, on="sucursal", how="outer").fillna(0)
+    df_repuestos["Total"] = df_repuestos["Mostrador"] + df_repuestos["Servicios"]
+
+    fig_repuestos = px.bar(
+        df_repuestos.melt(id_vars="sucursal", value_vars=["Mostrador", "Servicios"]),
+        x="sucursal",
+        y="value",
+        color="variable",
+        barmode="group",
+        title="Repuestos por sucursal (Mostrador vs Servicios)",
+        labels={"sucursal": "Sucursal", "value": "USD", "variable": "Origen"},
+    )
+    st.plotly_chart(fig_repuestos, use_container_width=True)
+
+    st.divider()
+    st.subheader("Tickets promedio por sucursal")
+
+    def ticket_promedio(dataframe: pd.DataFrame) -> pd.DataFrame:
+        if len(dataframe) == 0:
+            return pd.DataFrame(columns=["sucursal", "Ticket"])
+        df = dataframe.groupby("sucursal").agg({"total": ["sum", "count"]})
+        df.columns = ["total_sum", "total_count"]
+        df.reset_index(inplace=True)
+        df["Ticket"] = df["total_sum"] / df["total_count"]
+        return df[["sucursal", "Ticket"]]
+
+    tickets_se = ticket_promedio(ventas_se)
+    tickets_re = ticket_promedio(ventas_re)
+
+    if len(tickets_se) or len(tickets_re):
+        col_ticket1, col_ticket2 = st.columns(2)
+        with col_ticket1:
+            st.write("**Ticket promedio SE**")
+            if len(ventas_se):
+                total_se_tickets = (ventas_se["total"].sum() / len(ventas_se)) if len(ventas_se) else 0
+                st.metric("Ticket promedio SE (total)", format_currency(total_se_tickets))
+            if len(tickets_se):
+                st.dataframe(
+                    tickets_se.assign(Ticket=tickets_se["Ticket"].apply(format_currency)),
+                    use_container_width=True,
+                )
+            else:
+                st.caption("Sin ventas SE en el período.")
+
+        with col_ticket2:
+            st.write("**Ticket promedio RE**")
+            if len(ventas_re):
+                total_re_tickets = (ventas_re["total"].sum() / len(ventas_re)) if len(ventas_re) else 0
+                st.metric("Ticket promedio RE (total)", format_currency(total_re_tickets))
+            if len(tickets_re):
+                st.dataframe(
+                    tickets_re.assign(Ticket=tickets_re["Ticket"].apply(format_currency)),
+                    use_container_width=True,
+                )
+            else:
+                st.caption("Sin ventas RE en el período.")
+    else:
+        st.caption("No hay datos suficientes para calcular tickets promedio.")
+
+def build_operativo_pdf(
+    periodo: str,
+    resumen: dict,
+    comparacion: list[dict],
+    pe_table: list[dict],
+    detalles: dict | None = None,
+) -> bytes:
+    detalles = detalles or {}
+    empresa = detalles.get("empresa", "Patagonia Maquinarias")
+    moneda = detalles.get("moneda", "USD")
+
+    JD_COLORS = {
+        "negro": (33, 33, 33),
+        "gris": (120, 120, 120),
+        "amarillo": (255, 205, 0),
+        "blanco": (255, 255, 255),
+    }
+
+    def ensure_space(pdf_obj, needed=40):
+        if pdf_obj.get_y() + needed > 270:
+            pdf_obj.add_page()
+
+    def draw_costs_bar(pdf_obj, datos_resumen):
+        ensure_space(pdf_obj, 35)
+        costos = max(datos_resumen.get("variable_costos", 0.0), 0.0)
+        estructura = max(datos_resumen.get("gastos_fijos", 0.0), 0.0)
+        resultado = max(datos_resumen.get("resultado", 0.0), 0.0)
+        total = costos + estructura + resultado
+        if total <= 0:
+            return
+        bar_width = 180
+        bar_height = 6
+        start_x = 15
+        y = pdf_obj.get_y()
+        pdf_obj.ln(2)
+        pdf_obj.set_font("Arial", "B", 11)
+        pdf_obj.cell(0, 6, "Distribución sobre ventas netas", ln=1)
+        pdf_obj.set_y(pdf_obj.get_y())
+        pdf_obj.set_x(start_x)
+        segments = [
+            ("Costos directos", costos, JD_COLORS["negro"]),
+            ("Gastos estructura", estructura, JD_COLORS["gris"]),
+            ("Resultado", resultado, JD_COLORS["amarillo"]),
+        ]
+        curr_x = start_x
+        pdf_obj.set_y(pdf_obj.get_y())
+        pdf_obj.set_x(start_x)
+        for _, value, color in segments:
+            if value <= 0:
+                continue
+            width = bar_width * (value / total)
+            pdf_obj.set_fill_color(*color)
+            pdf_obj.rect(curr_x, pdf_obj.get_y(), width, bar_height, "F")
+            curr_x += width
+        pdf_obj.ln(bar_height + 2)
+        pdf_obj.set_font("Arial", "", 10)
+        for label, value, color in segments:
+            if value <= 0:
+                continue
+            pdf_obj.set_fill_color(*color)
+            pdf_obj.rect(start_x, pdf_obj.get_y(), 5, 5, "F")
+            pdf_obj.set_x(start_x + 7)
+            pdf_obj.cell(
+                0,
+                5,
+                f"{label}: {format_currency(value)} ({value / total:.1%})",
+                ln=1,
+            )
+        pdf_obj.ln(2)
+
+    def draw_branch_result_table(pdf_obj, data):
+        if not data:
+            return
+        ensure_space(pdf_obj, 40)
+        pdf_obj.set_font("Arial", "B", 13)
+        pdf_obj.cell(0, 8, "Resultado operativo por sucursal", ln=1)
+        pdf_obj.set_font("Arial", "B", 11)
+        pdf_obj.set_fill_color(*JD_COLORS["gris"])
+        pdf_obj.set_text_color(*JD_COLORS["blanco"])
+        pdf_obj.cell(50, 7, "Sucursal", border=1, align="L", fill=True)
+        pdf_obj.cell(45, 7, "Ingresos", border=1, align="R", fill=True)
+        pdf_obj.cell(45, 7, "Gastos", border=1, align="R", fill=True)
+        pdf_obj.cell(0, 7, "Resultado", border=1, align="R", fill=True)
+        pdf_obj.ln()
+        pdf_obj.set_font("Arial", "", 10)
+        pdf_obj.set_text_color(0, 0, 0)
+        for row in data:
+            pdf_obj.cell(50, 6, row["Sucursal"], border=1)
+            pdf_obj.cell(45, 6, format_currency(row["Ingresos"]), border=1, align="R")
+            pdf_obj.cell(45, 6, format_currency(row["Gastos"]), border=1, align="R")
+            pdf_obj.cell(0, 6, format_currency(row["Resultado"]), border=1, align="R", ln=1)
+        pdf_obj.ln(2)
+
+    def draw_summary_grid(pdf_obj, items, cols=2):
+        if not items:
+            return
+        ensure_space(pdf_obj, 40)
+        pdf_obj.set_font("Arial", "B", 13)
+        pdf_obj.cell(0, 8, "5. Resumen ejecutivo", ln=1)
+        pdf_obj.set_font("Arial", "", 11)
+        col_width = 190 / cols
+        for idx, (title, value) in enumerate(items):
+            if idx % cols == 0:
+                pdf_obj.ln(2)
+            x = pdf_obj.get_x()
+            y = pdf_obj.get_y()
+            pdf_obj.set_fill_color(240, 240, 240)
+            pdf_obj.set_font("Arial", "B", 10)
+            pdf_obj.cell(col_width - 5, 6, title, border=1, ln=2, fill=True)
+            pdf_obj.set_font("Arial", "", 10)
+            pdf_obj.cell(col_width - 5, 6, value, border=1, ln=0)
+            if idx % cols == cols - 1:
+                pdf_obj.ln(6)
+            else:
+                pdf_obj.set_xy(x + col_width, y)
+
+    def draw_chart_image(pdf_obj, title, image_path):
+        if not image_path:
+            return
+        ensure_space(pdf_obj, 85)
+        pdf_obj.set_font("Arial", "B", 13)
+        pdf_obj.cell(0, 8, title, ln=1)
+        pdf_obj.image(image_path, x=11, w=192, h=58)
+        pdf_obj.ln(5)
+
+    def draw_ai_section(pdf_obj, ai_data):
+        if not ai_data:
+            return
+        ensure_space(pdf_obj, 65)
+        pdf_obj.set_font("Arial", "B", 13)
+        pdf_obj.cell(0, 8, "6. Análisis de resultados", ln=1)
+        pdf_obj.set_font("Arial", "", 11)
+
+        pred = ai_data.get("prediccion") or {}
+        if pred.get("prediccion"):
+            pdf_obj.set_fill_color(*JD_COLORS["gris"])
+            pdf_obj.set_text_color(*JD_COLORS["blanco"])
+            label = "Pronóstico"
+            dias_habiles = pred.get("dias_habiles")
+            horizonte = pred.get("horizonte_dias")
+            if dias_habiles:
+                label = f"Pronóstico {dias_habiles} días hábiles"
+            pdf_obj.cell(0, 8, f"{label}: {format_currency(pred['prediccion'])}", ln=1, fill=True)
+            pdf_obj.set_text_color(0, 0, 0)
+            pdf_obj.set_font("Arial", "", 10)
+            mensaje_pred = sanitize_latin1(pred.get("mensaje"))
+            confianza = sanitize_latin1(pred.get("confianza"))
+            promedio_diario = pred.get("promedio_diario")
+            promedio_habil = pred.get("promedio_diario_habil")
+            if confianza or mensaje_pred:
+                detalle_pred = " | ".join(
+                    [part for part in [f"Confianza: {confianza}" if confianza else None, mensaje_pred] if part]
+                )
+                pdf_obj.multi_cell(0, 5, detalle_pred)
+            if horizonte and dias_habiles:
+                pdf_obj.multi_cell(
+                    0,
+                    5,
+                    f"Horizonte considerado: {dias_habiles} días hábiles ({horizonte} días calendario).",
+                )
+            if promedio_diario:
+                pdf_obj.multi_cell(
+                    0,
+                    5,
+                    f"Promedio diario proyectado: {format_currency(promedio_diario)}",
+                )
+            if promedio_habil:
+                pdf_obj.multi_cell(
+                    0,
+                    5,
+                    f"Promedio por día hábil: {format_currency(promedio_habil)}",
+                )
+            pdf_obj.ln(2)
+
+        def bullet_block(title, items, max_items=4):
+            pdf_obj.set_font("Arial", "B", 11)
+            pdf_obj.cell(0, 6, sanitize_latin1(title), ln=1)
+            pdf_obj.set_font("Arial", "", 10)
+            if items:
+                for item in items[:max_items]:
+                    pdf_obj.multi_cell(0, 5, f"· {sanitize_latin1(item)}")
+            else:
+                pdf_obj.multi_cell(0, 5, "· Sin datos destacados.")
+            pdf_obj.ln(1)
+
+        bullet_block("Tendencias detectadas", ai_data.get("tendencias"))
+        bullet_block("Alertas", ai_data.get("alertas"))
+        bullet_block("Recomendaciones clave", ai_data.get("recomendaciones"))
+
+        extra_recs = ai_data.get("recomendaciones_extra")
+        if extra_recs:
+            bullet_block("Recomendaciones adicionales", extra_recs)
+
+        bullet_block("Recomendaciones por sucursal", ai_data.get("recomendaciones_sucursales"))
+        bullet_block("Recomendaciones mix RE vs SE", ai_data.get("recomendaciones_mix"))
+        bullet_block("Oportunidades destacadas", ai_data.get("oportunidades"))
+        bullet_block("Riesgos identificados", ai_data.get("riesgos"))
+
+        top_clients = ai_data.get("top_clientes") or []
+        if top_clients:
+            pdf_obj.set_font("Arial", "B", 11)
+            pdf_obj.cell(0, 6, "Top 10 clientes del período", ln=1)
+            pdf_obj.set_font("Arial", "", 10)
+            for row in top_clients:
+                pdf_obj.multi_cell(
+                    0,
+                    5,
+                    f"· {row.get('cliente', '-')}"
+                    f" ({row.get('sucursal', '-')})"
+                    f": {format_currency(row.get('total', 0.0))}",
+                )
+            pdf_obj.ln(1)
+
+        alertas_criticas = [
+            f"{sanitize_latin1(alerta.get('titulo', 'Alerta'))}: {sanitize_latin1(alerta.get('descripcion', ''))}"
+            for alerta in (ai_data.get("alertas_criticas") or [])
+        ]
+        if alertas_criticas:
+            bullet_block("Alertas críticas", alertas_criticas, max_items=3)
+
+        anomalias = [
+            f"{sanitize_latin1(anomalia.get('tipo', 'Anomalía'))}: {sanitize_latin1(anomalia.get('descripcion', ''))}"
+            for anomalia in (ai_data.get("anomalias") or [])
+        ]
+        bullet_block("Anomalías relevantes", anomalias, max_items=3)
+
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", "B", 16)
+    pdf.cell(0, 10, f"Informe de Gestión Postventa - {empresa}", ln=1)
+
+    pdf.set_font("Arial", "", 12)
+    pdf.cell(0, 8, f"Período: {periodo}", ln=1)
+    pdf.cell(0, 8, f"Moneda: {moneda}", ln=1)
+    pdf.ln(4)
+
+    chart_files = []
+    historicos = detalles.get("historicos")
+    if historicos:
+        labels_hist = historicos.get("labels", [])
+        ventas_hist = historicos.get("ventas", {})
+        if ventas_hist and ventas_hist.get("series"):
+            img = create_stacked_chart_image(labels_hist, ventas_hist.get("series", []), "USD", figsize=(6, 2))
+            if img:
+                chart_files.append(img)
+                draw_chart_image(pdf, "Ventas históricas por sucursal (Nov-25 a Oct-26)", img)
+        gastos_hist = historicos.get("gastos", {})
+        if gastos_hist:
+            series = [
+                {"label": "Fijos", "values": gastos_hist.get("fixed", [])},
+                {"label": "Variables", "values": gastos_hist.get("variable", [])},
+            ]
+            img = create_stacked_chart_image(labels_hist, series, "USD", figsize=(6, 2))
+            if img:
+                chart_files.append(img)
+                draw_chart_image(pdf, "Gastos históricos (fijo vs variable)", img)
+        resultados_hist = historicos.get("resultados", {})
+        if resultados_hist and resultados_hist.get("series"):
+            img = create_line_chart_image(labels_hist, resultados_hist.get("series", []), "USD", figsize=(6, 2))
+            if img:
+                chart_files.append(img)
+                draw_chart_image(pdf, "Resultado mensual por sucursal", img)
+
+    estado_resultados = detalles.get("estado_resultados", [])
+    if estado_resultados:
+        ensure_space(pdf, 50)
+        pdf.set_font("Arial", "B", 13)
+        pdf.cell(0, 8, "1. Estado de Resultados Operativo", ln=1)
+        pdf.set_font("Arial", "B", 11)
+        pdf.set_fill_color(*JD_COLORS["gris"])
+        pdf.set_text_color(*JD_COLORS["blanco"])
+        pdf.cell(100, 7, "Concepto", border=1, align="L", fill=True)
+        pdf.cell(40, 7, "Monto", border=1, align="R", fill=True)
+        pdf.cell(0, 7, "% s/Ventas", border=1, align="R", fill=True)
+        pdf.ln()
+        pdf.set_font("Arial", "", 11)
+        pdf.set_text_color(0, 0, 0)
+        for row in estado_resultados:
+            pdf.cell(100, 6, row["concepto"], border="L")
+            pdf.cell(40, 6, format_currency(row["monto"]), align="R", border=0)
+            pdf.cell(0, 6, row["porcentaje"], align="R", border="R", ln=1)
+        pdf.ln(2)
+        ingresos_detalle = detalles.get("ingresos_detalle", {})
+        if ingresos_detalle:
+            pdf.set_font("Arial", "BU", 11)
+            pdf.cell(0, 6, "Desglose", ln=1)
+            pdf.set_font("Arial", "", 10)
+            desglose_items = [
+                ("Repuestos por mostrador", ingresos_detalle.get("repuestos_mostrador", 0.0)),
+                ("Repuestos por servicios", ingresos_detalle.get("repuestos_servicios", 0.0)),
+                ("Mano de obra servicios", ingresos_detalle.get("mano_obra", 0.0)),
+                ("Gastos asistencia", ingresos_detalle.get("asistencia", 0.0)),
+                ("Trabajos terceros", ingresos_detalle.get("terceros", 0.0)),
+            ]
+            for label, value in desglose_items:
+                pdf.set_font("Arial", "B", 10)
+                pdf.cell(95, 6, f"- {label}:", ln=0)
+                pdf.set_font("Arial", "", 10)
+                pdf.cell(0, 6, format_currency(value), ln=1)
+            pdf.ln(2)
+        draw_costs_bar(pdf, resumen)
+
+    if comparacion:
+        ensure_space(pdf, 60)
+        pdf.set_font("Arial", "B", 13)
+        pdf.cell(0, 8, "Ingresos vs Gastos por sucursal", ln=1)
+        pdf.set_font("Arial", "", 11)
+        max_ing = max(row["Ingresos"] for row in comparacion)
+        if max_ing > 0:
+            bar_width = 110
+            bar_height = 6
+            start_x = 20
+            spacing = 6
+            for row in comparacion:
+                pdf.set_font("Arial", "B", 11)
+                pdf.cell(0, 6, row["Sucursal"], ln=1)
+                ingreso_width = bar_width * (row["Ingresos"] / max_ing)
+                gasto_width = bar_width * (row["Gastos"] / max_ing)
+                y_start = pdf.get_y()
+                pdf.set_fill_color(*JD_COLORS["negro"])
+                pdf.rect(start_x, y_start, ingreso_width, bar_height, "F")
+                pdf.set_fill_color(*JD_COLORS["gris"])
+                pdf.rect(start_x, y_start + bar_height + 2, gasto_width, bar_height, "F")
+                pdf.set_font("Arial", "", 9)
+                pdf.set_text_color(*JD_COLORS["negro"])
+                pdf.set_xy(start_x + ingreso_width + 3, y_start)
+                pdf.cell(
+                    0,
+                    bar_height,
+                    f"{format_currency(row['Ingresos'])}",
+                    ln=0,
+                )
+                pdf.set_xy(start_x + gasto_width + 3, y_start + bar_height + 2)
+                pdf.cell(
+                    0,
+                    bar_height,
+                    f"{format_currency(row['Gastos'])}",
+                    ln=0,
+                )
+                pdf.set_y(y_start + bar_height * 2 + spacing)
+            pdf.set_text_color(0, 0, 0)
+
+    margenes = detalles.get("margenes_negocio", {})
+    if margenes:
+        ensure_space(pdf, 45)
+        pdf.set_font("Arial", "B", 13)
+        pdf.cell(0, 8, "2. Análisis de Márgenes por Unidad de Negocio", ln=1)
+        pdf.set_font("Arial", "", 11)
+        rep = margenes.get("repuestos")
+        if rep:
+            pdf.multi_cell(
+                0,
+                6,
+                f"A. Repuestos (Mostrador + Taller): Venta {format_currency(rep['ventas'])} | "
+                f"CMV {format_currency(rep['costo'])} | Margen {format_currency(rep['margen'])} "
+                f"({rep['margen_pct']})",
+            )
+            pdf.multi_cell(
+                0,
+                6,
+                rep.get(
+                    "comentario",
+                    "El mix de repuestos en servicios mejora la recurrencia y fideliza a los clientes.",
+                ),
+            )
+        serv = margenes.get("servicios")
+        if serv:
+            pdf.multi_cell(
+                0,
+                6,
+                f"B. Servicios: Mano de obra + asistencia {format_currency(serv['ventas'])} | "
+                f"Costo técnicos {format_currency(serv['costo'])} | Margen {format_currency(serv['margen'])} "
+                f"({serv['margen_pct']})",
+            )
+            if serv.get("ingresos_por_hora"):
+                pdf.multi_cell(
+                    0,
+                    6,
+                    f"Cada hora vendida aporta {format_currency(serv['ingresos_por_hora'])} entre mano de obra y repuestos.",
+                )
+        pdf.ln(2)
+
+    eficiencia = detalles.get("eficiencia", {})
+    if eficiencia:
+        ensure_space(pdf, 50)
+        pdf.set_font("Arial", "B", 13)
+        pdf.cell(0, 8, "3. Eficiencia Operativa", ln=1)
+        pdf.set_font("Arial", "", 11)
+        tecnicos = eficiencia.get("tecnicos_activos")
+        if tecnicos:
+            pdf.multi_cell(0, 6, f"Técnicos activos: {tecnicos}")
+        if eficiencia.get("horas_totales") is not None:
+            pdf.multi_cell(
+                0,
+                6,
+                f"Horas facturadas: {eficiencia['horas_totales']:.1f} h "
+                f"({eficiencia['horas_promedio']:.1f} h/promedio por servicio)",
+            )
+        if eficiencia.get("horas_totales") is None:
+            pdf.multi_cell(0, 6, "Horas facturadas: Dato no disponible en los registros.")
+        pdf.multi_cell(
+            0,
+            6,
+            f"Órdenes de servicio: {eficiencia.get('ordenes_servicio', 0)} | "
+            f"Órdenes de repuestos: {eficiencia.get('ordenes_repuestos', 0)}",
+        )
+        tickets = detalles.get("tickets", {})
+        if tickets:
+            if tickets.get("se_total"):
+                pdf.multi_cell(
+                    0,
+                    6,
+                    f"Ticket promedio servicios: {format_currency(tickets['se_total'])}",
+                )
+            if tickets.get("re_total"):
+                pdf.multi_cell(
+                    0,
+                    6,
+                    f"Ticket promedio repuestos mostrador: {format_currency(tickets['re_total'])}",
+                )
+        if eficiencia.get("ingreso_por_hora"):
+            pdf.multi_cell(
+                0,
+                6,
+                f"Ingreso total asociado por hora: {format_currency(eficiencia['ingreso_por_hora'])}/h "
+                f"(Repuestos {format_currency(eficiencia.get('repuestos_por_hora', 0))}/h).",
+            )
+        if eficiencia.get("horas_disponibles"):
+            pdf.multi_cell(
+                0,
+                6,
+                f"Horas disponibles: {eficiencia['horas_disponibles']:,.1f} h | "
+                f"Técnicos configurados: {eficiencia.get('tecnicos_config', 'N/D')} | "
+                f"Días hábiles: {eficiencia.get('dias_habiles', 'N/D')}",
+            )
+        if eficiencia.get("horas_vendidas_estimadas"):
+            pdf.multi_cell(
+                0,
+                6,
+                f"Horas vendidas estimadas: {eficiencia['horas_vendidas_estimadas']:,.1f} h "
+                f"(Tarifa: {format_currency(eficiencia.get('tarifa_hora', 0))}/h).",
+            )
+        if eficiencia.get("productividad") is not None:
+            pdf.multi_cell(
+                0,
+                6,
+                f"Productividad del taller: {format_percentage(eficiencia['productividad'] * 100)}.",
+            )
+        pdf.ln(2)
+
+    productividad_pdf = detalles.get("productividad")
+    if productividad_pdf:
+        ensure_space(pdf, 35)
+        pdf.set_font("Arial", "B", 13)
+        pdf.cell(0, 8, "3.b Productividad del taller", ln=1)
+        pdf.set_font("Arial", "", 11)
+        pdf.multi_cell(
+            0,
+            6,
+            f"Ingresos MO + asistencia: {format_currency(productividad_pdf.get('ingresos_mo_asistencia', 0))}.",
+        )
+        pdf.multi_cell(
+            0,
+            6,
+            f"Horas vendidas estimadas: {productividad_pdf.get('horas_vendidas', 0):,.1f} h "
+            f"| Horas hábiles disponibles: {productividad_pdf.get('horas_disponibles', 0):,.1f} h "
+            f"({productividad_pdf.get('dias_habiles', 0)} días, {productividad_pdf.get('tecnicos', 0)} técnicos).",
+        )
+        pdf.multi_cell(
+            0,
+            6,
+            f"Tarifa promedio: {format_currency(productividad_pdf.get('tarifa', 0))}/h "
+            f"| Ocupación: {format_percentage(productividad_pdf.get('ocupacion_pct', 0) * 100)}.",
+        )
+        pdf.ln(2)
+
+    ventas_suc = detalles.get("ventas_sucursales", [])
+    if ventas_suc:
+        ensure_space(pdf, 45)
+        pdf.set_font("Arial", "B", 13)
+        pdf.cell(0, 8, "4. Ventas por sucursal", ln=1)
+        pdf.set_font("Arial", "", 11)
+        for suc in ventas_suc:
+            pdf.multi_cell(
+                0,
+                6,
+                f"· {suc['Sucursal']}: {format_currency(suc['Venta'])} ({suc['Porcentaje']})",
+            )
+        pdf.ln(2)
+        if comparacion:
+            draw_branch_result_table(pdf, comparacion)
+            pdf.ln(2)
+
+    draw_summary_grid(pdf, detalles.get("resumen_cards", []))
+
+    draw_ai_section(pdf, detalles.get("ai_insights"))
+
+    pdf_bytes = pdf.output(dest="S").encode("latin1")
+    for path in chart_files:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    return pdf_bytes
+
+
+def get_month_to_date_overview(reference_date: date | None = None) -> dict:
+    today = reference_date or date.today()
+    start_of_month = date(today.year, today.month, 1)
+    start_str = start_of_month.isoformat()
+    end_str = today.isoformat()
+
+    df_ventas = get_ventas(start_str, end_str)
+    total_bruto = df_ventas["total"].sum() if len(df_ventas) else 0.0
+    iibb = total_bruto * 0.045
+    total_neto = total_bruto - iibb
+
+    gastos_totales = obtener_gastos_totales_con_automaticos(start_str, end_str)
+    gastos_postventa = gastos_totales.get("gastos_postventa_total", 0.0)
+
+    resultado = total_neto - gastos_postventa
+
+    return {
+        "bruto": total_bruto,
+        "iibb": iibb,
+        "neto": total_neto,
+        "gastos": gastos_postventa,
+        "resultado": resultado,
+        "fecha_inicio": start_of_month,
+        "fecha_fin": today,
+    }
+
+
+def render_dashboard():
+    st.title("📊 Dashboard")
+    month_summary = get_month_to_date_overview()
+
+    st.caption(
+        f"Período en curso: {month_summary['fecha_inicio'].strftime('%d/%m/%Y')} - "
+        f"{month_summary['fecha_fin'].strftime('%d/%m/%Y')}"
+    )
+
+    kpi_cols = st.columns(3)
+    kpi_cols[0].metric(
+        "Ventas netas (después 4.5% IIBB)",
+        format_currency(month_summary["neto"]),
+        delta=f"Descuento IIBB: -{format_currency(month_summary['iibb'])}",
+    )
+    kpi_cols[1].metric(
+        "Gastos totales",
+        format_currency(month_summary["gastos"]),
+    )
+    kpi_cols[2].metric(
+        "Resultado del mes",
+        format_currency(month_summary["resultado"]),
+        delta="Positivo" if month_summary["resultado"] >= 0 else "Negativo",
+    )
+    st.divider()
+    st.subheader("🎯 Objetivo de Ventas de Repuestos - FY26")
+
+    OBJETIVO_REPUESTOS_FY26 = 1_300_000.0
+    fecha_inicio_fy26 = date(2025, 11, 1)
+    fecha_fin_actual = date.today()
+
+    df_ventas_fy26 = get_ventas(str(fecha_inicio_fy26), str(fecha_fin_actual))
+
+    if len(df_ventas_fy26) > 0:
+        ventas_re = df_ventas_fy26[df_ventas_fy26["tipo_re_se"] == "RE"]
+        ventas_se = df_ventas_fy26[df_ventas_fy26["tipo_re_se"] == "SE"]
+
+        total_repuestos = 0.0
+        if len(ventas_re):
+            if "repuestos" in ventas_re.columns and ventas_re["repuestos"].notna().any():
+                total_repuestos += ventas_re["repuestos"].fillna(ventas_re["total"]).sum()
+            else:
+                total_repuestos += ventas_re["total"].sum()
+        if len(ventas_se) and "repuestos" in ventas_se.columns:
+            total_repuestos += ventas_se["repuestos"].fillna(0).sum()
+
+        porcentaje = (total_repuestos / OBJETIVO_REPUESTOS_FY26 * 100) if OBJETIVO_REPUESTOS_FY26 else 0
+        restante = OBJETIVO_REPUESTOS_FY26 - total_repuestos
+
+        col_obj1, col_obj2, col_obj3 = st.columns(3)
+        col_obj1.metric("💰 Vendido hasta ahora", format_currency(total_repuestos))
+        col_obj2.metric(
+            "🎯 Objetivo FY26",
+            format_currency(OBJETIVO_REPUESTOS_FY26),
+            delta=f"{porcentaje:.1f}% completado",
+        )
+        col_obj3.metric(
+            "📊 Restante",
+            format_currency(abs(restante)),
+            delta="Falta" if restante > 0 else "Superado",
+        )
+
+        st.progress(min(max(porcentaje / 100, 0), 1))
+
+        col_info1, col_info2 = st.columns(2)
+        col_info1.caption(
+            f"📅 Período: {fecha_inicio_fy26.strftime('%d/%m/%Y')} - {fecha_fin_actual.strftime('%d/%m/%Y')}"
+        )
+        col_info2.caption(f"⏱️ Tiempo transcurrido: {((fecha_fin_actual - fecha_inicio_fy26).days / 365) * 100:.1f}% del año fiscal")
+    else:
+        st.info("📊 Todavía no hay ventas registradas para el objetivo FY26.")
+
+    st.divider()
+    st.subheader("🛠️ Objetivo de Servicios - FY26")
+
+    OBJETIVO_SERVICIOS_FY26 = 660_000.0
+    df_servicios_fy26 = df_ventas_fy26[df_ventas_fy26["tipo_re_se"] == "SE"] if len(df_ventas_fy26) else pd.DataFrame()
+
+    if len(df_servicios_fy26) > 0 and OBJETIVO_SERVICIOS_FY26 > 0:
+        total_mano_obra = df_servicios_fy26["mano_obra"].fillna(0).sum() if "mano_obra" in df_servicios_fy26.columns else 0
+        total_asistencia = df_servicios_fy26["asistencia"].fillna(0).sum() if "asistencia" in df_servicios_fy26.columns else 0
+        total_terceros = df_servicios_fy26["terceros"].fillna(0).sum() if "terceros" in df_servicios_fy26.columns else 0
+        total_servicios = total_mano_obra + total_asistencia + total_terceros
+
+        porcentaje_servicios = (total_servicios / OBJETIVO_SERVICIOS_FY26) * 100
+        restante_servicios = OBJETIVO_SERVICIOS_FY26 - total_servicios
+
+        col_se1, col_se2, col_se3 = st.columns(3)
+        col_se1.metric("🛠️ Ingresos Servicios (MO+Asist+Terc)", format_currency(total_servicios))
+        col_se2.metric("🎯 Objetivo Servicios FY26", format_currency(OBJETIVO_SERVICIOS_FY26),
+                       delta=f"{porcentaje_servicios:.1f}% completado")
+        col_se3.metric("📊 Restante Servicios", format_currency(abs(restante_servicios)),
+                       delta="Falta" if restante_servicios > 0 else "Superado")
+
+        st.progress(min(max(porcentaje_servicios / 100, 0), 1))
+
+        with st.expander("Detalle por componente", expanded=False):
+            st.write(f"🔧 Mano de Obra: {format_currency(total_mano_obra)}")
+            st.write(f"🧰 Asistencia: {format_currency(total_asistencia)}")
+            st.write(f"🤝 Terceros: {format_currency(total_terceros)}")
+
+        col_se_info1, col_se_info2 = st.columns(2)
+        col_se_info1.caption(
+            f"📅 Período: {fecha_inicio_fy26.strftime('%d/%m/%Y')} - {fecha_fin_actual.strftime('%d/%m/%Y')}"
+        )
+        col_se_info2.caption(
+            f"⏱️ Tiempo transcurrido: {((fecha_fin_actual - fecha_inicio_fy26).days / 365) * 100:.1f}% del año fiscal"
+        )
+    else:
+        st.info("📊 Aún no hay ingresos de servicios cargados para evaluar este objetivo.")
+    st.info(
+        "Esta es una versión base. Usa esta sección para diseñar los KPIs que realmente necesites."
+    )
+
+def render_sales_page():
+    st.title("💰 Ventas")
+    st.subheader("Registrar nueva venta")
+
+    sucursales_default = ["COMODORO", "RIO GRANDE", "RIO GALLEGOS", "COMPARTIDOS"]
+    tipos_trabajo = ["EXTERNO", "INTERNO"]
+
+    with st.form("form_crear_venta"):
+        col_a, col_b = st.columns(2)
+        with col_a:
+            fecha = st.date_input("Fecha", value=date.today())
+            sucursal = st.selectbox("Sucursal", sucursales_default)
+            cliente = st.text_input("Cliente / Cuenta")
             tipo_comprobante = st.selectbox(
                 "Tipo Comprobante",
-                ["FACTURA VENTA", "NOTA DE CREDITO", "NOTA DE CREDITO JD", 
-                 "CITA INTERNA", "FACTURA AFIP", "NOTA DE CRETIDO"],
-                index=["FACTURA VENTA", "NOTA DE CREDITO", "NOTA DE CREDITO JD", 
-                       "CITA INTERNA", "FACTURA AFIP", "NOTA DE CRETIDO"].index(tipo_comprobante_default)
-                if tipo_comprobante_default in ["FACTURA VENTA", "NOTA DE CREDITO", "NOTA DE CREDITO JD", 
-                                                 "CITA INTERNA", "FACTURA AFIP", "NOTA DE CRETIDO"] else 0
+                ["FACTURA VENTA", "NOTA CREDITO", "NOTA DE CREDITO JD", "OTRO"],
             )
-            trabajo = st.selectbox("Trabajo", ["EXTERNO", "GARANTIA", "INTERNO"])
-        
-        with col2:
-            n_comprobante = st.text_input("N° Comprobante", value=n_comprobante_default)
-            tipo_re_se = st.selectbox("Tipo (RE o SE) *", ["SE", "RE"],
-                                     index=0 if tipo_re_se_default == 'SE' else 1)
-            detalles = st.text_area("Detalles")
-        
-        # Campo para adjuntar comprobante
-        st.subheader("📎 Adjuntar Comprobante (Opcional)")
-        
-        # Si hay archivo PDF del análisis, usarlo por defecto
-        if archivo_pdf_venta:
-            st.info(f"📄 Archivo PDF detectado: {archivo_pdf_venta.name}")
-            st.write("💡 El archivo se adjuntará automáticamente al guardar.")
-        
-        archivo_comprobante = st.file_uploader(
-            "Subir comprobante (PDF o Imagen)",
-            type=['pdf', 'png', 'jpg', 'jpeg'],
-            help="Puedes adjuntar un PDF o imagen del comprobante. Si ya analizaste un PDF, se usará ese."
+            trabajo = st.selectbox("Trabajo", tipos_trabajo)
+        with col_b:
+            pin = st.text_input("PIN / Identificador", value="")
+            n_comprobante = st.text_input("N° de comprobante")
+            tipo_re_se = st.selectbox("Tipo (RE o SE)", ["RE", "SE"])
+            detalles = st.text_area("Detalles", height=90)
+
+        st.markdown("**Componentes económicos (USD)**")
+        col_m1, col_m2, col_m3 = st.columns(3)
+        with col_m1:
+            mano_obra = st.number_input("Mano de obra", min_value=0.0, value=0.0, step=0.01)
+            asistencia = st.number_input("Asistencia", min_value=0.0, value=0.0, step=0.01)
+        with col_m2:
+            repuestos = st.number_input("Repuestos", min_value=0.0, value=0.0, step=0.01)
+            terceros = st.number_input("Terceros", min_value=0.0, value=0.0, step=0.01)
+        with col_m3:
+            descuento = st.number_input("Descuento", min_value=0.0, value=0.0, step=0.01)
+
+        total_calculado = mano_obra + asistencia + repuestos + terceros - descuento
+        st.metric(
+            "💰 Total calculado",
+            format_currency(total_calculado),
+            delta=(
+                f"MO {format_currency(mano_obra)} + Asist {format_currency(asistencia)} + "
+                f"Rep {format_currency(repuestos)} + Terc {format_currency(terceros)} - Desc {format_currency(descuento)}"
+            ),
         )
-        
-        if archivo_comprobante is not None:
-            # Mostrar preview si es imagen
-            if archivo_comprobante.type.startswith('image/'):
-                st.image(archivo_comprobante, width=300)
+        st.caption("El total se calcula automáticamente y se vuelve negativo si la nota de crédito lo requiere.")
+
+        submit = st.form_submit_button("💾 Guardar venta")
+        if submit:
+            total = total_calculado
+            es_nota_credito = (
+                tipo_comprobante
+                and "NOTA" in tipo_comprobante.upper()
+                and "CREDITO" in tipo_comprobante.upper()
+                and "JD" not in tipo_comprobante.upper()
+            )
+            if es_nota_credito and total > 0:
+                total = -total
+
+            if total == 0:
+                st.error("El total calculado no puede ser 0.")
             else:
-                st.info(f"📄 Archivo PDF: {archivo_comprobante.name}")
-        
-        submitted = st.form_submit_button("💾 Guardar Venta")
-        
-        # Guardar valores del formulario en session_state para usarlos después
-        if submitted:
-            # Verificar que no se haya procesado ya (evitar duplicados)
-            if not st.session_state.get('form_processing', False):
-                st.session_state.form_processing = True
-                st.session_state.form_fecha = fecha
-                st.session_state.form_sucursal = sucursal
-                st.session_state.form_cliente = cliente
-                st.session_state.form_pin = pin
-                st.session_state.form_comprobante = comprobante
-                st.session_state.form_tipo_comprobante = tipo_comprobante
-                st.session_state.form_trabajo = trabajo
-                st.session_state.form_n_comprobante = n_comprobante
-                st.session_state.form_tipo_re_se = tipo_re_se
-                st.session_state.form_detalles = detalles
-                st.session_state.form_archivo_comprobante = archivo_comprobante
-                st.session_state.form_submitted = True
-                st.rerun()
-    
-    # Procesar el envío del formulario FUERA del form para tener acceso a los valores numéricos
-    if st.session_state.get('form_submitted', False) and st.session_state.get('form_processing', False):
-        # Obtener valores del formulario desde session_state
-        fecha = st.session_state.get('form_fecha', date.today())
-        sucursal = st.session_state.get('form_sucursal', 'COMODORO')
-        cliente = st.session_state.get('form_cliente', '')
-        pin = st.session_state.get('form_pin', '')
-        comprobante = st.session_state.get('form_comprobante', '')
-        tipo_comprobante = st.session_state.get('form_tipo_comprobante', 'FACTURA VENTA')
-        trabajo = st.session_state.get('form_trabajo', 'EXTERNO')
-        n_comprobante = st.session_state.get('form_n_comprobante', '')
-        tipo_re_se = st.session_state.get('form_tipo_re_se', 'SE')
-        detalles = st.session_state.get('form_detalles', '')
-        archivo_comprobante = st.session_state.get('form_archivo_comprobante', None)
-        
-        # Obtener valores actuales de los campos numéricos (están fuera del form)
-        mano_obra_actual = st.session_state.get('input_mano_obra', st.session_state.venta_mano_obra)
-        asistencia_actual = st.session_state.get('input_asistencia', st.session_state.venta_asistencia)
-        repuestos_actual = st.session_state.get('input_repuestos', st.session_state.venta_repuestos)
-        terceros_actual = st.session_state.get('input_terceros', st.session_state.venta_terceros)
-        descuento_actual = st.session_state.get('input_descuento', st.session_state.venta_descuento)
-        
-        total = mano_obra_actual + asistencia_actual + repuestos_actual + terceros_actual - descuento_actual
-        
-        # Si es nota de crédito (pero NO JD), convertir el total a negativo automáticamente
-        # NOTA: "NOTA DE CREDITO JD" son pagos recibidos de John Deere, por lo que son POSITIVOS
-        es_nota_credito = tipo_comprobante and 'NOTA DE CREDITO' in tipo_comprobante.upper() and 'JD' not in tipo_comprobante.upper()
-        if es_nota_credito and total > 0:
-            total = -total  # Convertir a negativo
-        
-        # Resetear flags ANTES de procesar para evitar loops
-        st.session_state.form_submitted = False
-        st.session_state.form_processing = False
-        
-        if not cliente:
-            st.error("⚠️ Por favor completa el campo obligatorio (Cliente)")
-        elif total == 0:
-            st.error("⚠️ El total no puede ser 0. Verifica los valores ingresados.")
-        else:
-                # Guardar archivo adjunto si existe (priorizar el del PDF analizado)
-                ruta_archivo = None
-                if archivo_pdf_venta and not archivo_comprobante:
-                    # Usar el archivo PDF que se analizó
-                    try:
-                        extension = Path(archivo_pdf_venta.name).suffix
-                        nombre_archivo = f"venta_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{archivo_pdf_venta.name}"
-                        ruta_archivo = COMPROBANTES_DIR / nombre_archivo
-                        
-                        # Guardar el archivo
-                        with open(ruta_archivo, "wb") as f:
-                            f.write(archivo_pdf_venta.getbuffer())
-                        
-                        ruta_archivo = str(ruta_archivo)
-                    except Exception as e:
-                        st.warning(f"⚠️ Error al guardar el archivo PDF: {e}")
-                
-                if archivo_comprobante is not None:
-                    try:
-                        # El archivo puede ser un objeto UploadedFile o un path guardado
-                        if hasattr(archivo_comprobante, 'getbuffer'):
-                            # Es un objeto UploadedFile
-                            extension = Path(archivo_comprobante.name).suffix
-                            nombre_archivo = f"venta_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{archivo_comprobante.name}"
-                            ruta_archivo = COMPROBANTES_DIR / nombre_archivo
-                            
-                            # Guardar el archivo
-                            with open(ruta_archivo, "wb") as f:
-                                f.write(archivo_comprobante.getbuffer())
-                            
-                            ruta_archivo = str(ruta_archivo)
-                        elif isinstance(archivo_comprobante, str):
-                            # Ya es un path guardado
-                            ruta_archivo = archivo_comprobante
-                    except Exception as e:
-                        st.warning(f"⚠️ Error al guardar el archivo: {e}")
-                
                 venta_data = {
-                    'mes': fecha.strftime("%B%y") if isinstance(fecha, date) else fecha,
-                    'fecha': fecha,
-                    'sucursal': sucursal,
-                    'cliente': cliente,
-                    'pin': pin if pin else None,
-                    'comprobante': comprobante if comprobante else None,
-                    'tipo_comprobante': tipo_comprobante,
-                    'trabajo': trabajo,
-                    'n_comprobante': n_comprobante if n_comprobante else None,
-                    'tipo_re_se': tipo_re_se,
-                    'mano_obra': mano_obra_actual,
-                    'asistencia': asistencia_actual,
-                    'repuestos': repuestos_actual,
-                    'terceros': terceros_actual,
-                    'descuento': descuento_actual,
-                    'total': total,
-                    'detalles': detalles if detalles else None,
-                    'archivo_comprobante': ruta_archivo
+                    "mes": fecha.strftime("%B"),
+                    "fecha": fecha,
+                    "sucursal": sucursal,
+                    "cliente": cliente or None,
+                    "pin": pin or None,
+                    "comprobante": tipo_comprobante,
+                    "tipo_comprobante": tipo_comprobante,
+                    "trabajo": trabajo,
+                    "n_comprobante": n_comprobante or None,
+                    "tipo_re_se": tipo_re_se,
+                    "mano_obra": mano_obra,
+                    "asistencia": asistencia,
+                    "repuestos": repuestos,
+                    "terceros": terceros,
+                    "descuento": descuento,
+                    "total": total,
+                    "detalles": detalles or None,
+                    "archivo_comprobante": None,
                 }
-                
                 try:
-                    venta_id = insert_venta(venta_data)
-                    st.success(f"✅ Venta registrada exitosamente! ID: {venta_id}")
-                    if ruta_archivo:
-                        st.success(f"📎 Comprobante guardado: {Path(ruta_archivo).name}")
-                    
-                    # Limpiar valores del formulario
-                    st.session_state.venta_mano_obra = 0.0
-                    st.session_state.venta_asistencia = 0.0
-                    st.session_state.venta_repuestos = 0.0
-                    st.session_state.venta_terceros = 0.0
-                    st.session_state.venta_descuento = 0.0
-                    # Limpiar también los keys de los inputs
-                    if 'input_mano_obra' in st.session_state:
-                        del st.session_state.input_mano_obra
-                    if 'input_asistencia' in st.session_state:
-                        del st.session_state.input_asistencia
-                    if 'input_repuestos' in st.session_state:
-                        del st.session_state.input_repuestos
-                    if 'input_terceros' in st.session_state:
-                        del st.session_state.input_terceros
-                    if 'input_descuento' in st.session_state:
-                        del st.session_state.input_descuento
-                    # Limpiar valores del formulario
-                    for key in ['form_fecha', 'form_sucursal', 'form_cliente', 'form_pin', 'form_comprobante', 
-                               'form_tipo_comprobante', 'form_trabajo', 'form_n_comprobante', 'form_tipo_re_se', 
-                               'form_detalles', 'form_archivo_comprobante', 'form_submitted', 'form_processing',
-                               'venta_desde_pdf', 'archivo_pdf_venta']:
-                        if key in st.session_state:
-                            del st.session_state[key]
-                    
-                    st.balloons()
-                    # NO hacer rerun aquí, dejar que el mensaje se muestre
-                except Exception as e:
-                    st.error(f"❌ Error al guardar: {e}")
-                    # Si hay error, resetear el flag de procesamiento para permitir reintentar
-                    st.session_state.form_processing = False
+                    insert_venta(venta_data)
+                    st.success("✅ Venta registrada correctamente.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"❌ Error al guardar: {exc}")
 
-# ==================== REGISTRAR GASTO ====================
-elif page == "💸 Registrar Gasto":
-    st.title("💸 Registrar Nuevo Gasto")
-    
-    # Obtener plantillas disponibles
-    df_plantillas = get_plantillas_gastos(activas_only=True)
-    
-    # Sección de plantillas con búsqueda
-    st.subheader("📋 Usar Plantilla (Opcional)")
-    
-    # Campo de búsqueda para filtrar plantillas
-    buscar_plantilla = st.text_input("🔍 Buscar plantilla", placeholder="Escribe para buscar (clasificación, proveedor, sucursal, área, tipo)...", key="buscar_plantilla_gasto")
-    
-    # Filtrar plantillas según búsqueda
-    df_plantillas_filtrado = df_plantillas.copy()
-    if buscar_plantilla and buscar_plantilla.strip():
-        texto_busqueda = buscar_plantilla.lower().strip()
-        mask = (
-            df_plantillas_filtrado['clasificacion'].astype(str).str.contains(texto_busqueda, case=False, na=False) |
-            df_plantillas_filtrado['proveedor'].astype(str).str.contains(texto_busqueda, case=False, na=False) |
-            df_plantillas_filtrado['sucursal'].astype(str).str.contains(texto_busqueda, case=False, na=False) |
-            df_plantillas_filtrado['area'].astype(str).str.contains(texto_busqueda, case=False, na=False) |
-            df_plantillas_filtrado['tipo'].astype(str).str.contains(texto_busqueda, case=False, na=False)
-        )
-        df_plantillas_filtrado = df_plantillas_filtrado[mask]
-        
-        # Mostrar mensaje según resultados
-        if len(df_plantillas_filtrado) == 0:
-            st.warning(f"⚠️ No se encontraron plantillas que coincidan con '{buscar_plantilla}'. Mostrando todas las plantillas.")
-            df_plantillas_filtrado = df_plantillas.copy()
-        else:
-            st.info(f"✅ {len(df_plantillas_filtrado)} plantilla(s) encontrada(s)")
-    
-    # Función para crear texto de opción
-    def crear_texto_opcion(row):
-        clasificacion = str(row.get('clasificacion', '') or 'Sin clasificación').strip()
-        proveedor = str(row.get('proveedor', '') or 'Sin proveedor').strip()
-        sucursal = str(row['sucursal'] or 'COMPARTIDOS').strip()
-        area = str(row.get('area', '') or 'Sin área').strip()
-        tipo = str(row.get('tipo', '') or 'Sin tipo').strip()
-        return f"{clasificacion} - {proveedor} - {sucursal} - {area} - {tipo}"
-    
-    # Crear opciones con formato: CLASIFICACION - PROVEEDOR - SUCURSAL - AREA - TIPO
-    plantillas_opciones = ['Crear desde cero']
-    plantillas_dict = {}
-    
-    # Agregar plantillas filtradas a las opciones
-    for _, row in df_plantillas_filtrado.iterrows():
-        texto_opcion = crear_texto_opcion(row)
-        plantillas_opciones.append(texto_opcion)
-        plantillas_dict[texto_opcion] = row.to_dict()
-    
-    # Selector de plantilla
-    plantilla_seleccionada = st.selectbox(
-        "Selecciona una plantilla:",
-        plantillas_opciones,
-        help="Selecciona una plantilla para llenar automáticamente los campos, o 'Crear desde cero' para empezar vacío."
+    st.divider()
+    st.subheader("Ventas registradas")
+    df_ventas = get_ventas()
+    if len(df_ventas) == 0:
+        st.info("Aún no hay ventas cargadas.")
+        return
+
+    st.dataframe(
+        df_ventas.sort_values("fecha", ascending=False).head(50),
+        use_container_width=True,
     )
-    
-    # Valores iniciales desde plantilla
-    valores_iniciales = {
-        'sucursal': "COMPARTIDOS",
-        'area': "POSTVENTA",
-        'tipo': "FIJO",
-        'clasificacion': '',
-        'proveedor': '',
-        'pct_postventa': 0.0,
-        'pct_servicios': 0.0,
-        'pct_repuestos': 0.0,
-        'detalles': ''
-    }
-    
-    if plantilla_seleccionada != 'Crear desde cero':
-        plantilla = plantillas_dict[plantilla_seleccionada]
-        valores_iniciales = {
-            'sucursal': plantilla.get('sucursal', 'COMPARTIDOS'),
-            'area': plantilla.get('area', 'POSTVENTA'),
-            'tipo': plantilla.get('tipo', 'FIJO'),
-            'clasificacion': plantilla.get('clasificacion', ''),
-            'proveedor': plantilla.get('proveedor', ''),
-            'pct_postventa': plantilla.get('pct_postventa', 0.0),
-            'pct_servicios': plantilla.get('pct_servicios', 0.0),
-            'pct_repuestos': plantilla.get('pct_repuestos', 0.0),
-            'detalles': plantilla.get('detalles', '')
+
+    st.subheader("Editar o eliminar")
+    opciones = ["(ninguna)"] + [str(v) for v in df_ventas.sort_values("fecha", ascending=False)["id"].tolist()]
+    selected = st.selectbox("Selecciona una venta", opciones)
+    if selected == "(ninguna)":
+        return
+
+    registro = get_venta_by_id(int(selected))
+    if not registro:
+        st.warning("No se encontró el registro.")
+        return
+
+    fecha_reg = datetime.strptime(str(registro["fecha"]), "%Y-%m-%d").date()
+
+    with st.form("form_editar_venta"):
+        col_a, col_b = st.columns(2)
+        with col_a:
+            fecha_edit = st.date_input("Fecha", value=fecha_reg, key="venta_fecha_edit")
+            sucursal_edit = st.selectbox(
+                "Sucursal",
+                sucursales_default,
+                index=sucursales_default.index(registro["sucursal"]) if registro["sucursal"] in sucursales_default else 0,
+                key="venta_sucursal_edit",
+            )
+            cliente_edit = st.text_input("Cliente", value=registro.get("cliente") or "", key="venta_cliente_edit")
+            tipo_comprobante_edit = st.selectbox(
+                "Tipo Comprobante",
+                ["FACTURA VENTA", "NOTA CREDITO", "OTRO"],
+                index=["FACTURA VENTA", "NOTA CREDITO", "OTRO"].index(registro["tipo_comprobante"])
+                if registro["tipo_comprobante"] in ["FACTURA VENTA", "NOTA CREDITO", "OTRO"]
+                else 0,
+                key="venta_tipo_comp_edit",
+            )
+            trabajo_edit = st.selectbox(
+                "Trabajo",
+                tipos_trabajo,
+                index=tipos_trabajo.index(registro.get("trabajo", "EXTERNO")) if registro.get("trabajo", "EXTERNO") in tipos_trabajo else 0,
+                key="venta_trabajo_edit",
+            )
+        with col_b:
+            pin_edit = st.text_input("PIN / Identificador", value=registro.get("pin") or "", key="venta_pin_edit")
+            n_comp_edit = st.text_input("N° de comprobante", value=registro.get("n_comprobante") or "", key="venta_ncomp_edit")
+            tipo_re_se_edit = st.selectbox(
+                "Tipo (RE o SE)", ["RE", "SE"],
+                index=0 if registro["tipo_re_se"] == "RE" else 1,
+                key="venta_tipo_edit",
+            )
+            detalles_edit = st.text_area("Detalles", value=registro.get("detalles") or "", key="venta_detalles_edit")
+
+        col_m1, col_m2, col_m3 = st.columns(3)
+        with col_m1:
+            mano_obra_edit = st.number_input(
+                "Mano de obra",
+                min_value=0.0,
+                value=float(registro.get("mano_obra") or 0),
+                step=0.01,
+                key="venta_mano_edit",
+            )
+            asistencia_edit = st.number_input(
+                "Asistencia",
+                min_value=0.0,
+                value=float(registro.get("asistencia") or 0),
+                step=0.01,
+                key="venta_asistencia_edit",
+            )
+        with col_m2:
+            repuestos_edit = st.number_input(
+                "Repuestos",
+                min_value=0.0,
+                value=float(registro.get("repuestos") or 0),
+                step=0.01,
+                key="venta_repuestos_edit",
+            )
+            terceros_edit = st.number_input(
+                "Terceros",
+                min_value=0.0,
+                value=float(registro.get("terceros") or 0),
+                step=0.01,
+                key="venta_terceros_edit",
+            )
+        with col_m3:
+            descuento_edit = st.number_input(
+                "Descuento",
+                min_value=0.0,
+                value=float(registro.get("descuento") or 0),
+                step=0.01,
+                key="venta_descuento_edit",
+            )
+            total_edit = st.number_input(
+                "Total facturado",
+                min_value=0.0,
+                value=float(registro.get("total") or 0),
+                step=0.01,
+                key="venta_total_edit",
+            )
+
+        col_btn1, col_btn2 = st.columns([3, 1])
+        with col_btn1:
+            actualizar = st.form_submit_button("💾 Actualizar venta")
+        with col_btn2:
+            eliminar = st.form_submit_button("🗑️ Eliminar", help="Eliminar definitivamente la venta seleccionada")
+
+    if actualizar:
+        venta_actualizada = {
+            "mes": fecha_edit.strftime("%B"),
+            "fecha": fecha_edit,
+            "sucursal": sucursal_edit,
+            "cliente": cliente_edit or None,
+            "pin": pin_edit or None,
+            "comprobante": tipo_comprobante_edit,
+            "tipo_comprobante": tipo_comprobante_edit,
+            "trabajo": trabajo_edit,
+            "n_comprobante": n_comp_edit or None,
+            "tipo_re_se": tipo_re_se_edit,
+            "mano_obra": mano_obra_edit,
+            "asistencia": asistencia_edit,
+            "repuestos": repuestos_edit,
+            "terceros": terceros_edit,
+            "descuento": descuento_edit,
+            "total": total_edit,
+            "detalles": detalles_edit or None,
+            "archivo_comprobante": registro.get("archivo_comprobante"),
         }
-        
-        # Mostrar información de la plantilla
-        st.info(f"""
-        **Plantilla seleccionada:** {plantilla['nombre']}
-        - Sucursal: {valores_iniciales['sucursal']}
-        - Área: {valores_iniciales['area']}
-        - Tipo: {valores_iniciales['tipo']}
-        - Clasificación: {valores_iniciales['clasificacion']}
-        - Proveedor: {valores_iniciales['proveedor'] if valores_iniciales['proveedor'] else 'N/A'}
-        - % Postventa: {valores_iniciales['pct_postventa']*100:.0f}%
-        - % Servicios: {valores_iniciales['pct_servicios']*100:.0f}%
-        - % Repuestos: {valores_iniciales['pct_repuestos']*100:.0f}%
-        """)
-    
-    with st.form("form_gasto"):
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            fecha = st.date_input("Fecha *", value=date.today())
-            sucursal = st.selectbox("Sucursal", ["COMODORO", "RIO GRANDE", "RIO GALLEGOS", "COMPARTIDOS"],
-                                   index=["COMODORO", "RIO GRANDE", "RIO GALLEGOS", "COMPARTIDOS"].index(valores_iniciales['sucursal']) 
-                                   if valores_iniciales['sucursal'] in ["COMODORO", "RIO GRANDE", "RIO GALLEGOS", "COMPARTIDOS"] else 3)
-            area = st.selectbox("Área", ["POSTVENTA", "SERVICIO", "REPUESTOS"],
-                               index=["POSTVENTA", "SERVICIO", "REPUESTOS"].index(valores_iniciales['area']) 
-                               if valores_iniciales['area'] in ["POSTVENTA", "SERVICIO", "REPUESTOS"] else 0)
-            tipo = st.selectbox("Tipo", ["FIJO", "VARIABLE"],
-                               index=0 if valores_iniciales['tipo'] == 'FIJO' else 1)
-            clasificacion = st.text_input("Clasificación *", value=valores_iniciales['clasificacion'])
-            proveedor = st.text_input("Proveedor", value=valores_iniciales['proveedor'])
-            total_pesos = st.number_input("Total Pesos (Opcional)", min_value=0.0, value=0.0, step=0.01)
-        
-        with col2:
-            total_usd = st.number_input("Total USD *", min_value=0.0, value=0.0, step=0.01)
-            pct_postventa = st.number_input("% Postventa", min_value=0.0, max_value=1.0, 
-                                           value=valores_iniciales['pct_postventa'], step=0.01)
-            pct_servicios = st.number_input("% Servicios", min_value=0.0, max_value=1.0, 
-                                          value=valores_iniciales['pct_servicios'], step=0.01)
-            pct_repuestos = st.number_input("% Repuestos", min_value=0.0, max_value=1.0, 
-                                          value=valores_iniciales['pct_repuestos'], step=0.01)
-            detalles = st.text_area("Detalles", value=valores_iniciales['detalles'])
-        
-        # Calcular totales
-        total_pct = total_usd * pct_postventa if pct_postventa > 0 else 0
-        total_pct_se = total_pct * pct_servicios if pct_servicios > 0 else 0
-        total_pct_re = total_pct * pct_repuestos if pct_repuestos > 0 else 0
-        
-        st.info(f"📊 Total %: {formatear_moneda(total_pct)} | %SE: {formatear_moneda(total_pct_se)} | %RE: {formatear_moneda(total_pct_re)}")
-        
-        submitted = st.form_submit_button("💾 Guardar Gasto")
-        
-        if submitted:
-            if not clasificacion:
-                st.error("⚠️ Por favor completa el campo obligatorio (Clasificación)")
-            elif total_usd <= 0:
-                st.error("⚠️ El total USD debe ser mayor a 0")
-            else:
-                gasto_data = {
-                    'mes': fecha.strftime("%B"),
-                    'fecha': fecha,
-                    'sucursal': sucursal,
-                    'area': area,
-                    'pct_postventa': pct_postventa,
-                    'pct_servicios': pct_servicios,
-                    'pct_repuestos': pct_repuestos,
-                    'tipo': tipo,
-                    'clasificacion': clasificacion,
-                    'proveedor': proveedor if proveedor else None,
-                    'total_pesos': total_pesos if total_pesos > 0 else None,
-                    'total_usd': total_usd,
-                    'total_pct': total_pct,
-                    'total_pct_se': total_pct_se,
-                    'total_pct_re': total_pct_re,
-                    'detalles': detalles if detalles else None
-                }
-                
-                try:
-                    gasto_id = insert_gasto(gasto_data)
-                    st.success(f"✅ Gasto registrado exitosamente! ID: {gasto_id}")
-                    st.balloons()
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"❌ Error al guardar: {e}")
-
-# ==================== PLANTILLAS GASTOS ====================
-elif page == "⚙️ Plantillas Gastos":
-    st.title("⚙️ Gestión de Plantillas de Gastos")
-    
-    tab1, tab2, tab3 = st.tabs(["📋 Ver Plantillas", "➕ Crear/Editar Plantilla", "📥 Crear desde Gasto Existente"])
-    
-    with tab1:
-        st.subheader("Plantillas Existentes")
-        df_plantillas = get_plantillas_gastos()
-        
-        # Sección de Exportar/Importar Plantillas
-        st.divider()
-        st.subheader("💾 Exportar/Importar Plantillas")
-        st.info("💡 **Exporta tus plantillas** para transferirlas a otra instancia (ej: Streamlit Cloud) o **importa plantillas** desde un archivo JSON.")
-        
-        col_exp1, col_exp2 = st.columns(2)
-        
-        with col_exp1:
-            st.markdown("#### 📤 Exportar Plantillas")
-            if len(df_plantillas) > 0:
-                # Exportar a JSON
-                plantillas_data = exportar_plantillas_gastos()
-                json_data = json.dumps(plantillas_data, indent=2, ensure_ascii=False)
-                
-                st.download_button(
-                    label="📥 Descargar Plantillas (JSON)",
-                    data=json_data,
-                    file_name=f"plantillas_gastos_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                    mime="application/json",
-                    help=f"Descarga {len(plantillas_data)} plantillas en formato JSON"
-                )
-                st.caption(f"Total: {len(plantillas_data)} plantillas disponibles para exportar")
-            else:
-                st.info("No hay plantillas para exportar")
-        
-        with col_exp2:
-            st.markdown("#### 📥 Importar Plantillas")
-            archivo_json = st.file_uploader("Subir archivo JSON de plantillas", type=['json'], key="import_plantillas")
-            
-            if archivo_json is not None:
-                sobrescribir = st.checkbox("Sobrescribir plantillas existentes con el mismo nombre", value=False)
-                
-                if st.button("📥 Importar Plantillas", key="btn_importar_plantillas"):
-                    try:
-                        # Leer JSON
-                        contenido = archivo_json.read().decode('utf-8')
-                        plantillas_data = json.loads(contenido)
-                        
-                        if not isinstance(plantillas_data, list):
-                            st.error("❌ El archivo JSON debe contener una lista de plantillas")
-                        else:
-                            with st.spinner(f"Importando {len(plantillas_data)} plantillas..."):
-                                resultado = importar_plantillas_gastos(plantillas_data, sobrescribir=sobrescribir)
-                                
-                                if resultado['importadas'] > 0 or resultado['actualizadas'] > 0:
-                                    st.success(f"✅ Importación completada:")
-                                    if resultado['importadas'] > 0:
-                                        st.write(f"- ✅ {resultado['importadas']} plantillas importadas")
-                                    if resultado['actualizadas'] > 0:
-                                        st.write(f"- 🔄 {resultado['actualizadas']} plantillas actualizadas")
-                                    if resultado['omitidas'] > 0:
-                                        st.write(f"- ⏭️ {resultado['omitidas']} plantillas omitidas (ya existían)")
-                                    if resultado['errores']:
-                                        st.warning(f"⚠️ {len(resultado['errores'])} errores:")
-                                        for error in resultado['errores'][:5]:
-                                            st.write(f"  - {error}")
-                                    st.rerun()
-                                else:
-                                    st.warning("⚠️ No se importaron plantillas. Verifica el archivo JSON.")
-                    except json.JSONDecodeError as e:
-                        st.error(f"❌ Error al leer el archivo JSON: {e}")
-                    except Exception as e:
-                        st.error(f"❌ Error al importar: {e}")
-        
-        st.divider()
-        
-        if len(df_plantillas) > 0:
-            buscar_plantilla = st.text_input("🔍 Buscar plantilla", placeholder="Buscar por clasificación, proveedor, sucursal, área, tipo...")
-            df_filtrado = df_plantillas.copy()
-            
-            if buscar_plantilla:
-                # Buscar en múltiples columnas
-                texto_busqueda = buscar_plantilla.lower()
-                mask = (
-                    df_filtrado['clasificacion'].astype(str).str.contains(texto_busqueda, case=False, na=False) |
-                    df_filtrado['proveedor'].astype(str).str.contains(texto_busqueda, case=False, na=False) |
-                    df_filtrado['sucursal'].astype(str).str.contains(texto_busqueda, case=False, na=False) |
-                    df_filtrado['area'].astype(str).str.contains(texto_busqueda, case=False, na=False) |
-                    df_filtrado['tipo'].astype(str).str.contains(texto_busqueda, case=False, na=False) |
-                    df_filtrado['nombre'].astype(str).str.contains(texto_busqueda, case=False, na=False)
-                )
-                df_filtrado = df_filtrado[mask]
-            
-            # Mostrar plantillas
-            for idx, row in df_filtrado.iterrows():
-                # Formato del título: CLASIFICACION - PROVEEDOR - SUCURSAL - AREA - TIPO
-                clasificacion = row.get('clasificacion', '') or 'Sin clasificación'
-                proveedor = row.get('proveedor', '') or 'Sin proveedor'
-                sucursal = row['sucursal'] or 'COMPARTIDOS'
-                area = row.get('area', '') or 'Sin área'
-                tipo = row.get('tipo', '') or 'Sin tipo'
-                
-                titulo_expander = f"{'✅' if row['activa'] else '❌'} {clasificacion} - {proveedor} - {sucursal} - {area} - {tipo}"
-                
-                with st.expander(titulo_expander):
-                    col1, col2 = st.columns([3, 1])
-                    
-                    with col1:
-                        st.write(f"**Descripción:** {row['descripcion'] or 'Sin descripción'}")
-                        st.write(f"**Área:** {row['area']} | **Tipo:** {row['tipo']}")
-                        st.write(f"**Clasificación:** {row['clasificacion']}")
-                        if row['proveedor']:
-                            st.write(f"**Proveedor:** {row['proveedor']}")
-                        st.write(f"**% Postventa:** {row['pct_postventa']*100:.0f}% | **% Servicios:** {row['pct_servicios']*100:.0f}% | **% Repuestos:** {row['pct_repuestos']*100:.0f}%")
-                        if row['detalles']:
-                            st.write(f"**Detalles:** {row['detalles']}")
-                    
-                    with col2:
-                        if st.button("✏️ Editar", key=f"edit_{row['id']}"):
-                            st.session_state['editar_plantilla_id'] = row['id']
-                            st.success(f"✅ Plantilla seleccionada para editar. Ve a la pestaña '➕ Crear/Editar Plantilla' para editarla.")
-                            st.rerun()
-                        if st.button("🗑️ Eliminar", key=f"delete_{row['id']}"):
-                            try:
-                                delete_plantilla_gasto(row['id'])
-                                st.success(f"✅ Plantilla '{row['nombre']}' eliminada")
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"❌ Error: {e}")
-        else:
-            st.info("No hay plantillas creadas. Crea una nueva en la pestaña 'Crear/Editar Plantilla'")
-    
-    with tab2:
-        # Verificar si hay una plantilla para editar
-        plantilla_editar_id = st.session_state.get('editar_plantilla_id', None)
-        
-        if plantilla_editar_id:
-            try:
-                plantilla_editar = get_plantilla_gasto_by_id(plantilla_editar_id)
-                if plantilla_editar and len(plantilla_editar) > 0:
-                    st.subheader(f"✏️ Editar Plantilla: {plantilla_editar.get('nombre', 'Sin nombre')}")
-                    st.info("📝 Estás editando una plantilla existente. Modifica los campos y guarda los cambios.")
-                else:
-                    st.warning("⚠️ La plantilla seleccionada no se encontró. Creando nueva plantilla.")
-                    plantilla_editar = None
-                    if 'editar_plantilla_id' in st.session_state:
-                        del st.session_state['editar_plantilla_id']
-                    st.subheader("➕ Crear Nueva Plantilla")
-            except Exception as e:
-                st.error(f"❌ Error al cargar la plantilla: {e}")
-                import traceback
-                st.code(traceback.format_exc())
-                plantilla_editar = None
-                if 'editar_plantilla_id' in st.session_state:
-                    del st.session_state['editar_plantilla_id']
-                st.subheader("➕ Crear Nueva Plantilla")
-        else:
-            plantilla_editar = None
-            st.subheader("➕ Crear Nueva Plantilla")
-        
-        with st.form("form_plantilla"):
-            # Valores por defecto seguros
-            nombre_default = plantilla_editar.get('nombre', '') if plantilla_editar else ''
-            descripcion_default = plantilla_editar.get('descripcion', '') if plantilla_editar else ''
-            clasificacion_default = plantilla_editar.get('clasificacion', '') if plantilla_editar else ''
-            proveedor_default = plantilla_editar.get('proveedor', '') if plantilla_editar else ''
-            detalles_default = plantilla_editar.get('detalles', '') if plantilla_editar else ''
-            pct_postventa_default = float(plantilla_editar.get('pct_postventa', 0.0)) if plantilla_editar else 0.0
-            pct_servicios_default = float(plantilla_editar.get('pct_servicios', 0.0)) if plantilla_editar else 0.0
-            pct_repuestos_default = float(plantilla_editar.get('pct_repuestos', 0.0)) if plantilla_editar else 0.0
-            activa_default = bool(plantilla_editar.get('activa', True)) if plantilla_editar else True
-            
-            nombre = st.text_input("Nombre *", value=nombre_default)
-            descripcion = st.text_area("Descripción", value=descripcion_default)
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                # Sucursal
-                sucursal_opciones = ["COMODORO", "RIO GRANDE", "RIO GALLEGOS", None]
-                sucursal_default = plantilla_editar.get('sucursal') if plantilla_editar else None
-                sucursal_index = 0
-                if sucursal_default and sucursal_default in sucursal_opciones:
-                    sucursal_index = sucursal_opciones.index(sucursal_default)
-                elif sucursal_default is None:
-                    sucursal_index = 3
-                sucursal = st.selectbox("Sucursal", sucursal_opciones, index=sucursal_index)
-                
-                # Área
-                area_opciones = ["POSTVENTA", "SERVICIO", "REPUESTOS"]
-                area_default = plantilla_editar.get('area', 'POSTVENTA') if plantilla_editar else 'POSTVENTA'
-                area_index = area_opciones.index(area_default) if area_default in area_opciones else 0
-                area = st.selectbox("Área", area_opciones, index=area_index)
-                
-                # Tipo
-                tipo_default = plantilla_editar.get('tipo', 'FIJO') if plantilla_editar else 'FIJO'
-                tipo_index = 0 if tipo_default == 'FIJO' else 1
-                tipo = st.selectbox("Tipo", ["FIJO", "VARIABLE"], index=tipo_index)
-                
-                clasificacion = st.text_input("Clasificación", value=clasificacion_default)
-            
-            with col2:
-                proveedor = st.text_input("Proveedor", value=proveedor_default)
-                pct_postventa = st.number_input("% Postventa", min_value=0.0, max_value=1.0, 
-                                               value=pct_postventa_default, step=0.01)
-                pct_servicios = st.number_input("% Servicios", min_value=0.0, max_value=1.0, 
-                                               value=pct_servicios_default, step=0.01)
-                pct_repuestos = st.number_input("% Repuestos", min_value=0.0, max_value=1.0, 
-                                               value=pct_repuestos_default, step=0.01)
-            
-            detalles = st.text_area("Detalles", value=detalles_default)
-            activa = st.checkbox("Activa", value=activa_default)
-            
-            submitted = st.form_submit_button("💾 Guardar Plantilla")
-            
-            if submitted:
-                if not nombre:
-                    st.error("⚠️ El nombre es obligatorio")
-                else:
-                    # Verificar si el nombre ya existe (excepto si estamos editando la misma plantilla)
-                    df_plantillas_existentes = get_plantillas_gastos()
-                    nombre_duplicado = False
-                    if len(df_plantillas_existentes) > 0:
-                        if plantilla_editar_id:
-                            # Al editar, excluir la plantilla actual de la verificación
-                            nombres_existentes = df_plantillas_existentes[df_plantillas_existentes['id'] != plantilla_editar_id]
-                        else:
-                            nombres_existentes = df_plantillas_existentes
-                        nombres_existentes_set = set(nombres_existentes['nombre'].str.lower())
-                        nombre_duplicado = nombre.lower() in nombres_existentes_set
-                    
-                    if nombre_duplicado:
-                        st.error(f"❌ Ya existe una plantilla con el nombre '{nombre}'. Por favor, elige un nombre diferente.")
-                    else:
-                        plantilla_data = {
-                            'nombre': nombre,
-                            'descripcion': descripcion,
-                            'sucursal': sucursal if sucursal else None,
-                            'area': area,
-                            'tipo': tipo,
-                            'clasificacion': clasificacion,
-                            'proveedor': proveedor if proveedor else None,
-                            'pct_postventa': pct_postventa,
-                            'pct_servicios': pct_servicios,
-                            'pct_repuestos': pct_repuestos,
-                            'detalles': detalles if detalles else None,
-                            'activa': 1 if activa else 0
-                        }
-                        
-                        try:
-                            if plantilla_editar_id:
-                                update_plantilla_gasto(plantilla_editar_id, plantilla_data)
-                                st.success(f"✅ Plantilla '{nombre}' actualizada")
-                                if 'editar_plantilla_id' in st.session_state:
-                                    del st.session_state['editar_plantilla_id']
-                            else:
-                                insert_plantilla_gasto(plantilla_data)
-                                st.success(f"✅ Plantilla '{nombre}' creada")
-                            st.rerun()
-                        except Exception as e:
-                            if "UNIQUE constraint" in str(e) and "nombre" in str(e):
-                                st.error(f"❌ Ya existe una plantilla con el nombre '{nombre}'. Por favor, elige un nombre diferente.")
-                            else:
-                                st.error(f"❌ Error: {e}")
-    
-    with tab3:
-        st.subheader("📥 Crear Plantilla desde Gasto Existente")
-        df_gastos = get_gastos()
-        
-        if len(df_gastos) > 0:
-            # Filtros
-            col1, col2 = st.columns(2)
-            with col1:
-                sucursales = ['Todas'] + list(df_gastos['sucursal'].dropna().unique())
-                filtro_sucursal = st.selectbox("Filtrar por Sucursal", sucursales)
-            with col2:
-                areas = ['Todas'] + list(df_gastos['area'].dropna().unique())
-                filtro_area = st.selectbox("Filtrar por Área", areas)
-            
-            # Aplicar filtros
-            df_filtrado = df_gastos.copy()
-            if filtro_sucursal != 'Todas':
-                df_filtrado = df_filtrado[df_filtrado['sucursal'] == filtro_sucursal]
-            if filtro_area != 'Todas':
-                df_filtrado = df_filtrado[df_filtrado['area'] == filtro_area]
-            
-            # Crear opciones descriptivas
-            def format_gasto_option(row):
-                clasif = row.get('clasificacion', '') or 'Sin clasificación'
-                area = row.get('area', '') or 'Sin área'
-                sucursal = row.get('sucursal', '') or 'Sin sucursal'
-                proveedor = row.get('proveedor', '') or 'Sin proveedor'
-                tipo = row.get('tipo', '') or 'Sin tipo'
-                return f"ID {row['id']}: {clasif} - {area} - {sucursal} - {proveedor} - {tipo}"
-            
-            # Pre-cargar todos los datos necesarios en un dict para evitar múltiples llamadas
-            gastos_dict = {}
-            opciones_gastos = []
-            for idx, row in df_filtrado.iterrows():
-                gasto_id = row['id']
-                gastos_dict[gasto_id] = row.to_dict()
-                opciones_gastos.append((gasto_id, format_gasto_option(row)))
-            
-            if opciones_gastos:
-                gasto_seleccionado_id = st.selectbox(
-                    "Selecciona un gasto para crear plantilla",
-                    [None] + [g[0] for g in opciones_gastos],
-                    format_func=lambda x: dict(opciones_gastos)[x] if x and x in dict(opciones_gastos) else "Seleccionar...",
-                    key="select_gasto_plantilla"
-                )
-                
-                if gasto_seleccionado_id:
-                    gasto_seleccionado = gastos_dict[gasto_seleccionado_id]
-                    
-                    with st.form("form_plantilla_desde_gasto"):
-                        # Generar nombre sugerido más único
-                        clasificacion = gasto_seleccionado.get('clasificacion', 'Nueva Plantilla')
-                        sucursal = gasto_seleccionado.get('sucursal', '')
-                        proveedor = gasto_seleccionado.get('proveedor', '')
-                        
-                        # Crear nombre sugerido: CLASIFICACION - SUCURSAL (o con proveedor si existe)
-                        nombre_sugerido = f"{clasificacion} - {sucursal}" if sucursal else clasificacion
-                        if proveedor:
-                            nombre_sugerido = f"{clasificacion} - {sucursal} - {proveedor}" if sucursal else f"{clasificacion} - {proveedor}"
-                        
-                        # Verificar si el nombre ya existe
-                        df_plantillas_existentes = get_plantillas_gastos()
-                        nombres_existentes = set(df_plantillas_existentes['nombre'].str.lower() if len(df_plantillas_existentes) > 0 else set())
-                        
-                        # Si el nombre sugerido ya existe, agregar un sufijo
-                        nombre_final = nombre_sugerido
-                        contador = 1
-                        while nombre_final.lower() in nombres_existentes:
-                            nombre_final = f"{nombre_sugerido} ({contador})"
-                            contador += 1
-                        
-                        nombre_plantilla = st.text_input("Nombre de la Plantilla *", value=nombre_final)
-                        
-                        # Mostrar advertencia si el nombre ya existe
-                        if nombre_plantilla and nombre_plantilla.lower() in nombres_existentes:
-                            st.warning(f"⚠️ Ya existe una plantilla con el nombre '{nombre_plantilla}'. Por favor, usa un nombre diferente.")
-                        
-                        descripcion_plantilla = st.text_area("Descripción", 
-                                                            value=f"Plantilla creada desde gasto ID {gasto_seleccionado_id}")
-                        
-                        # Mostrar datos del gasto seleccionado
-                        st.info(f"""
-                        **Datos del gasto seleccionado:**
-                        - Clasificación: {gasto_seleccionado.get('clasificacion', 'N/A')}
-                        - Área: {gasto_seleccionado.get('area', 'N/A')}
-                        - Sucursal: {gasto_seleccionado.get('sucursal', 'N/A')}
-                        - Proveedor: {gasto_seleccionado.get('proveedor', 'N/A')}
-                        - Tipo: {gasto_seleccionado.get('tipo', 'N/A')}
-                        - % Postventa: {gasto_seleccionado.get('pct_postventa', 0)*100:.0f}%
-                        - % Servicios: {gasto_seleccionado.get('pct_servicios', 0)*100:.0f}%
-                        - % Repuestos: {gasto_seleccionado.get('pct_repuestos', 0)*100:.0f}%
-                        """)
-                        
-                        submitted = st.form_submit_button("💾 Crear Plantilla")
-                        
-                        if submitted:
-                            if not nombre_plantilla:
-                                st.error("⚠️ El nombre es obligatorio")
-                            elif nombre_plantilla.lower() in nombres_existentes:
-                                st.error(f"❌ Ya existe una plantilla con el nombre '{nombre_plantilla}'. Por favor, elige un nombre diferente.")
-                            else:
-                                plantilla_data = {
-                                    'nombre': nombre_plantilla,
-                                    'descripcion': descripcion_plantilla,
-                                    'sucursal': gasto_seleccionado.get('sucursal'),
-                                    'area': gasto_seleccionado.get('area'),
-                                    'tipo': gasto_seleccionado.get('tipo'),
-                                    'clasificacion': gasto_seleccionado.get('clasificacion'),
-                                    'proveedor': gasto_seleccionado.get('proveedor'),
-                                    'pct_postventa': gasto_seleccionado.get('pct_postventa', 0),
-                                    'pct_servicios': gasto_seleccionado.get('pct_servicios', 0),
-                                    'pct_repuestos': gasto_seleccionado.get('pct_repuestos', 0),
-                                    'detalles': gasto_seleccionado.get('detalles'),
-                                    'activa': 1
-                                }
-                                
-                                try:
-                                    insert_plantilla_gasto(plantilla_data)
-                                    st.success(f"✅ Plantilla '{nombre_plantilla}' creada desde gasto ID {gasto_seleccionado_id}")
-                                    st.rerun()
-                                except Exception as e:
-                                    if "UNIQUE constraint" in str(e) and "nombre" in str(e):
-                                        st.error(f"❌ Ya existe una plantilla con el nombre '{nombre_plantilla}'. Por favor, elige un nombre diferente.")
-                                    else:
-                                        st.error(f"❌ Error: {e}")
-            else:
-                st.info("No hay gastos que coincidan con los filtros seleccionados")
-        else:
-            st.info("No hay gastos registrados. Primero registra algunos gastos.")
-
-# ==================== IMPORTAR EXCEL ====================
-elif page == "📥 Importar Excel":
-    st.title("📥 Importar Datos desde Excel")
-    
-    # Sección para eliminar todos los registros
-    st.subheader("🗑️ Limpiar Base de Datos")
-    st.warning("⚠️ **ADVERTENCIA:** Esta acción eliminará TODOS los registros de ventas y gastos. Esta acción NO se puede deshacer.")
-    
-    col_eliminar1, col_eliminar2 = st.columns(2)
-    
-    with col_eliminar1:
-        eliminar_plantillas = st.checkbox("También eliminar plantillas de gastos", value=False)
-    
-    with col_eliminar2:
-        if st.button("🗑️ Eliminar Todos los Registros", type="primary"):
-            with st.spinner("Eliminando registros..."):
-                resultado = eliminar_todos_los_registros(eliminar_plantillas=eliminar_plantillas)
-                if resultado['exito']:
-                    st.success(f"✅ Registros eliminados exitosamente:")
-                    st.write(f"- Ventas eliminadas: {resultado['ventas_eliminadas']}")
-                    st.write(f"- Gastos eliminados: {resultado['gastos_eliminados']}")
-                    if eliminar_plantillas:
-                        st.write(f"- Plantillas eliminadas: {resultado['plantillas_eliminadas']}")
-                    st.rerun()
-                else:
-                    st.error(f"❌ Error al eliminar: {resultado.get('error', 'Error desconocido')}")
-    
-    st.divider()
-    
-    # Sección de Backup y Restore
-    st.subheader("💾 Backup y Restore de Base de Datos")
-    
-    if IS_STREAMLIT_CLOUD:
-        st.warning("⚠️ **IMPORTANTE**: En Streamlit Cloud, la base de datos se reinicia con cada deploy. **Haz backup regularmente** para no perder tus datos.")
-    
-    col_backup1, col_backup2 = st.columns(2)
-    
-    with col_backup1:
-        st.write("**📥 Crear Backup**")
-        if st.button("💾 Crear Backup Ahora", help="Crea una copia de seguridad de toda la base de datos"):
-            backup_path = crear_backup_db()
-            if backup_path:
-                st.success(f"✅ Backup creado exitosamente: `{Path(backup_path).name}`")
-                st.info("💡 Descarga el archivo completo de la base de datos abajo para guardarlo fuera de Streamlit Cloud.")
-            else:
-                st.error("❌ Error al crear backup. Verifica que la base de datos exista.")
-        
-        # Descargar base de datos completa
-        db_bytes = exportar_db_a_bytes()
-        if db_bytes:
-            st.download_button(
-                label="📥 Descargar Base de Datos Completa",
-                data=db_bytes,
-                file_name=f"postventa_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db",
-                mime="application/x-sqlite3",
-                help="Descarga la base de datos completa para guardarla fuera de Streamlit Cloud"
-            )
-    
-    with col_backup2:
-        st.write("**📤 Restaurar desde Backup**")
-        archivo_backup = st.file_uploader(
-            "Subir archivo de backup (.db)",
-            type=['db'],
-            help="Sube un archivo de backup para restaurar la base de datos"
-        )
-        
-        if archivo_backup is not None:
-            if st.button("🔄 Restaurar desde Archivo", type="primary"):
-                with st.spinner("Restaurando base de datos..."):
-                    db_bytes_restore = archivo_backup.read()
-                    if importar_db_desde_bytes(db_bytes_restore):
-                        st.success("✅ Base de datos restaurada exitosamente!")
-                        st.info("🔄 Recarga la página para ver los cambios.")
-                        st.rerun()
-                    else:
-                        st.error("❌ Error al restaurar. Verifica que el archivo sea válido.")
-    
-    # Listar backups locales
-    backups = listar_backups()
-    if backups:
-        st.write("**📋 Backups Locales Disponibles:**")
-        for backup in backups[:5]:  # Mostrar solo los últimos 5
-            col1, col2, col3 = st.columns([3, 2, 1])
-            with col1:
-                st.write(f"📄 {backup['nombre']}")
-            with col2:
-                st.caption(f"📅 {backup['fecha']}")
-            with col3:
-                if st.button("🔄 Restaurar", key=f"restore_{backup['nombre']}"):
-                    if restaurar_backup_db(backup['ruta']):
-                        st.success("✅ Backup restaurado! Recarga la página.")
-                        st.rerun()
-                    else:
-                        st.error("❌ Error al restaurar.")
-    
-    st.divider()
-    
-    st.subheader("📥 Importar desde Excel")
-    st.info("""
-    **Instrucciones:**
-    - El archivo Excel debe tener las hojas: "REGISTRO VENTAS" y "REGISTRO GASTOS"
-    - Las columnas deben coincidir con los nombres esperados
-    - Los datos se agregarán a la base de datos existente
-    """)
-    
-    archivo_excel = st.file_uploader("Subir archivo Excel", type=['xlsx', 'xls'])
-    
-    if archivo_excel is not None:
         try:
-            # Guardar archivo temporalmente
-            temp_path = Path(f"temp_{archivo_excel.name}")
-            with open(temp_path, "wb") as f:
-                f.write(archivo_excel.getbuffer())
-            
-            col1, col2 = st.columns(2)
-            
-            # Mostrar información del archivo
-            try:
-                excel_file = pd.ExcelFile(str(temp_path))
-                st.info(f"📋 Hojas encontradas en el Excel: {', '.join(excel_file.sheet_names)}")
-            except Exception as e:
-                st.warning(f"⚠️ No se pudo leer el archivo Excel: {e}")
-            
-            with col1:
-                if st.button("📥 Importar Ventas"):
-                    with st.spinner("Importando ventas..."):
-                        try:
-                            count = import_ventas_from_excel(str(temp_path))
-                            if count > 0:
-                                st.success(f"✅ {count} ventas importadas exitosamente")
-                            else:
-                                st.warning(f"⚠️ No se importaron ventas. Verifica que la hoja 'REGISTRO VENTAS' tenga datos válidos.")
-                        except Exception as e:
-                            st.error(f"❌ Error al importar ventas: {e}")
-                        finally:
-                            if temp_path.exists():
-                                temp_path.unlink()
-            
-            with col2:
-                if st.button("📥 Importar Gastos"):
-                    with st.spinner("Importando gastos..."):
-                        try:
-                            count = import_gastos_from_excel(str(temp_path))
-                            if count > 0:
-                                st.success(f"✅ {count} gastos importados exitosamente")
-                            else:
-                                st.warning(f"⚠️ No se importaron gastos. Verifica que la hoja 'REGISTRO GASTOS' tenga datos válidos con 'Total USD' > 0.")
-                        except Exception as e:
-                            st.error(f"❌ Error al importar gastos: {e}")
-                        finally:
-                            if temp_path.exists():
-                                temp_path.unlink()
-            
-            if st.button("📥 Importar Todo"):
-                with st.spinner("Importando todos los datos..."):
-                    try:
-                        count_ventas = import_ventas_from_excel(str(temp_path))
-                        count_gastos = import_gastos_from_excel(str(temp_path))
-                        if count_ventas > 0 or count_gastos > 0:
-                            st.success(f"✅ {count_ventas} ventas y {count_gastos} gastos importados")
-                        else:
-                            st.warning(f"⚠️ No se importaron datos. Verifica que las hojas tengan datos válidos.")
-                        if temp_path.exists():
-                            temp_path.unlink()
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"❌ Error al importar: {e}")
-                        if temp_path.exists():
-                            temp_path.unlink()
-        except Exception as e:
-            st.error(f"❌ Error al importar: {e}")
-
-# ==================== VER REGISTROS ====================
-elif page == "📋 Ver Registros":
-    st.title("📋 Ver y Gestionar Registros")
-    
-    # Filtros de fecha globales
-    st.subheader("📅 Filtros de Fecha")
-    col_fecha1, col_fecha2, col_fecha3 = st.columns([2, 2, 1])
-    with col_fecha1:
-        fecha_inicio_ver = st.date_input("Fecha Inicio", value=date(2025, 11, 1), key="fecha_inicio_ver")
-    with col_fecha2:
-        fecha_fin_ver = st.date_input("Fecha Fin", value=date.today(), key="fecha_fin_ver")
-    with col_fecha3:
-        st.write("")  # Espacio vacío para alineación
-        st.write("")  # Espacio vacío para alineación
-    
-    # Botón de exportar a Excel (arriba de los tabs)
-    col_export1, col_export2 = st.columns([3, 1])
-    with col_export1:
-        st.write("")  # Espacio
-    with col_export2:
-        # Obtener datos filtrados por fecha para el export
-        df_ventas_export = get_ventas(str(fecha_inicio_ver), str(fecha_fin_ver))
-        df_gastos_export = get_gastos(str(fecha_inicio_ver), str(fecha_fin_ver))
-        
-        # Crear Excel en memoria
-        try:
-            output = BytesIO()
-            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                # Hoja de Ventas
-                df_ventas_export.to_excel(writer, sheet_name='REGISTRO VENTAS', index=False)
-                
-                # Hoja de Gastos
-                df_gastos_export.to_excel(writer, sheet_name='REGISTRO GASTOS', index=False)
-            
-            output.seek(0)
-            
-            # Nombre del archivo con fechas
-            nombre_archivo = f"Registros_{fecha_inicio_ver.strftime('%Y%m%d')}_{fecha_fin_ver.strftime('%Y%m%d')}.xlsx"
-            
-            st.download_button(
-                label="📥 Exportar a Excel",
-                data=output.getvalue(),
-                file_name=nombre_archivo,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                help=f"Exporta {len(df_ventas_export)} ventas y {len(df_gastos_export)} gastos del período seleccionado"
-            )
-        except Exception as e:
-            st.error(f"❌ Error al generar Excel: {e}")
-    
-    st.divider()
-    
-    tab1, tab2 = st.tabs(["💰 Ventas", "💸 Gastos"])
-    
-    with tab1:
-        st.subheader("Registro de Ventas")
-        df_ventas = get_ventas(str(fecha_inicio_ver), str(fecha_fin_ver))
-        
-        if len(df_ventas) > 0:
-            st.write(f"Total de registros: {len(df_ventas)}")
-            
-            # Filtros
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                sucursales = ['Todas'] + list(df_ventas['sucursal'].dropna().unique())
-                filtro_sucursal = st.selectbox("Filtrar por Sucursal", sucursales)
-            with col2:
-                tipos = ['Todos'] + list(df_ventas['tipo_re_se'].dropna().unique())
-                filtro_tipo = st.selectbox("Filtrar por Tipo", tipos)
-            with col3:
-                buscar = st.text_input("Buscar cliente")
-            
-            # Aplicar filtros
-            df_filtrado = df_ventas.copy()
-            if filtro_sucursal != 'Todas':
-                df_filtrado = df_filtrado[df_filtrado['sucursal'] == filtro_sucursal]
-            if filtro_tipo != 'Todos':
-                df_filtrado = df_filtrado[df_filtrado['tipo_re_se'] == filtro_tipo]
-            if buscar:
-                df_filtrado = df_filtrado[df_filtrado['cliente'].str.contains(buscar, case=False, na=False)]
-            
-            # Seleccionar registro para editar/eliminar
-            st.subheader("Editar o Eliminar Registro")
-            venta_ids = ['Seleccionar...'] + [int(x) for x in df_filtrado['id'].tolist()]
-            venta_seleccionada = st.selectbox("Selecciona una venta por ID", venta_ids, key="select_venta")
-            
-            if venta_seleccionada != 'Seleccionar...':
-                venta_data = get_venta_by_id(venta_seleccionada)
-                
-                if venta_data:
-                    tab_ver, tab_editar, tab_eliminar = st.tabs(["👁️ Ver", "✏️ Editar", "🗑️ Eliminar"])
-                    
-                    with tab_ver:
-                        st.write(f"**ID:** {venta_data['id']}")
-                        st.write(f"**Fecha:** {venta_data['fecha']}")
-                        st.write(f"**Sucursal:** {venta_data['sucursal']}")
-                        st.write(f"**Cliente:** {venta_data['cliente']}")
-                        st.write(f"**Tipo:** {venta_data['tipo_re_se']}")
-                        st.write(f"**Total:** {formatear_moneda(venta_data['total'])} USD")
-                        if venta_data.get('archivo_comprobante') and os.path.exists(venta_data['archivo_comprobante']):
-                            archivo_path = Path(venta_data['archivo_comprobante'])
-                            
-                            # Leer archivo una sola vez
-                            with open(archivo_path, "rb") as f:
-                                archivo_bytes = f.read()
-                            
-                            # Botones de acción
-                            col_btn1, col_btn2 = st.columns(2)
-                            
-                            with col_btn1:
-                                if archivo_path.suffix.lower() == '.pdf':
-                                    st.download_button("📄 Descargar PDF", archivo_bytes, file_name=archivo_path.name, mime="application/pdf")
-                                else:
-                                    st.download_button("🖼️ Descargar Imagen", archivo_bytes, file_name=archivo_path.name, mime=f"image/{archivo_path.suffix[1:]}")
-                            
-                            with col_btn2:
-                                if archivo_path.suffix.lower() == '.pdf':
-                                    preview_key = f'preview_pdf_{venta_seleccionada}'
-                                    if st.button("👁️ Previsualizar PDF" if not st.session_state.get(preview_key, False) else "❌ Cerrar Previsualización"):
-                                        st.session_state[preview_key] = not st.session_state.get(preview_key, False)
-                                        st.rerun()
-                                else:
-                                    # Para imágenes, mostrar directamente
-                                    st.image(str(archivo_path), width=400)
-                            
-                            # Mostrar preview del PDF si está activado
-                            if archivo_path.suffix.lower() == '.pdf' and st.session_state.get(f'preview_pdf_{venta_seleccionada}', False):
-                                st.subheader("📄 Previsualización del PDF")
-                                
-                                # Convertir PDF a base64
-                                base64_pdf = base64.b64encode(archivo_bytes).decode('utf-8')
-                                
-                                # Usar PDF.js para renderizar el PDF (más robusto que data URIs)
-                                # PDF.js es una librería de Mozilla que funciona en todos los navegadores
-                                pdf_html = f"""
-                                <!DOCTYPE html>
-                                <html>
-                                <head>
-                                    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-                                    <style>
-                                        #pdf-container {{
-                                            width: 100%;
-                                            height: 600px;
-                                            overflow: auto;
-                                            border: 1px solid #ccc;
-                                            background: #f5f5f5;
-                                            padding: 10px;
-                                        }}
-                                        .pdf-page {{
-                                            margin-bottom: 10px;
-                                            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-                                        }}
-                                        .pdf-controls {{
-                                            margin-bottom: 10px;
-                                            text-align: center;
-                                        }}
-                                        .pdf-controls button {{
-                                            margin: 0 5px;
-                                            padding: 5px 15px;
-                                            background: #1f77b4;
-                                            color: white;
-                                            border: none;
-                                            border-radius: 4px;
-                                            cursor: pointer;
-                                        }}
-                                        .pdf-controls button:hover {{
-                                            background: #1565a0;
-                                        }}
-                                        .pdf-controls button:disabled {{
-                                            background: #ccc;
-                                            cursor: not-allowed;
-                                        }}
-                                        .loading {{
-                                            text-align: center;
-                                            padding: 50px;
-                                            color: #666;
-                                        }}
-                                        .error {{
-                                            text-align: center;
-                                            padding: 50px;
-                                            color: #d32f2f;
-                                        }}
-                                    </style>
-                                </head>
-                                <body>
-                                    <div class="pdf-controls">
-                                        <button id="prev-page" onclick="changePage(-1)">◀ Anterior</button>
-                                        <span id="page-info">Página <span id="page-num">1</span> de <span id="page-count">-</span></span>
-                                        <button id="next-page" onclick="changePage(1)">Siguiente ▶</button>
-                                        <button onclick="zoomOut()">🔍-</button>
-                                        <button onclick="zoomIn()">🔍+</button>
-                                        <button onclick="resetZoom()">🔍 Reset</button>
-                                    </div>
-                                    <div id="pdf-container">
-                                        <div class="loading">Cargando PDF...</div>
-                                    </div>
-                                    
-                                    <script>
-                                        // Configurar PDF.js para usar el worker desde CDN
-                                        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-                                        
-                                        let pdfDoc = null;
-                                        let pageNum = 1;
-                                        let pageRendering = false;
-                                        let pageNumPending = null;
-                                        let scale = 1.5;
-                                        
-                                        // Convertir base64 a Uint8Array
-                                        const base64ToUint8Array = (base64) => {{
-                                            const binaryString = window.atob(base64);
-                                            const bytes = new Uint8Array(binaryString.length);
-                                            for (let i = 0; i < binaryString.length; i++) {{
-                                                bytes[i] = binaryString.charCodeAt(i);
-                                            }}
-                                            return bytes;
-                                        }};
-                                        
-                                        // Cargar PDF
-                                        const pdfData = base64ToUint8Array('{base64_pdf}');
-                                        
-                                        pdfjsLib.getDocument({{data: pdfData}}).promise.then(function(pdf) {{
-                                            pdfDoc = pdf;
-                                            document.getElementById('page-count').textContent = pdf.numPages;
-                                            
-                                            // Renderizar primera página
-                                            renderPage(pageNum);
-                                        }}).catch(function(error) {{
-                                            document.getElementById('pdf-container').innerHTML = 
-                                                '<div class="error">❌ Error al cargar el PDF: ' + error.message + '<br>Por favor, usa el botón de descarga.</div>';
-                                        }});
-                                        
-                                        function renderPage(num) {{
-                                            pageRendering = true;
-                                            
-                                            pdfDoc.getPage(num).then(function(page) {{
-                                                const viewport = page.getViewport({{scale: scale}});
-                                                const canvas = document.createElement('canvas');
-                                                const ctx = canvas.getContext('2d');
-                                                canvas.height = viewport.height;
-                                                canvas.width = viewport.width;
-                                                
-                                                const container = document.getElementById('pdf-container');
-                                                container.innerHTML = '';
-                                                container.appendChild(canvas);
-                                                
-                                                const renderContext = {{
-                                                    canvasContext: ctx,
-                                                    viewport: viewport
-                                                }};
-                                                
-                                                const renderTask = page.render(renderContext);
-                                                
-                                                renderTask.promise.then(function() {{
-                                                    pageRendering = false;
-                                                    if (pageNumPending !== null) {{
-                                                        renderPage(pageNumPending);
-                                                        pageNumPending = null;
-                                                    }}
-                                                }});
-                                            }});
-                                            
-                                            document.getElementById('page-num').textContent = num;
-                                            
-                                            // Actualizar botones
-                                            document.getElementById('prev-page').disabled = (num <= 1);
-                                            document.getElementById('next-page').disabled = (num >= pdfDoc.numPages);
-                                        }}
-                                        
-                                        function queueRenderPage(num) {{
-                                            if (pageRendering) {{
-                                                pageNumPending = num;
-                                            }} else {{
-                                                renderPage(num);
-                                            }}
-                                        }}
-                                        
-                                        function changePage(delta) {{
-                                            const newPage = pageNum + delta;
-                                            if (newPage >= 1 && newPage <= pdfDoc.numPages) {{
-                                                pageNum = newPage;
-                                                queueRenderPage(pageNum);
-                                            }}
-                                        }}
-                                        
-                                        function zoomIn() {{
-                                            scale += 0.25;
-                                            queueRenderPage(pageNum);
-                                        }}
-                                        
-                                        function zoomOut() {{
-                                            if (scale > 0.5) {{
-                                                scale -= 0.25;
-                                                queueRenderPage(pageNum);
-                                            }}
-                                        }}
-                                        
-                                        function resetZoom() {{
-                                            scale = 1.5;
-                                            queueRenderPage(pageNum);
-                                        }}
-                                    </script>
-                                </body>
-                                </html>
-                                """
-                                
-                                try:
-                                    import streamlit.components.v1 as components
-                                    components.html(pdf_html, height=700, scrolling=True)
-                                except Exception as e:
-                                    st.error(f"⚠️ Error al cargar el visor de PDF: {e}")
-                                    st.info("💡 Por favor, usa el botón de descarga para ver el PDF.")
-                    
-                    with tab_editar:
-                        with st.form(f"form_edit_venta_{venta_seleccionada}"):
-                            col1, col2 = st.columns(2)
-                            
-                            with col1:
-                                fecha_edit = st.date_input("Fecha", value=pd.to_datetime(venta_data['fecha']).date() if pd.notna(venta_data['fecha']) else date.today())
-                                sucursal_edit = st.selectbox("Sucursal", ["COMODORO", "RIO GRANDE", "RIO GALLEGOS"], 
-                                                             index=["COMODORO", "RIO GRANDE", "RIO GALLEGOS"].index(venta_data['sucursal']) if venta_data['sucursal'] in ["COMODORO", "RIO GRANDE", "RIO GALLEGOS"] else 0)
-                                cliente_edit = st.text_input("Cliente", value=venta_data['cliente'] or '')
-                                pin_edit = st.text_input("PIN", value=venta_data['pin'] or '')
-                                comprobante_edit = st.text_input("Comprobante", value=venta_data['comprobante'] or '')
-                                tipos_comprobante_list = ["FACTURA VENTA", "NOTA DE CREDITO", "NOTA DE CREDITO JD", "CITA INTERNA", "FACTURA AFIP", "NOTA DE CRETIDO"]
-                                tipo_comprobante_actual = venta_data.get('tipo_comprobante', 'FACTURA VENTA')
-                                index_tipo = tipos_comprobante_list.index(tipo_comprobante_actual) if tipo_comprobante_actual in tipos_comprobante_list else 0
-                                tipo_comprobante_edit = st.selectbox("Tipo Comprobante", 
-                                                                     tipos_comprobante_list,
-                                                                     index=index_tipo)
-                                trabajo_edit = st.selectbox("Trabajo", ["EXTERNO", "GARANTIA", "INTERNO"],
-                                                            index=["EXTERNO", "GARANTIA", "INTERNO"].index(venta_data['trabajo']) if venta_data['trabajo'] in ["EXTERNO", "GARANTIA", "INTERNO"] else 0)
-                            
-                            with col2:
-                                n_comprobante_edit = st.text_input("N° Comprobante", value=venta_data['n_comprobante'] or '')
-                                tipo_re_se_edit = st.selectbox("Tipo (RE o SE)", ["SE", "RE"],
-                                                              index=0 if venta_data['tipo_re_se'] == 'SE' else 1)
-                                mano_obra_edit = st.number_input("Mano de Obra", value=float(venta_data['mano_obra']) or 0.0, step=0.01)
-                                asistencia_edit = st.number_input("Asistencia", value=float(venta_data['asistencia']) or 0.0, step=0.01)
-                                repuestos_edit = st.number_input("Repuestos", value=float(venta_data['repuestos']) or 0.0, step=0.01)
-                                terceros_edit = st.number_input("Terceros", value=float(venta_data['terceros']) or 0.0, step=0.01)
-                                descuento_edit = st.number_input("Descuento", value=float(venta_data['descuento']) or 0.0, step=0.01)
-                                detalles_edit = st.text_area("Detalles", value=venta_data['detalles'] or '')
-                            
-                            # Calcular total automáticamente
-                            total_edit = mano_obra_edit + asistencia_edit + repuestos_edit + terceros_edit - descuento_edit
-                            
-                            # Si es nota de crédito (pero NO JD), convertir el total a negativo automáticamente
-                            # NOTA: "NOTA DE CREDITO JD" son pagos recibidos de John Deere, por lo que son POSITIVOS
-                            es_nota_credito_edit = tipo_comprobante_edit and 'NOTA DE CREDITO' in tipo_comprobante_edit.upper() and 'JD' not in tipo_comprobante_edit.upper()
-                            total_edit_mostrar = total_edit
-                            if es_nota_credito_edit and total_edit > 0:
-                                total_edit_mostrar = -total_edit  # Mostrar como negativo
-                            
-                            st.metric("💰 Total Calculado", f"{formatear_moneda(total_edit_mostrar)} USD",
-                                     delta=f"Mano Obra: {formatear_moneda(mano_obra_edit)} + Asistencia: {formatear_moneda(asistencia_edit)} + Repuestos: {formatear_moneda(repuestos_edit)} + Terceros: {formatear_moneda(terceros_edit)} - Descuento: {formatear_moneda(descuento_edit)}")
-                            
-                            # Sección para adjuntar/cambiar comprobante
-                            st.subheader("📎 Comprobante Adjunto")
-                            
-                            # Mostrar comprobante actual si existe
-                            archivo_actual = venta_data.get('archivo_comprobante')
-                            if archivo_actual and os.path.exists(archivo_actual):
-                                archivo_path_actual = Path(archivo_actual)
-                                st.info(f"📄 Comprobante actual: {archivo_path_actual.name}")
-                                
-                                # Mostrar preview si es imagen
-                                if archivo_path_actual.suffix.lower() in ['.png', '.jpg', '.jpeg']:
-                                    st.image(str(archivo_path_actual), width=300)
-                                else:
-                                    st.write("📄 Archivo PDF")
-                                
-                                # Opción para eliminar comprobante actual
-                                eliminar_comprobante = st.checkbox("🗑️ Eliminar comprobante actual")
-                            else:
-                                eliminar_comprobante = False
-                                st.info("No hay comprobante adjunto")
-                            
-                            # Campo para subir nuevo comprobante
-                            archivo_comprobante_edit = st.file_uploader(
-                                "Subir nuevo comprobante (PDF o Imagen)",
-                                type=['pdf', 'png', 'jpg', 'jpeg'],
-                                help="Puedes adjuntar un PDF o imagen del comprobante. Si subes uno nuevo, reemplazará el actual."
-                            )
-                            
-                            if archivo_comprobante_edit is not None:
-                                # Mostrar preview si es imagen
-                                if archivo_comprobante_edit.type.startswith('image/'):
-                                    st.image(archivo_comprobante_edit, width=300)
-                                else:
-                                    st.info(f"📄 Archivo PDF: {archivo_comprobante_edit.name}")
-                            
-                            if st.form_submit_button("💾 Guardar Cambios"):
-                                # Si es nota de crédito, convertir el total a negativo automáticamente
-                                total_edit_final = total_edit
-                                if es_nota_credito_edit and total_edit > 0:
-                                    total_edit_final = -total_edit  # Convertir a negativo
-                                
-                                # Validar que el total no sea 0
-                                if total_edit_final == 0:
-                                    st.error("⚠️ El total no puede ser 0. Verifica los valores ingresados.")
-                                else:
-                                    # Manejar archivo de comprobante
-                                    ruta_archivo_edit = venta_data.get('archivo_comprobante')
-                                    
-                                    # Si se marca eliminar, borrar el archivo actual
-                                    if eliminar_comprobante and ruta_archivo_edit and os.path.exists(ruta_archivo_edit):
-                                        try:
-                                            os.unlink(ruta_archivo_edit)
-                                            ruta_archivo_edit = None
-                                        except Exception as e:
-                                            st.warning(f"⚠️ Error al eliminar archivo: {e}")
-                                    
-                                    # Si se sube un nuevo archivo
-                                    if archivo_comprobante_edit is not None:
-                                        try:
-                                            # Eliminar archivo anterior si existe
-                                            if ruta_archivo_edit and os.path.exists(ruta_archivo_edit):
-                                                try:
-                                                    os.unlink(ruta_archivo_edit)
-                                                except:
-                                                    pass
-                                            
-                                            # Guardar nuevo archivo
-                                            extension = Path(archivo_comprobante_edit.name).suffix
-                                            nombre_archivo = f"venta_{venta_seleccionada}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{archivo_comprobante_edit.name}"
-                                            ruta_archivo_edit = COMPROBANTES_DIR / nombre_archivo
-                                            
-                                            with open(ruta_archivo_edit, "wb") as f:
-                                                f.write(archivo_comprobante_edit.getbuffer())
-                                            
-                                            ruta_archivo_edit = str(ruta_archivo_edit)
-                                        except Exception as e:
-                                            st.warning(f"⚠️ Error al guardar el archivo: {e}")
-                                            ruta_archivo_edit = venta_data.get('archivo_comprobante')  # Mantener el anterior si hay error
-                                    
-                                    venta_actualizada = {
-                                        'mes': fecha_edit.strftime("%B%y"),
-                                        'fecha': fecha_edit,
-                                        'sucursal': sucursal_edit,
-                                        'cliente': cliente_edit,
-                                        'pin': pin_edit if pin_edit else None,
-                                        'comprobante': comprobante_edit if comprobante_edit else None,
-                                        'tipo_comprobante': tipo_comprobante_edit,
-                                        'trabajo': trabajo_edit,
-                                        'n_comprobante': n_comprobante_edit if n_comprobante_edit else None,
-                                        'tipo_re_se': tipo_re_se_edit,
-                                        'mano_obra': mano_obra_edit,
-                                        'asistencia': asistencia_edit,
-                                        'repuestos': repuestos_edit,
-                                        'terceros': terceros_edit,
-                                        'descuento': descuento_edit,
-                                        'total': total_edit_final,  # Total calculado automáticamente (negativo si es nota de crédito)
-                                        'detalles': detalles_edit if detalles_edit else None,
-                                        'archivo_comprobante': ruta_archivo_edit
-                                    }
-                                    
-                                    try:
-                                        update_venta(venta_seleccionada, venta_actualizada)
-                                        st.success(f"✅ Venta {venta_seleccionada} actualizada exitosamente!")
-                                        if archivo_comprobante_edit:
-                                            st.success(f"📎 Nuevo comprobante guardado: {Path(ruta_archivo_edit).name}")
-                                        elif eliminar_comprobante:
-                                            st.success("🗑️ Comprobante eliminado")
-                                        st.rerun()
-                                    except Exception as e:
-                                        st.error(f"❌ Error al actualizar: {e}")
-                    
-                    with tab_eliminar:
-                        st.warning(f"⚠️ Estás a punto de eliminar la venta ID: {venta_seleccionada}")
-                        st.write(f"Cliente: {venta_data['cliente']}")
-                        st.write(f"Total: {formatear_moneda(venta_data['total'])} USD")
-                        
-                        if st.button("🗑️ Confirmar Eliminación", type="primary"):
-                            try:
-                                delete_venta(venta_seleccionada)
-                                st.success(f"✅ Venta {venta_seleccionada} eliminada")
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"❌ Error: {e}")
-            
-            # Tabla resumen - Mostrar últimos 20 registros ordenados por ID descendente
-            st.subheader("Resumen de Registros (Últimos 20)")
-            df_resumen = df_filtrado.sort_values('id', ascending=False).head(20)
-            st.dataframe(df_resumen[['id', 'fecha', 'sucursal', 'cliente', 'tipo_re_se', 'total']], 
-                        use_container_width=True)
-        else:
-            st.info("No hay ventas registradas")
-    
-    with tab2:
-        st.subheader("Registro de Gastos")
-        df_gastos = get_gastos(str(fecha_inicio_ver), str(fecha_fin_ver))
-        
-        if len(df_gastos) > 0:
-            st.write(f"Total de registros: {len(df_gastos)}")
-            
-            # Filtros
-            col1, col2 = st.columns(2)
-            with col1:
-                sucursales = ['Todas'] + list(df_gastos['sucursal'].dropna().unique())
-                filtro_sucursal = st.selectbox("Filtrar por Sucursal (Gastos)", sucursales)
-            with col2:
-                areas = ['Todas'] + list(df_gastos['area'].dropna().unique())
-                filtro_area = st.selectbox("Filtrar por Área", areas)
-            
-            # Aplicar filtros
-            df_filtrado = df_gastos.copy()
-            if filtro_sucursal != 'Todas':
-                df_filtrado = df_filtrado[df_filtrado['sucursal'] == filtro_sucursal]
-            if filtro_area != 'Todas':
-                df_filtrado = df_filtrado[df_filtrado['area'] == filtro_area]
-            
-            # Seleccionar registro para editar/eliminar
-            st.subheader("Editar o Eliminar Registro")
-            gasto_ids = ['Seleccionar...'] + [int(x) for x in df_filtrado['id'].tolist()]
-            gasto_seleccionado = st.selectbox("Selecciona un gasto por ID", gasto_ids, key="select_gasto")
-            
-            if gasto_seleccionado != 'Seleccionar...':
-                gasto_data = get_gasto_by_id(gasto_seleccionado)
-                
-                if gasto_data:
-                    tab_ver, tab_editar, tab_eliminar = st.tabs(["👁️ Ver", "✏️ Editar", "🗑️ Eliminar"])
-                    
-                    with tab_ver:
-                        st.write(f"**ID:** {gasto_data['id']}")
-                        st.write(f"**Fecha:** {gasto_data['fecha']}")
-                        st.write(f"**Sucursal:** {gasto_data['sucursal']}")
-                        st.write(f"**Área:** {gasto_data['area']}")
-                        st.write(f"**Clasificación:** {gasto_data['clasificacion']}")
-                        st.write(f"**Total USD:** {formatear_moneda(gasto_data['total_usd'])}")
-                        st.write(f"**%SE:** {formatear_moneda(gasto_data['total_pct_se'])}")
-                        st.write(f"**%RE:** {formatear_moneda(gasto_data['total_pct_re'])}")
-                    
-                    with tab_editar:
-                        with st.form(f"form_edit_gasto_{gasto_seleccionado}"):
-                            col1, col2 = st.columns(2)
-                            
-                            with col1:
-                                fecha_edit = st.date_input("Fecha", value=pd.to_datetime(gasto_data['fecha']).date() if pd.notna(gasto_data['fecha']) else date.today())
-                                sucursal_edit = st.selectbox("Sucursal", ["COMODORO", "RIO GRANDE", "RIO GALLEGOS", "COMPARTIDOS"],
-                                                            index=["COMODORO", "RIO GRANDE", "RIO GALLEGOS", "COMPARTIDOS"].index(gasto_data['sucursal']) if gasto_data['sucursal'] in ["COMODORO", "RIO GRANDE", "RIO GALLEGOS", "COMPARTIDOS"] else 0)
-                                area_edit = st.selectbox("Área", ["POSTVENTA", "SERVICIO", "REPUESTOS"],
-                                                        index=["POSTVENTA", "SERVICIO", "REPUESTOS"].index(gasto_data['area']) if gasto_data['area'] in ["POSTVENTA", "SERVICIO", "REPUESTOS"] else 0)
-                                tipo_edit = st.selectbox("Tipo", ["FIJO", "VARIABLE"],
-                                                        index=0 if gasto_data['tipo'] == 'FIJO' else 1)
-                                clasificacion_edit = st.text_input("Clasificación", value=gasto_data['clasificacion'] or '')
-                                proveedor_edit = st.text_input("Proveedor", value=gasto_data['proveedor'] or '')
-                                total_pesos_edit = st.number_input("Total Pesos", value=float(gasto_data['total_pesos']) if gasto_data['total_pesos'] else 0.0, step=0.01)
-                            
-                            with col2:
-                                total_usd_edit = st.number_input("Total USD", value=float(gasto_data['total_usd']) or 0.0, step=0.01)
-                                pct_postventa_edit = st.number_input("% Postventa", min_value=0.0, max_value=1.0, value=float(gasto_data['pct_postventa']) or 0.0, step=0.01)
-                                pct_servicios_edit = st.number_input("% Servicios", min_value=0.0, max_value=1.0, value=float(gasto_data['pct_servicios']) or 0.0, step=0.01)
-                                pct_repuestos_edit = st.number_input("% Repuestos", min_value=0.0, max_value=1.0, value=float(gasto_data['pct_repuestos']) or 0.0, step=0.01)
-                                detalles_edit = st.text_area("Detalles", value=gasto_data['detalles'] or '')
-                            
-                            total_pct_edit = total_usd_edit * pct_postventa_edit if pct_postventa_edit > 0 else 0
-                            total_pct_se_edit = total_pct_edit * pct_servicios_edit if pct_servicios_edit > 0 else 0
-                            total_pct_re_edit = total_pct_edit * pct_repuestos_edit if pct_repuestos_edit > 0 else 0
-                            
-                            st.info(f"📊 Total %: {formatear_moneda(total_pct_edit)} | %SE: {formatear_moneda(total_pct_se_edit)} | %RE: {formatear_moneda(total_pct_re_edit)}")
-                            
-                            if st.form_submit_button("💾 Guardar Cambios"):
-                                gasto_actualizado = {
-                                    'mes': fecha_edit.strftime("%B"),
-                                    'fecha': fecha_edit,
-                                    'sucursal': sucursal_edit,
-                                    'area': area_edit,
-                                    'pct_postventa': pct_postventa_edit,
-                                    'pct_servicios': pct_servicios_edit,
-                                    'pct_repuestos': pct_repuestos_edit,
-                                    'tipo': tipo_edit,
-                                    'clasificacion': clasificacion_edit,
-                                    'proveedor': proveedor_edit if proveedor_edit else None,
-                                    'total_pesos': total_pesos_edit if total_pesos_edit > 0 else None,
-                                    'total_usd': total_usd_edit,
-                                    'total_pct': total_pct_edit,
-                                    'total_pct_se': total_pct_se_edit,
-                                    'total_pct_re': total_pct_re_edit,
-                                    'detalles': detalles_edit if detalles_edit else None
-                                }
-                                
-                                try:
-                                    update_gasto(gasto_seleccionado, gasto_actualizado)
-                                    st.success(f"✅ Gasto {gasto_seleccionado} actualizado exitosamente!")
-                                    st.rerun()
-                                except Exception as e:
-                                    st.error(f"❌ Error al actualizar: {e}")
-                    
-                    with tab_eliminar:
-                        st.warning(f"⚠️ Estás a punto de eliminar el gasto ID: {gasto_seleccionado}")
-                        st.write(f"Clasificación: {gasto_data['clasificacion']}")
-                        st.write(f"Total USD: {formatear_moneda(gasto_data['total_usd'])}")
-                        
-                        if st.button("🗑️ Confirmar Eliminación", type="primary"):
-                            try:
-                                delete_gasto(gasto_seleccionado)
-                                st.success(f"✅ Gasto {gasto_seleccionado} eliminado")
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"❌ Error: {e}")
-            
-            # Tabla resumen - Mostrar últimos 20 registros ordenados por ID descendente
-            st.subheader("Resumen de Registros (Últimos 20)")
-            df_resumen = df_filtrado.sort_values('id', ascending=False).head(20)
-            st.dataframe(df_resumen[['id', 'fecha', 'sucursal', 'area', 'clasificacion', 'total_usd', 'total_pct_se', 'total_pct_re']], 
-                        use_container_width=True)
-        else:
-            st.info("No hay gastos registrados")
-
-
-# ==================== REPORTES ====================
-elif page == "📈 Reportes":
-    st.title("📈 Reportes Detallados")
-    
-    # Filtros de fecha
-    col1, col2 = st.columns(2)
-    with col1:
-        fecha_inicio = st.date_input("Fecha Inicio (Reportes)", value=date(2025, 11, 1))
-    with col2:
-        fecha_fin = st.date_input("Fecha Fin (Reportes)", value=date.today())
-    
-    df_ventas = get_ventas(str(fecha_inicio), str(fecha_fin))
-    df_gastos = get_gastos(str(fecha_inicio), str(fecha_fin))
-    
-    if len(df_ventas) == 0 and len(df_gastos) == 0:
-        st.info("No hay datos para el período seleccionado")
-    else:
-        tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Resumen", "💰 Ventas", "💸 Gastos", "📈 Análisis", "📊 KPIs Financieros"])
-        
-        with tab1:
-            st.subheader("Resumen Ejecutivo")
-            
-            total_ingresos = df_ventas['total'].sum() if len(df_ventas) > 0 else 0
-            # Calcular ingresos netos descontando 4.5% de IIBB
-            porcentaje_iibb = 0.045  # 4.5%
-            descuento_iibb = total_ingresos * porcentaje_iibb
-            ingresos_netos = total_ingresos - descuento_iibb
-            
-            # Obtener gastos incluyendo automáticos
-            gastos_totales = obtener_gastos_totales_con_automaticos(str(fecha_inicio), str(fecha_fin))
-            gastos_postventa = gastos_totales['gastos_postventa_total']
-            resultado = ingresos_netos - gastos_postventa
-            
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.metric("Ingresos Totales (Bruto)", f"{formatear_moneda(total_ingresos)} USD")
-                st.caption(f"Descuento IIBB (4.5%): {formatear_moneda(descuento_iibb)} USD")
-                st.metric("Ingresos Netos", f"{formatear_moneda(ingresos_netos)} USD", 
-                         delta=f"-{formatear_moneda(descuento_iibb)} USD")
-            
-            with col2:
-                st.metric("Gastos Postventa", f"{formatear_moneda(gastos_postventa)} USD")
-                st.metric("Resultado Neto", f"{formatear_moneda(resultado)} USD")
-            
-            # Comparación por Sucursal
-            st.divider()
-            st.subheader("📊 Comparación por Sucursal")
-            
-            # Obtener gastos totales con automáticos (esto ya filtra los automáticos de los registrados)
-            gastos_totales = obtener_gastos_totales_con_automaticos(str(fecha_inicio), str(fecha_fin))
-            
-            # Obtener todas las sucursales únicas
-            sucursales_ventas = df_ventas['sucursal'].unique() if len(df_ventas) > 0 else []
-            df_gastos_registrados = gastos_totales['gastos_registrados']
-            df_gastos_automaticos = gastos_totales['gastos_automaticos']
-            sucursales_gastos_reg = df_gastos_registrados['sucursal'].unique() if len(df_gastos_registrados) > 0 else []
-            sucursales_gastos_auto = df_gastos_automaticos['sucursal'].unique() if len(df_gastos_automaticos) > 0 else []
-            todas_sucursales = sorted(set(list(sucursales_ventas) + list(sucursales_gastos_reg) + list(sucursales_gastos_auto)))
-            
-            if len(todas_sucursales) > 0:
-                # Crear DataFrame para comparación
-                datos_comparacion = []
-                
-                for sucursal in todas_sucursales:
-                    # Ingresos por sucursal
-                    ingresos_sucursal = df_ventas[df_ventas['sucursal'] == sucursal]['total'].sum() if len(df_ventas) > 0 else 0
-                    descuento_iibb_sucursal = ingresos_sucursal * porcentaje_iibb
-                    ingresos_netos_sucursal = ingresos_sucursal - descuento_iibb_sucursal
-                    
-                    # Gastos por sucursal (incluyendo automáticos)
-                    # Gastos registrados por sucursal (usar los ya filtrados, sin automáticos)
-                    gastos_registrados_sucursal = 0
-                    if len(df_gastos_registrados) > 0:
-                        gastos_registrados_sucursal = (df_gastos_registrados[df_gastos_registrados['sucursal'] == sucursal]['total_pct_se'].sum() + 
-                                                       df_gastos_registrados[df_gastos_registrados['sucursal'] == sucursal]['total_pct_re'].sum())
-                    
-                    # Gastos automáticos por sucursal
-                    gastos_automaticos_sucursal = 0
-                    if len(df_gastos_automaticos) > 0:
-                        gastos_automaticos_sucursal = (df_gastos_automaticos[df_gastos_automaticos['sucursal'] == sucursal]['total_pct_se'].sum() + 
-                                                       df_gastos_automaticos[df_gastos_automaticos['sucursal'] == sucursal]['total_pct_re'].sum())
-                    
-                    gastos_totales_sucursal = gastos_registrados_sucursal + gastos_automaticos_sucursal
-                    
-                    # Resultado por sucursal
-                    resultado_sucursal = ingresos_netos_sucursal - gastos_totales_sucursal
-                    
-                    datos_comparacion.append({
-                        'Sucursal': sucursal if sucursal else 'Sin Sucursal',
-                        'Ingresos Brutos': ingresos_sucursal,
-                        'Descuento IIBB': descuento_iibb_sucursal,
-                        'Ingresos Netos': ingresos_netos_sucursal,
-                        'Gastos Totales': gastos_totales_sucursal,
-                        'Resultado': resultado_sucursal
-                    })
-                
-                # Crear DataFrame y formatear valores para mostrar
-                df_comparacion = pd.DataFrame(datos_comparacion)
-                
-                # Crear copia para mostrar con valores formateados
-                df_comparacion_display = df_comparacion.copy()
-                df_comparacion_display['Ingresos Brutos'] = df_comparacion_display['Ingresos Brutos'].apply(lambda x: formatear_moneda(x))
-                df_comparacion_display['Descuento IIBB'] = df_comparacion_display['Descuento IIBB'].apply(lambda x: formatear_moneda(x))
-                df_comparacion_display['Ingresos Netos'] = df_comparacion_display['Ingresos Netos'].apply(lambda x: formatear_moneda(x))
-                df_comparacion_display['Gastos Totales'] = df_comparacion_display['Gastos Totales'].apply(lambda x: formatear_moneda(x))
-                df_comparacion_display['Resultado'] = df_comparacion_display['Resultado'].apply(lambda x: f"{'✅' if x >= 0 else '❌'} {formatear_moneda(x)}")
-                
-                # Mostrar tabla
-                st.dataframe(
-                    df_comparacion_display,
-                    use_container_width=True,
-                    hide_index=True
-                )
-                
-                # Mostrar también en columnas para mejor visualización
-                st.markdown("#### 📈 Detalle por Sucursal")
-                cols = st.columns(len(todas_sucursales))
-                
-                for idx, sucursal in enumerate(todas_sucursales):
-                    with cols[idx]:
-                        datos = datos_comparacion[idx]
-                        st.markdown(f"**{datos['Sucursal']}**")
-                        st.metric("Ingresos Netos", formatear_moneda(datos['Ingresos Netos']), 
-                                 delta=f"Bruto: {formatear_moneda(datos['Ingresos Brutos'])}")
-                        st.metric("Gastos Totales", formatear_moneda(datos['Gastos Totales']))
-                        resultado_color = "✅" if datos['Resultado'] >= 0 else "❌"
-                        st.metric("Resultado", f"{resultado_color} {formatear_moneda(datos['Resultado'])}")
-            else:
-                st.info("No hay datos de sucursales para mostrar")
-        
-        with tab2:
-            st.subheader("Análisis de Ventas")
-            
-            if len(df_ventas) > 0:
-                # Calcular total de repuestos vendidos (RE + repuestos en SE)
-                ventas_re = df_ventas[df_ventas['tipo_re_se'] == 'RE']
-                ventas_se = df_ventas[df_ventas['tipo_re_se'] == 'SE']
-                
-                total_ventas_re = ventas_re['total'].sum() if len(ventas_re) > 0 else 0
-                repuestos_en_se = ventas_se['repuestos'].sum() if len(ventas_se) > 0 and 'repuestos' in ventas_se.columns else 0
-                total_repuestos_vendidos = total_ventas_re + repuestos_en_se
-                
-                # Calcular otros componentes de ventas
-                total_mano_obra = df_ventas['mano_obra'].sum() if 'mano_obra' in df_ventas.columns else 0
-                total_asistencia = df_ventas['asistencia'].sum() if 'asistencia' in df_ventas.columns else 0
-                total_terceros = df_ventas['terceros'].sum() if 'terceros' in df_ventas.columns else 0
-                
-                # Mostrar métricas de repuestos vendidos
-                st.write("**🔧 Repuestos Vendidos**")
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("🔧 Total Repuestos Vendidos", 
-                             formatear_moneda(total_repuestos_vendidos),
-                             help="Suma de ventas RE + repuestos vendidos en servicios SE")
-                with col2:
-                    st.metric("📦 Ventas RE (Repuestos)", 
-                             formatear_moneda(total_ventas_re))
-                with col3:
-                    st.metric("🔩 Repuestos en Servicios SE", 
-                             formatear_moneda(repuestos_en_se))
-                
-                st.divider()
-                
-                # Calcular y mostrar ticket promedio
-                st.write("**🎫 Ticket Promedio**")
-                col1, col2 = st.columns(2)
-                
-                # Ticket promedio de repuestos (RE)
-                ventas_re_count = len(df_ventas[df_ventas['tipo_re_se'] == 'RE'])
-                ticket_promedio_re = (total_ventas_re / ventas_re_count) if ventas_re_count > 0 else 0
-                
-                # Ticket promedio de servicios (SE)
-                ventas_se_count = len(df_ventas[df_ventas['tipo_re_se'] == 'SE'])
-                total_ventas_se = df_ventas[df_ventas['tipo_re_se'] == 'SE']['total'].sum() if ventas_se_count > 0 else 0
-                ticket_promedio_se = (total_ventas_se / ventas_se_count) if ventas_se_count > 0 else 0
-                
-                with col1:
-                    st.metric("🎫 Ticket Promedio Repuestos (RE)", 
-                             formatear_moneda(ticket_promedio_re),
-                             help=f"Promedio de {ventas_re_count} ventas RE")
-                with col2:
-                    st.metric("🎫 Ticket Promedio Servicios (SE)", 
-                             formatear_moneda(ticket_promedio_se),
-                             help=f"Promedio de {ventas_se_count} ventas SE")
-                
-                st.divider()
-                
-                # Contar servicios (SE) por sucursal
-                st.write("**🔧 Cantidad de Servicios (SE) por Sucursal**")
-                servicios_por_sucursal = df_ventas[df_ventas['tipo_re_se'] == 'SE'].groupby('sucursal').size().sort_values(ascending=False)
-                
-                if len(servicios_por_sucursal) > 0:
-                    # Mostrar en columnas
-                    num_cols = min(len(servicios_por_sucursal), 4)
-                    cols_servicios = st.columns(num_cols)
-                    
-                    for idx, (sucursal, cantidad) in enumerate(servicios_por_sucursal.items()):
-                        with cols_servicios[idx % num_cols]:
-                            st.metric(
-                                f"🔧 {sucursal if sucursal else 'Sin Sucursal'}",
-                                f"{cantidad} servicios",
-                                help=f"Total de servicios tipo SE realizados en {sucursal if sucursal else 'Sin Sucursal'}"
-                            )
-                    
-                    # Mostrar también en tabla
-                    st.caption("📊 Resumen:")
-                    df_servicios_sucursal = pd.DataFrame({
-                        'Sucursal': servicios_por_sucursal.index,
-                        'Cantidad de Servicios': servicios_por_sucursal.values
-                    })
-                    st.dataframe(df_servicios_sucursal, use_container_width=True, hide_index=True)
-                else:
-                    st.info("📭 No hay servicios (SE) registrados en el período seleccionado")
-                
-                st.divider()
-                
-                # Mostrar métricas de otros componentes
-                st.write("**💰 Otros Componentes de Ventas**")
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("🔨 Mano de Obra", 
-                             formatear_moneda(total_mano_obra))
-                with col2:
-                    st.metric("🛠️ Asistencias", 
-                             formatear_moneda(total_asistencia))
-                with col3:
-                    st.metric("👥 Terceros", 
-                             formatear_moneda(total_terceros))
-                
-                st.divider()
-                
-                # Por sucursal
-                st.write("**Ventas por Sucursal**")
-                ventas_sucursal = df_ventas.groupby('sucursal')['total'].sum().sort_values(ascending=False)
-                st.bar_chart(ventas_sucursal)
-                
-                # Por cliente
-                st.write("**Top 10 Clientes**")
-                top_clientes = df_ventas.groupby('cliente')['total'].sum().sort_values(ascending=False).head(10).reset_index()
-                # Formatear total como moneda
-                top_clientes['total'] = top_clientes['total'].apply(lambda x: formatear_moneda(x))
-                st.dataframe(top_clientes)
-                
-                # Por tipo
-                st.write("**Ventas por Tipo**")
-                ventas_tipo = df_ventas.groupby('tipo_re_se')['total'].sum().reset_index()
-                # Formatear total como moneda
-                ventas_tipo['total'] = ventas_tipo['total'].apply(lambda x: formatear_moneda(x))
-                st.dataframe(ventas_tipo)
-            else:
-                st.info("No hay datos de ventas")
-        
-        with tab3:
-            st.subheader("Análisis de Gastos")
-            
-            if len(df_gastos) > 0:
-                # Por clasificación
-                st.write("**Gastos por Clasificación**")
-                gastos_clasif = df_gastos.groupby('clasificacion')['total_usd'].sum().sort_values(ascending=False)
-                st.bar_chart(gastos_clasif.head(10))
-                
-                # Por área
-                st.write("**Gastos por Área**")
-                gastos_area = df_gastos.groupby('area')['total_usd'].sum().reset_index()
-                # Formatear total_usd como moneda
-                gastos_area['total_usd'] = gastos_area['total_usd'].apply(lambda x: formatear_moneda(x))
-                st.dataframe(gastos_area)
-                
-                # Por tipo (fijo/variable)
-                st.write("**Gastos Fijos vs Variables**")
-                gastos_tipo = df_gastos.groupby('tipo')['total_usd'].sum().reset_index()
-                # Formatear total_usd como moneda
-                gastos_tipo['total_usd'] = gastos_tipo['total_usd'].apply(lambda x: formatear_moneda(x))
-                st.dataframe(gastos_tipo)
-                
-                # Por sucursal (incluyendo gastos automáticos)
-                st.write("**Gastos por Sucursal**")
-                
-                # Obtener gastos totales con automáticos (esto ya filtra los automáticos de los registrados)
-                gastos_totales = obtener_gastos_totales_con_automaticos(str(fecha_inicio), str(fecha_fin))
-                
-                # Gastos registrados por sucursal (usar los ya filtrados, sin automáticos)
-                df_gastos_registrados = gastos_totales['gastos_registrados']
-                if len(df_gastos_registrados) > 0:
-                    # Calcular total_usd como suma de total_pct_se + total_pct_re para cada gasto
-                    df_gastos_registrados = df_gastos_registrados.copy()
-                    df_gastos_registrados['total_usd'] = df_gastos_registrados['total_pct_se'] + df_gastos_registrados['total_pct_re']
-                    gastos_registrados_sucursal = df_gastos_registrados.groupby('sucursal')['total_usd'].sum().reset_index()
-                    gastos_registrados_sucursal.columns = ['sucursal', 'gastos_registrados']
-                else:
-                    gastos_registrados_sucursal = pd.DataFrame(columns=['sucursal', 'gastos_registrados'])
-                
-                # Gastos automáticos por sucursal
-                df_gastos_automaticos = gastos_totales['gastos_automaticos']
-                gastos_automaticos_sucursal = pd.DataFrame(columns=['sucursal', 'gastos_automaticos'])
-                if len(df_gastos_automaticos) > 0:
-                    # Sumar total_pct_se y total_pct_re por sucursal
-                    gastos_auto_se = df_gastos_automaticos.groupby('sucursal')['total_pct_se'].sum().reset_index()
-                    gastos_auto_re = df_gastos_automaticos.groupby('sucursal')['total_pct_re'].sum().reset_index()
-                    
-                    # Combinar y sumar
-                    gastos_automaticos_sucursal = gastos_auto_se.merge(
-                        gastos_auto_re, 
-                        on='sucursal', 
-                        how='outer'
-                    ).fillna(0)
-                    gastos_automaticos_sucursal['gastos_automaticos'] = (
-                        gastos_automaticos_sucursal['total_pct_se'] + 
-                        gastos_automaticos_sucursal['total_pct_re']
-                    )
-                    gastos_automaticos_sucursal = gastos_automaticos_sucursal[['sucursal', 'gastos_automaticos']]
-                
-                # Combinar gastos registrados y automáticos
-                gastos_por_sucursal = gastos_registrados_sucursal.merge(
-                    gastos_automaticos_sucursal, 
-                    on='sucursal', 
-                    how='outer'
-                ).fillna(0)
-                
-                # Calcular totales
-                gastos_por_sucursal['gastos_totales'] = (
-                    gastos_por_sucursal['gastos_registrados'] + 
-                    gastos_por_sucursal['gastos_automaticos']
-                )
-                
-                # Ordenar por totales descendente
-                gastos_por_sucursal = gastos_por_sucursal.sort_values('gastos_totales', ascending=False)
-                
-                # Formatear valores como moneda
-                gastos_por_sucursal['gastos_registrados'] = gastos_por_sucursal['gastos_registrados'].apply(lambda x: formatear_moneda(x))
-                gastos_por_sucursal['gastos_automaticos'] = gastos_por_sucursal['gastos_automaticos'].apply(lambda x: formatear_moneda(x))
-                gastos_por_sucursal['gastos_totales'] = gastos_por_sucursal['gastos_totales'].apply(lambda x: formatear_moneda(x))
-                
-                # Renombrar columnas para mejor visualización
-                gastos_por_sucursal.columns = ['Sucursal', '📝 Registrados', '🤖 Automáticos', '💰 Total']
-                
-                # Mostrar tabla
-                st.dataframe(gastos_por_sucursal, use_container_width=True, hide_index=True)
-                
-                # Mostrar gráfico de barras
-                # Crear DataFrame numérico para el gráfico (antes de formatear)
-                # Usar los DataFrames originales antes de formatear
-                gastos_por_sucursal_grafico = gastos_registrados_sucursal.merge(
-                    gastos_automaticos_sucursal, 
-                    on='sucursal', 
-                    how='outer'
-                ).fillna(0)
-                gastos_por_sucursal_grafico['gastos_totales'] = (
-                    gastos_por_sucursal_grafico['gastos_registrados'] + 
-                    gastos_por_sucursal_grafico['gastos_automaticos']
-                )
-                gastos_por_sucursal_grafico = gastos_por_sucursal_grafico.sort_values('gastos_totales', ascending=False)
-                
-                # Gráfico de barras apiladas
-                fig = go.Figure()
-                
-                # Barras de gastos registrados
-                fig.add_trace(go.Bar(
-                    name='📝 Registrados',
-                    x=gastos_por_sucursal_grafico['sucursal'],
-                    y=gastos_por_sucursal_grafico['gastos_registrados'],
-                    marker_color='#1f77b4'
-                ))
-                
-                # Barras de gastos automáticos
-                fig.add_trace(go.Bar(
-                    name='🤖 Automáticos',
-                    x=gastos_por_sucursal_grafico['sucursal'],
-                    y=gastos_por_sucursal_grafico['gastos_automaticos'],
-                    marker_color='#ff7f0e'
-                ))
-                
-                fig.update_layout(
-                    barmode='stack',
-                    title='Gastos por Sucursal (Registrados + Automáticos)',
-                    xaxis_title='Sucursal',
-                    yaxis_title='Gastos (USD)',
-                    height=400
-                )
-                
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.info("No hay datos de gastos")
-        
-        with tab4:
-            st.subheader("Análisis Avanzado")
-            
-            if len(df_ventas) > 0 and len(df_gastos) > 0:
-                ingresos_servicios = df_ventas[df_ventas['tipo_re_se'] == 'SE']['total'].sum()
-                ingresos_repuestos = df_ventas[df_ventas['tipo_re_se'] == 'RE']['total'].sum()
-                
-                # Obtener gastos totales con automáticos
-                gastos_totales = obtener_gastos_totales_con_automaticos(str(fecha_inicio), str(fecha_fin))
-                gastos_se = gastos_totales['gastos_postventa_total'] * (gastos_totales['gastos_registrados']['total_pct_se'].sum() / gastos_totales['gastos_postventa_total'] if gastos_totales['gastos_postventa_total'] > 0 else 0)
-                gastos_re = gastos_totales['gastos_postventa_total'] * (gastos_totales['gastos_registrados']['total_pct_re'].sum() / gastos_totales['gastos_postventa_total'] if gastos_totales['gastos_postventa_total'] > 0 else 0)
-                
-                # Calcular gastos SE y RE correctamente
-                df_gastos_totales = pd.concat([
-                    gastos_totales['gastos_registrados'],
-                    gastos_totales['gastos_automaticos']
-                ], ignore_index=True) if len(gastos_totales['gastos_automaticos']) > 0 else gastos_totales['gastos_registrados']
-                
-                gastos_se_total = df_gastos_totales['total_pct_se'].sum() if len(df_gastos_totales) > 0 else 0
-                gastos_re_total = df_gastos_totales['total_pct_re'].sum() if len(df_gastos_totales) > 0 else 0
-                
-                st.write("**Análisis por Segmento (Total)**")
-                
-                analisis_data = {
-                    'Segmento': ['Servicios (SE)', 'Repuestos (RE)', 'Total'],
-                    'Ingresos': [ingresos_servicios, ingresos_repuestos, ingresos_servicios + ingresos_repuestos],
-                    'Gastos': [gastos_se_total, gastos_re_total, gastos_se_total + gastos_re_total],
-                    'Resultado': [
-                        ingresos_servicios - gastos_se_total,
-                        ingresos_repuestos - gastos_re_total,
-                        (ingresos_servicios + ingresos_repuestos) - (gastos_se_total + gastos_re_total)
-                    ]
-                }
-                
-                df_analisis = pd.DataFrame(analisis_data)
-                df_analisis['Margen %'] = (df_analisis['Resultado'] / df_analisis['Ingresos'] * 100).round(2)
-                df_analisis['Margen %'] = df_analisis['Margen %'].fillna(0)
-                
-                # Guardar valores numéricos para cálculos
-                ingresos_servicios_num = ingresos_servicios
-                ingresos_repuestos_num = ingresos_repuestos
-                gastos_se_num = gastos_se_total
-                gastos_re_num = gastos_re_total
-                
-                # Formatear columnas monetarias para mostrar
-                df_analisis_display = df_analisis.copy()
-                df_analisis_display['Ingresos'] = df_analisis_display['Ingresos'].apply(lambda x: formatear_moneda(x))
-                df_analisis_display['Gastos'] = df_analisis_display['Gastos'].apply(lambda x: formatear_moneda(x))
-                df_analisis_display['Resultado'] = df_analisis_display['Resultado'].apply(lambda x: formatear_moneda(x))
-                df_analisis_display['Margen %'] = df_analisis_display['Margen %'].apply(lambda x: f"{x:.2f}%")
-                st.dataframe(df_analisis_display, use_container_width=True, hide_index=True)
-                
-                st.divider()
-                
-                # Análisis por Sucursal
-                st.write("**📊 Análisis por Sucursal**")
-                
-                todas_sucursales = sorted(df_ventas['sucursal'].dropna().unique().tolist())
-                
-                if len(todas_sucursales) > 0:
-                    datos_sucursal = []
-                    
-                    for sucursal in todas_sucursales:
-                        # Ventas por sucursal
-                        ventas_sucursal = df_ventas[df_ventas['sucursal'] == sucursal]
-                        ventas_se_sucursal = ventas_sucursal[ventas_sucursal['tipo_re_se'] == 'SE']
-                        ventas_re_sucursal = ventas_sucursal[ventas_sucursal['tipo_re_se'] == 'RE']
-                        
-                        ingresos_se_sucursal = ventas_se_sucursal['total'].sum() if len(ventas_se_sucursal) > 0 else 0
-                        ingresos_re_sucursal = ventas_re_sucursal['total'].sum() if len(ventas_re_sucursal) > 0 else 0
-                        ingresos_totales_sucursal = ingresos_se_sucursal + ingresos_re_sucursal
-                        
-                        # Cantidad de ventas
-                        cantidad_se_sucursal = len(ventas_se_sucursal)
-                        cantidad_re_sucursal = len(ventas_re_sucursal)
-                        cantidad_total_sucursal = cantidad_se_sucursal + cantidad_re_sucursal
-                        
-                        # Ticket promedio
-                        ticket_promedio_se_sucursal = (ingresos_se_sucursal / cantidad_se_sucursal) if cantidad_se_sucursal > 0 else 0
-                        ticket_promedio_re_sucursal = (ingresos_re_sucursal / cantidad_re_sucursal) if cantidad_re_sucursal > 0 else 0
-                        ticket_promedio_total_sucursal = (ingresos_totales_sucursal / cantidad_total_sucursal) if cantidad_total_sucursal > 0 else 0
-                        
-                        # Gastos por sucursal
-                        gastos_sucursal = df_gastos_totales[df_gastos_totales['sucursal'] == sucursal] if len(df_gastos_totales) > 0 else pd.DataFrame()
-                        gastos_se_sucursal = gastos_sucursal['total_pct_se'].sum() if len(gastos_sucursal) > 0 else 0
-                        gastos_re_sucursal = gastos_sucursal['total_pct_re'].sum() if len(gastos_sucursal) > 0 else 0
-                        gastos_totales_sucursal = gastos_se_sucursal + gastos_re_sucursal
-                        
-                        # Resultado
-                        resultado_se_sucursal = ingresos_se_sucursal - gastos_se_sucursal
-                        resultado_re_sucursal = ingresos_re_sucursal - gastos_re_sucursal
-                        resultado_total_sucursal = ingresos_totales_sucursal - gastos_totales_sucursal
-                        
-                        # Margen %
-                        margen_se_sucursal = (resultado_se_sucursal / ingresos_se_sucursal * 100) if ingresos_se_sucursal > 0 else 0
-                        margen_re_sucursal = (resultado_re_sucursal / ingresos_re_sucursal * 100) if ingresos_re_sucursal > 0 else 0
-                        margen_total_sucursal = (resultado_total_sucursal / ingresos_totales_sucursal * 100) if ingresos_totales_sucursal > 0 else 0
-                        
-                        datos_sucursal.append({
-                            'Sucursal': sucursal,
-                            'Ingresos SE': ingresos_se_sucursal,
-                            'Ingresos RE': ingresos_re_sucursal,
-                            'Ingresos Total': ingresos_totales_sucursal,
-                            'Cantidad SE': cantidad_se_sucursal,
-                            'Cantidad RE': cantidad_re_sucursal,
-                            'Cantidad Total': cantidad_total_sucursal,
-                            'Ticket Promedio SE': ticket_promedio_se_sucursal,
-                            'Ticket Promedio RE': ticket_promedio_re_sucursal,
-                            'Ticket Promedio Total': ticket_promedio_total_sucursal,
-                            'Gastos SE': gastos_se_sucursal,
-                            'Gastos RE': gastos_re_sucursal,
-                            'Gastos Total': gastos_totales_sucursal,
-                            'Resultado SE': resultado_se_sucursal,
-                            'Resultado RE': resultado_re_sucursal,
-                            'Resultado Total': resultado_total_sucursal,
-                            'Margen % SE': margen_se_sucursal,
-                            'Margen % RE': margen_re_sucursal,
-                            'Margen % Total': margen_total_sucursal
-                        })
-                    
-                    # Crear DataFrame
-                    df_analisis_sucursal = pd.DataFrame(datos_sucursal)
-                    
-                    # Mostrar tabla resumen compacta
-                    st.write("**📋 Resumen por Sucursal**")
-                    df_resumen_sucursal = df_analisis_sucursal[[
-                        'Sucursal', 'Ingresos Total', 'Gastos Total', 'Resultado Total', 'Margen % Total',
-                        'Cantidad SE', 'Cantidad RE', 'Cantidad Total'
-                    ]].copy()
-                    
-                    # Formatear valores
-                    df_resumen_sucursal['Ingresos Total'] = df_resumen_sucursal['Ingresos Total'].apply(lambda x: formatear_moneda(x))
-                    df_resumen_sucursal['Gastos Total'] = df_resumen_sucursal['Gastos Total'].apply(lambda x: formatear_moneda(x))
-                    df_resumen_sucursal['Resultado Total'] = df_resumen_sucursal['Resultado Total'].apply(lambda x: formatear_moneda(x))
-                    df_resumen_sucursal['Margen % Total'] = df_resumen_sucursal['Margen % Total'].apply(lambda x: f"{x:.2f}%")
-                    df_resumen_sucursal.columns = ['Sucursal', '💰 Ingresos', '💸 Gastos', '📊 Resultado', '📈 Margen %', '🔧 SE', '📦 RE', '📋 Total']
-                    
-                    st.dataframe(df_resumen_sucursal, use_container_width=True, hide_index=True)
-                    
-                    st.divider()
-                    
-                    # Desglose detallado por sucursal
-                    st.write("**🔍 Desglose Detallado por Sucursal**")
-                    
-                    for sucursal in todas_sucursales:
-                        datos = df_analisis_sucursal[df_analisis_sucursal['Sucursal'] == sucursal].iloc[0]
-                        
-                        with st.expander(f"🏢 {sucursal} - {formatear_moneda(datos['Ingresos Total'])}", expanded=False):
-                            col1, col2 = st.columns(2)
-                            
-                            with col1:
-                                st.write("**💰 Ventas de Servicios (SE)**")
-                                st.metric("Ingresos", formatear_moneda(datos['Ingresos SE']))
-                                st.metric("Cantidad", f"{int(datos['Cantidad SE'])} servicios")
-                                st.metric("Ticket Promedio", formatear_moneda(datos['Ticket Promedio SE']))
-                                st.metric("Gastos", formatear_moneda(datos['Gastos SE']))
-                                st.metric("Resultado", formatear_moneda(datos['Resultado SE']), 
-                                         delta=f"{datos['Margen % SE']:.2f}%")
-                            
-                            with col2:
-                                st.write("**📦 Ventas de Repuestos (RE)**")
-                                st.metric("Ingresos", formatear_moneda(datos['Ingresos RE']))
-                                st.metric("Cantidad", f"{int(datos['Cantidad RE'])} ventas")
-                                st.metric("Ticket Promedio", formatear_moneda(datos['Ticket Promedio RE']))
-                                st.metric("Gastos", formatear_moneda(datos['Gastos RE']))
-                                st.metric("Resultado", formatear_moneda(datos['Resultado RE']), 
-                                         delta=f"{datos['Margen % RE']:.2f}%")
-                            
-                            st.divider()
-                            
-                            st.write("**📊 Totales**")
-                            col_tot1, col_tot2, col_tot3 = st.columns(3)
-                            with col_tot1:
-                                st.metric("Ingresos Total", formatear_moneda(datos['Ingresos Total']))
-                                st.caption(f"SE: {formatear_moneda(datos['Ingresos SE'])} | RE: {formatear_moneda(datos['Ingresos RE'])}")
-                            with col_tot2:
-                                st.metric("Gastos Total", formatear_moneda(datos['Gastos Total']))
-                                st.caption(f"SE: {formatear_moneda(datos['Gastos SE'])} | RE: {formatear_moneda(datos['Gastos RE'])}")
-                            with col_tot3:
-                                resultado_color = "✅" if datos['Resultado Total'] >= 0 else "❌"
-                                st.metric("Resultado Total", f"{resultado_color} {formatear_moneda(datos['Resultado Total'])}", 
-                                         delta=f"{datos['Margen % Total']:.2f}%")
-                else:
-                    st.info("No hay datos de sucursales para mostrar")
-            else:
-                st.info("Se necesitan datos de ventas y gastos para el análisis")
-        
-        with tab5:
-            st.subheader("📊 KPIs Financieros")
-            
-            st.info("""
-            **Explicación de los KPIs:**
-            - **Factor de Absorción (%)**: Ingresos / Gastos Fijos × 100. Muestra qué porcentaje representan los ingresos respecto a los gastos fijos.
-              Ejemplo: 1165% significa que los ingresos son 11.65 veces los gastos fijos.
-            - **Margen $**: Ingresos - Gastos Variables. Es la ganancia antes de descontar los gastos fijos.
-            - **Resultado Operativo**: Margen - Gastos Fijos. Es la ganancia neta después de todos los gastos.
-            - **Punto de Equilibrio**: Es el nivel mínimo de ingresos necesario para cubrir todos los gastos.
-              Si los ingresos actuales son mayores, hay ganancia (✅). Si son menores, hay pérdida (❌).
-            """)
-            
-            # Calcular factores de absorción
-            factor_servicios = calcular_factor_absorcion_servicios(str(fecha_inicio), str(fecha_fin))
-            factor_repuestos = calcular_factor_absorcion_repuestos(str(fecha_inicio), str(fecha_fin))
-            factor_postventa = calcular_factor_absorcion_postventa(str(fecha_inicio), str(fecha_fin))
-            punto_equilibrio = calcular_punto_equilibrio(str(fecha_inicio), str(fecha_fin))
-            
-            # Totales
-            col1, col2, col3, col4 = st.columns(4)
-            
-            with col1:
-                st.metric(
-                    "Factor Absorción Servicios",
-                    f"{factor_servicios['factor_absorcion']:.1f}%",
-                    delta=f"Margen: {formatear_moneda(factor_servicios['margen'])}"
-                )
-                st.caption(f"💰 Ingresos: {formatear_moneda(factor_servicios['ingresos_servicios'])}")
-                st.caption(f"💸 Gastos Variables: {formatear_moneda(factor_servicios['gastos_variables'])}")
-                st.caption(f"📊 Gastos Fijos: {formatear_moneda(factor_servicios['gastos_fijos'])}")
-                st.caption(f"💵 Margen: {formatear_moneda(factor_servicios['margen'])}")
-                st.caption(f"✅ Resultado Operativo: {formatear_moneda(factor_servicios['resultado_operativo'])}")
-            
-            with col2:
-                st.metric(
-                    "Factor Absorción Repuestos",
-                    f"{factor_repuestos['factor_absorcion']:.1f}%",
-                    delta=f"Margen: {formatear_moneda(factor_repuestos['margen'])}"
-                )
-                st.caption(f"💰 Ingresos: {formatear_moneda(factor_repuestos['ingresos_repuestos'])}")
-                st.caption(f"💸 Gastos Variables: {formatear_moneda(factor_repuestos['gastos_variables'])}")
-                st.caption(f"📊 Gastos Fijos: {formatear_moneda(factor_repuestos['gastos_fijos'])}")
-                st.caption(f"💵 Margen: {formatear_moneda(factor_repuestos['margen'])}")
-                st.caption(f"✅ Resultado Operativo: {formatear_moneda(factor_repuestos['resultado_operativo'])}")
-            
-            with col3:
-                st.metric(
-                    "Factor Absorción Postventa",
-                    f"{factor_postventa['factor_absorcion']:.1f}%",
-                    delta=f"Margen: {formatear_moneda(factor_postventa['margen'])}"
-                )
-                st.caption(f"💰 Ingresos: {formatear_moneda(factor_postventa['ingresos_totales'])}")
-                st.caption(f"💸 Gastos Variables: {formatear_moneda(factor_postventa['gastos_variables'])}")
-                st.caption(f"📊 Gastos Fijos: {formatear_moneda(factor_postventa['gastos_fijos'])}")
-                st.caption(f"💵 Margen: {formatear_moneda(factor_postventa['margen'])}")
-                st.caption(f"✅ Resultado Operativo: {formatear_moneda(factor_postventa['resultado_operativo'])}")
-            
-            with col4:
-                diferencia_pe = punto_equilibrio['diferencia']
-                st.metric(
-                    "Punto de Equilibrio",
-                    formatear_moneda(punto_equilibrio['punto_equilibrio']),
-                    delta=formatear_moneda(diferencia_pe) if diferencia_pe != 0 else "$0,00"
-                )
-                st.caption(f"Ingresos Actuales: {formatear_moneda(punto_equilibrio['ingresos_actuales'])}")
-                st.caption(f"Gastos Totales: {formatear_moneda(punto_equilibrio['gastos_totales'])}")
-            
-            # Por sucursal
-            st.subheader("📊 KPIs por Sucursal")
-            
-            factor_servicios_suc = calcular_factor_absorcion_servicios(str(fecha_inicio), str(fecha_fin), por_sucursal=True)
-            factor_repuestos_suc = calcular_factor_absorcion_repuestos(str(fecha_inicio), str(fecha_fin), por_sucursal=True)
-            factor_postventa_suc = calcular_factor_absorcion_postventa(str(fecha_inicio), str(fecha_fin), por_sucursal=True)
-            punto_equilibrio_suc = calcular_punto_equilibrio(str(fecha_inicio), str(fecha_fin), por_sucursal=True)
-            
-            for sucursal in factor_servicios_suc.keys():
-                st.write(f"### {sucursal}")
-                
-                col1, col2, col3, col4 = st.columns(4)
-                
-                with col1:
-                    st.write("**Servicios**")
-                    st.write(f"Factor: **{factor_servicios_suc[sucursal]['factor_absorcion']:.1f}%**")
-                    st.caption(f"💰 Ingresos: {formatear_moneda(factor_servicios_suc[sucursal]['ingresos_servicios'])}")
-                    st.caption(f"💸 Gastos Variables: {formatear_moneda(factor_servicios_suc[sucursal]['gastos_variables'])}")
-                    st.caption(f"📊 Gastos Fijos: {formatear_moneda(factor_servicios_suc[sucursal]['gastos_fijos'])}")
-                    st.caption(f"💵 Margen: {formatear_moneda(factor_servicios_suc[sucursal]['margen'])}")
-                    st.caption(f"✅ Resultado Operativo: {formatear_moneda(factor_servicios_suc[sucursal]['resultado_operativo'])}")
-                
-                with col2:
-                    st.write("**Repuestos**")
-                    st.write(f"Factor: **{factor_repuestos_suc[sucursal]['factor_absorcion']:.1f}%**")
-                    st.caption(f"💰 Ingresos: {formatear_moneda(factor_repuestos_suc[sucursal]['ingresos_repuestos'])}")
-                    st.caption(f"💸 Gastos Variables: {formatear_moneda(factor_repuestos_suc[sucursal]['gastos_variables'])}")
-                    st.caption(f"📊 Gastos Fijos: {formatear_moneda(factor_repuestos_suc[sucursal]['gastos_fijos'])}")
-                    st.caption(f"💵 Margen: {formatear_moneda(factor_repuestos_suc[sucursal]['margen'])}")
-                    st.caption(f"✅ Resultado Operativo: {formatear_moneda(factor_repuestos_suc[sucursal]['resultado_operativo'])}")
-                
-                with col3:
-                    st.write("**Postventa**")
-                    st.write(f"Factor: **{factor_postventa_suc[sucursal]['factor_absorcion']:.1f}%**")
-                    st.caption(f"💰 Ingresos: {formatear_moneda(factor_postventa_suc[sucursal]['ingresos_totales'])}")
-                    st.caption(f"💸 Gastos Variables: {formatear_moneda(factor_postventa_suc[sucursal]['gastos_variables'])}")
-                    st.caption(f"📊 Gastos Fijos: {formatear_moneda(factor_postventa_suc[sucursal]['gastos_fijos'])}")
-                    st.caption(f"💵 Margen: {formatear_moneda(factor_postventa_suc[sucursal]['margen'])}")
-                    st.caption(f"✅ Resultado Operativo: {formatear_moneda(factor_postventa_suc[sucursal]['resultado_operativo'])}")
-                
-                with col4:
-                    st.write("**Punto Equilibrio**")
-                    st.write(formatear_moneda(punto_equilibrio_suc[sucursal]['punto_equilibrio']))
-                    diferencia = punto_equilibrio_suc[sucursal]['diferencia']
-                    if diferencia > 0:
-                        st.success(f"✅ +{formatear_moneda(diferencia)}")
-                    elif diferencia < 0:
-                        st.error(f"❌ {formatear_moneda(diferencia)}")
-                    else:
-                        st.info("⚖️ Equilibrado")
-                
-                st.divider()
-
-# ==================== ANÁLISIS CON IA ====================
-elif page == "🤖 Análisis IA":
-    st.title("🤖 Análisis Inteligente con IA")
-    st.markdown("**Análisis avanzado, predicciones y recomendaciones basadas en tus datos**")
-    
-    # Configuración de Google Gemini (opcional)
-    st.sidebar.divider()
-    st.sidebar.subheader("⚙️ Configuración de IA")
-    
-    # Inicializar API key por defecto si no existe
-    if 'gemini_api_key' not in st.session_state:
-        # API key proporcionada por el usuario
-        st.session_state['gemini_api_key'] = 'AIzaSyAIsktRR9lhw_cdrK6_PMf-aSk88i06CQk'
-    
-    usar_gemini = st.sidebar.checkbox("Usar Google Gemini API (Análisis Avanzado)", value=True)
-    gemini_api_key = None
-    
-    if usar_gemini:
-        gemini_api_key_input = st.sidebar.text_input(
-            "🔑 Google Gemini API Key",
-            value=st.session_state['gemini_api_key'],
-            type="password",
-            help="Obtén tu API key gratuita en: https://aistudio.google.com/apikey"
-        )
-        
-        if gemini_api_key_input:
-            st.session_state['gemini_api_key'] = gemini_api_key_input
-            gemini_api_key = gemini_api_key_input
-        
-        # Debug info
-        with st.sidebar.expander("🔍 Debug Info", expanded=False):
-            st.write(f"**usar_gemini:** {usar_gemini}")
-            st.write(f"**API key presente:** {bool(gemini_api_key)}")
-            st.write(f"**GEMINI_AVAILABLE:** {GEMINI_AVAILABLE}")
-            st.write(f"**API key (primeros 10):** {gemini_api_key[:10] if gemini_api_key else 'N/A'}...")
-        
-        if not gemini_api_key:
-            st.sidebar.warning("⚠️ Ingresa tu API key para usar análisis avanzado con Gemini")
-        else:
-            st.sidebar.success("✅ Gemini API configurada")
-            
-            # Botón para probar conexión
-            if st.sidebar.button("🧪 Probar Conexión Gemini", use_container_width=True, key="test_gemini"):
-                with st.sidebar:
-                    with st.spinner("Probando conexión..."):
-                        try:
-                            from ai_analysis import test_gemini_connection
-                            test_result = test_gemini_connection(gemini_api_key)
-                            if test_result['success']:
-                                st.success(f"✅ {test_result['message']}")
-                                st.caption(f"Modelo: {test_result.get('model', 'N/A')}")
-                                if test_result.get('modelos_disponibles'):
-                                    with st.expander("Ver modelos disponibles"):
-                                        for m in test_result['modelos_disponibles']:
-                                            st.write(f"- {m}")
-                            else:
-                                error_msg = test_result.get('error', 'Desconocido')
-                                st.error(f"❌ Error: {error_msg}")
-                                if 'quota' in error_msg.lower() or '429' in error_msg:
-                                    st.warning("⚠️ Cuota agotada. Espera unos minutos o verifica tu plan en https://ai.dev/usage")
-                                elif 'Librería' in error_msg:
-                                    st.info("💡 Instala la librería: `pip install google-generativeai`")
-                                elif test_result.get('modelos_disponibles'):
-                                    st.info(f"💡 Modelos disponibles: {', '.join(test_result['modelos_disponibles'][:3])}")
-                        except ImportError:
-                            st.error("❌ Función de prueba no disponible")
-                        except Exception as e:
-                            st.error(f"❌ Error al probar conexión: {str(e)}")
-            
-            if st.sidebar.button("🗑️ Eliminar API Key", key="eliminar_gemini_key"):
-                st.session_state['gemini_api_key'] = ''
-                st.rerun()
-    
-    # Configuración de auto-actualización
-    auto_refresh = st.sidebar.checkbox("🔄 Auto-actualización", value=False, help="Actualiza el análisis automáticamente cada X minutos")
-    refresh_interval = None
-    if auto_refresh:
-        refresh_interval = st.sidebar.selectbox(
-            "Intervalo de actualización",
-            [5, 10, 15, 30, 60],
-            index=1,
-            format_func=lambda x: f"{x} minutos"
-        )
-    
-    # Filtros de fecha
-    col1, col2, col3 = st.columns([2, 2, 1])
-    with col1:
-        fecha_inicio = st.date_input("Fecha Inicio (IA)", value=date(2025, 11, 1))
-    with col2:
-        fecha_fin = st.date_input("Fecha Fin (IA)", value=date.today())
-    with col3:
-        st.write("")  # Espacio
-        st.write("")  # Espacio
-        if st.button("🔄 Actualizar Análisis", use_container_width=True, type="primary"):
+            update_venta(int(selected), venta_actualizada)
+            st.success("✅ Venta actualizada.")
             st.rerun()
-    
-    # Auto-refresh usando st.rerun con time.sleep (simulado con placeholder)
-    if auto_refresh and refresh_interval:
-        st.sidebar.info(f"⏱️ Próxima actualización en {refresh_interval} minutos")
-        # Nota: En producción, esto requeriría un mecanismo más sofisticado
-        # Streamlit no tiene auto-refresh nativo, pero se puede usar st.rerun() con time.sleep
-    
-    # Obtener datos
-    df_ventas = get_ventas(str(fecha_inicio), str(fecha_fin))
-    df_gastos = get_gastos(str(fecha_inicio), str(fecha_fin))
-    
-    if len(df_ventas) == 0 and len(df_gastos) == 0:
-        st.info("📊 No hay datos para analizar. Importa datos desde Excel o registra nuevas ventas/gastos.")
-    else:
-        # Ejecutar análisis con IA
-        mensaje_analisis = "🤖 Analizando datos con IA avanzada (Gemini)..." if gemini_api_key else "🤖 Analizando datos con IA..."
-        with st.spinner(mensaje_analisis):
-            summary = get_ai_summary(df_ventas, df_gastos, gemini_api_key=gemini_api_key)
-        
-        # Mostrar timestamp del análisis
-        if summary.get('timestamp_analisis'):
-            st.caption(f"📅 Última actualización: {summary['timestamp_analisis']}")
-        
-        # Mostrar alertas críticas primero (si existen)
-        if summary.get('alertas_criticas') and len(summary['alertas_criticas']) > 0:
-            st.error("🚨 **ALERTAS CRÍTICAS DETECTADAS**")
-            for alerta in summary['alertas_criticas']:
-                if alerta['severidad'] == 'ALTA':
-                    st.error(f"**{alerta['titulo']}** - {alerta['descripcion']}")
-                else:
-                    st.warning(f"**{alerta['titulo']}** - {alerta['descripcion']}")
-                st.caption(f"Detectado: {alerta['fecha_deteccion']}")
-            st.divider()
-        
-        # Mostrar indicador de método usado y estado de Gemini
-        gemini_status = summary.get('gemini_status', {})
-        
-        # Panel de estado detallado de Gemini
-        with st.expander("🔍 Estado Detallado de Gemini API", expanded=True):
-            if summary.get('usando_ia'):
-                if gemini_status.get('activo'):
-                    st.success("✅ **Gemini API está ACTIVO y funcionando**")
-                    st.write(f"📊 **Insights agregados:**")
-                    st.write(f"- Tendencias: {gemini_status.get('tendencias_agregadas', 0)}")
-                    st.write(f"- Alertas: {gemini_status.get('alertas_agregadas', 0)}")
-                    st.write(f"- Recomendaciones: {gemini_status.get('recomendaciones_agregadas', 0)}")
-                    st.write(f"- **Total:** {gemini_status.get('insights_agregados', 0)} insights")
-                    if gemini_status.get('debug_info'):
-                        st.caption(f"ℹ️ {gemini_status['debug_info']}")
-                elif gemini_status.get('error'):
-                    st.error(f"❌ **Error con Gemini API**: {gemini_status['error']}")
-                    if gemini_status.get('debug_info'):
-                        st.code(gemini_status['debug_info'], language='text')
-                    st.info("ℹ️ Continuando con análisis estadístico local")
-                else:
-                    st.warning("⚠️ Gemini API configurada pero no se pudo conectar. Verifica tu API key.")
-                    if gemini_status.get('debug_info'):
-                        st.caption(f"ℹ️ {gemini_status['debug_info']}")
+        except Exception as exc:
+            st.error(f"❌ Error al actualizar: {exc}")
+
+    if eliminar:
+        try:
+            delete_venta(int(selected))
+            st.warning("Venta eliminada.")
+            st.rerun()
+        except Exception as exc:
+            st.error(f"❌ Error al eliminar: {exc}")
+
+def render_expenses_page():
+    st.title("💸 Gastos")
+    st.subheader("Registrar gasto")
+
+    sucursales_default = ["COMODORO", "RIO GRANDE", "RIO GALLEGOS", "COMPARTIDOS"]
+    areas_default = ["POSTVENTA", "SERVICIO", "REPUESTOS"]
+
+    with st.form("form_crear_gasto"):
+        col_a, col_b = st.columns(2)
+        with col_a:
+            fecha = st.date_input("Fecha", value=date.today(), key="gasto_fecha")
+            sucursal = st.selectbox("Sucursal", sucursales_default, key="gasto_sucursal")
+            area = st.selectbox("Área", areas_default, key="gasto_area")
+            tipo = st.selectbox("Tipo", ["FIJO", "VARIABLE"], key="gasto_tipo")
+            clasificacion = st.text_input("Clasificación", key="gasto_clasificacion")
+        with col_b:
+            proveedor = st.text_input("Proveedor (opcional)", key="gasto_proveedor")
+            pct_postventa = st.slider("% Postventa", 0.0, 1.0, 1.0, 0.05, key="gasto_pct_postventa")
+            pct_servicios = st.slider("% Servicios", 0.0, 1.0, 1.0, 0.05, key="gasto_pct_servicios")
+            pct_repuestos = st.slider("% Repuestos", 0.0, 1.0, 0.0, 0.05, key="gasto_pct_repuestos")
+
+        total_usd = st.number_input(
+            "Total USD", min_value=-1_000_000.0, value=0.0, step=0.01, key="gasto_total_usd"
+        )
+        detalles = st.text_area("Detalles", key="gasto_detalles")
+
+        submit = st.form_submit_button("💾 Guardar gasto")
+        if submit:
+            if not clasificacion:
+                st.error("Completa la clasificación.")
+            elif total_usd == 0:
+                st.error("El total no puede ser 0.")
             else:
-                st.info("ℹ️ Gemini API no está activado. Actívalo en el sidebar para análisis avanzado.")
-        
-        # Mensaje principal más visible
-        if summary.get('usando_ia') and gemini_status.get('activo'):
-            st.success("✅ **Análisis mejorado con Google Gemini API** - Funcionando correctamente")
-            if gemini_status.get('insights_agregados', 0) > 0:
-                st.caption(f"📊 Gemini agregó {gemini_status['insights_agregados']} insights adicionales (Tendencias: {gemini_status.get('tendencias_agregadas', 0)}, Alertas: {gemini_status.get('alertas_agregadas', 0)}, Recomendaciones: {gemini_status.get('recomendaciones_agregadas', 0)})")
-            else:
-                st.warning("⚠️ Gemini está activo pero no agregó insights. Revisa los logs en la consola.")
-        elif summary.get('usando_ia') and gemini_status.get('error'):
-            st.error(f"❌ **Error con Gemini API**: {gemini_status['error']}")
-        elif not summary.get('usando_ia'):
-            st.info("ℹ️ Análisis estadístico local (activa Gemini API en el sidebar para análisis avanzado)")
-        
-        # Mostrar insights
-        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📊 Insights", "🔮 Predicciones", "⚠️ Anomalías", "💡 Recomendaciones", "🚨 Alertas Críticas", "📜 Historial"])
-        
-        with tab1:
-            st.subheader("📊 Tendencias e Insights")
-            
-            if summary['insights']['tendencias']:
-                st.success("**Tendencias Identificadas:**")
-                for tendencia in summary['insights']['tendencias']:
-                    st.write(f"  {tendencia}")
-            else:
-                st.info("No se identificaron tendencias significativas")
-            
-            if summary['insights']['alertas']:
-                st.warning("**Alertas:**")
-                for alerta in summary['insights']['alertas']:
-                    st.write(f"  {alerta}")
-        
-        with tab2:
-            st.subheader("🔮 Predicción del Próximo Mes")
-            
-            if summary['prediccion']['prediccion']:
-                prediccion = summary['prediccion']['prediccion']
-                confianza = summary['prediccion']['confianza']
-                mensaje = summary['prediccion']['mensaje']
-                metodo = summary['prediccion'].get('metodo', 'Promedio Simple')
-                
-                # Mostrar método usado
-                st.info(f"📊 Método: {metodo}")
-                
-                # Si hay predicciones de múltiples modelos, mostrarlas
-                if 'predicciones_individuales' in summary['prediccion']:
-                    with st.expander("📈 Ver predicciones por modelo"):
-                        for modelo, pred_valor in summary['prediccion']['predicciones_individuales'].items():
-                            st.write(f"**{modelo}**: {formatear_moneda(pred_valor)} USD")
-                
-                # Mostrar predicción con color según confianza
-                if confianza == 'Alta':
-                    st.success(f"**Predicción: {formatear_moneda(prediccion)} USD**")
-                elif confianza == 'Media':
-                    st.warning(f"**Predicción: {formatear_moneda(prediccion)} USD**")
-                else:
-                    st.info(f"**Predicción: {formatear_moneda(prediccion)} USD**")
-                
-                # Explicación del nivel de confianza
-                st.write(f"**Nivel de confianza:** {confianza}")
-                
-                if confianza == 'Alta':
-                    st.success("✅ **Alta confianza**: Las ventas diarias son muy consistentes (baja variabilidad). La predicción es más confiable.")
-                elif confianza == 'Media':
-                    st.warning("⚠️ **Confianza media**: Las ventas diarias tienen variabilidad moderada. La predicción puede tener desviaciones.")
-                else:
-                    st.error("❌ **Baja confianza**: Las ventas diarias tienen alta variabilidad (días con ventas muy altas y otros muy bajos). La predicción es menos confiable y puede diferir significativamente del resultado real.")
-                
-                st.write(f"**{mensaje}**")
-                
-                st.info("💡 **Nota**: La predicción se basa en el promedio diario de las últimas 2 semanas. Si hay mucha variabilidad entre días, la confianza será menor.")
-                
-                # Gráfico de predicción
-                if len(df_ventas) > 0:
-                    df_ventas['fecha'] = pd.to_datetime(df_ventas['fecha'])
-                    ventas_mensuales = df_ventas.groupby(df_ventas['fecha'].dt.to_period('M'))['total'].sum()
-                    
-                    # Crear gráfico con predicción
-                    fig = go.Figure()
-                    
-                    # Datos históricos
-                    fechas_historicas = [str(p) for p in ventas_mensuales.index]
-                    fig.add_trace(go.Scatter(
-                        x=fechas_historicas,
-                        y=ventas_mensuales.values,
-                        mode='lines+markers',
-                        name='Histórico',
-                        line=dict(color='blue')
-                    ))
-                    
-                    # Predicción
-                    ultima_fecha = ventas_mensuales.index[-1]
-                    siguiente_mes = str(ultima_fecha + 1)
-                    fig.add_trace(go.Scatter(
-                        x=[siguiente_mes],
-                        y=[prediccion],
-                        mode='markers',
-                        name='Predicción',
-                        marker=dict(color='red', size=15, symbol='diamond')
-                    ))
-                    
-                    fig.update_layout(
-                        title="Predicción de Ingresos - Próximo Mes",
-                        xaxis_title="Mes",
-                        yaxis_title="Ingresos (USD)",
-                        hovermode='x unified'
-                    )
-                    
-                    st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.info(summary['prediccion']['mensaje'])
-        
-        with tab3:
-            st.subheader("⚠️ Anomalías Detectadas")
-            
-            if summary['anomalias']:
-                # Agrupar por categoría
-                categorias = {}
-                for anomalia in summary['anomalias']:
-                    categoria = anomalia.get('categoria', 'General')
-                    if categoria not in categorias:
-                        categorias[categoria] = []
-                    categorias[categoria].append(anomalia)
-                
-                for categoria, anomalias_cat in categorias.items():
-                    with st.expander(f"📂 {categoria} ({len(anomalias_cat)} anomalías)"):
-                        for anomalia in anomalias_cat:
-                            st.warning(f"**{anomalia['tipo']}** - {anomalia['descripcion']}")
-                            st.caption(f"Fecha: {anomalia['fecha']} | Valor: {formatear_moneda(anomalia['valor']) if isinstance(anomalia['valor'], (int, float)) else anomalia['valor']}")
-            else:
-                st.success("✅ No se detectaron anomalías significativas en los datos")
-        
-        with tab4:
-            st.subheader("💡 Recomendaciones Inteligentes")
-            
-            # Separar recomendaciones de Gemini vs estadísticas
-            gemini_status = summary.get('gemini_status', {})
-            hay_gemini = gemini_status.get('activo', False)
-            
-            # Obtener recomendaciones de Gemini (si las hay)
-            recomendaciones_gemini = []
-            if hay_gemini and gemini_status.get('recomendaciones_agregadas', 0) > 0:
-                # Las recomendaciones de Gemini están al final de la lista (se agregaron después)
-                # Contar cuántas agregó Gemini
-                num_gemini = gemini_status.get('recomendaciones_agregadas', 0)
-                todas_recomendaciones = summary['insights']['recomendaciones'] + summary['recomendaciones']
-                if len(todas_recomendaciones) >= num_gemini:
-                    recomendaciones_gemini = todas_recomendaciones[-num_gemini:]
-                    recomendaciones_estadisticas = todas_recomendaciones[:-num_gemini] if num_gemini < len(todas_recomendaciones) else []
-                else:
-                    recomendaciones_estadisticas = todas_recomendaciones
-            else:
-                todas_recomendaciones = summary['insights']['recomendaciones'] + summary['recomendaciones']
-                recomendaciones_estadisticas = todas_recomendaciones
-            
-            if recomendaciones_gemini or recomendaciones_estadisticas:
-                if recomendaciones_gemini:
-                    st.success("🤖 **Recomendaciones de Google Gemini AI:**")
-                    for i, recomendacion in enumerate(recomendaciones_gemini, 1):
-                        st.success(f"🤖 {i}. {recomendacion}")
-                    st.divider()
-                
-                if recomendaciones_estadisticas:
-                    st.info("📊 **Recomendaciones del Análisis Estadístico:**")
-                    for i, recomendacion in enumerate(recomendaciones_estadisticas, 1):
-                        st.info(f"{i}. {recomendacion}")
-            else:
-                st.info("No hay recomendaciones específicas en este momento")
-            
-            # Mostrar estado de Gemini si está activo
-            if hay_gemini:
-                st.divider()
-                if gemini_status.get('insights_agregados', 0) > 0:
-                    st.success(f"✅ **Google Gemini AI** está activo y agregó {gemini_status['insights_agregados']} insights")
-                else:
-                    st.warning("⚠️ **Google Gemini AI** está activo pero no agregó insights. Revisa los logs para más detalles.")
-        
-        with tab5:
-            st.subheader("🚨 Alertas Críticas en Tiempo Real")
-            
-            if summary.get('alertas_criticas') and len(summary['alertas_criticas']) > 0:
-                # Agrupar por severidad
-                alertas_altas = [a for a in summary['alertas_criticas'] if a['severidad'] == 'ALTA']
-                alertas_medias = [a for a in summary['alertas_criticas'] if a['severidad'] == 'MEDIA']
-                
-                if alertas_altas:
-                    st.error(f"**🔴 Alertas de Alta Severidad ({len(alertas_altas)})**")
-                    for alerta in alertas_altas:
-                        with st.container():
-                            st.error(f"**{alerta['titulo']}**")
-                            st.write(alerta['descripcion'])
-                            st.caption(f"⏰ Detectado: {alerta['fecha_deteccion']}")
-                            st.divider()
-                
-                if alertas_medias:
-                    st.warning(f"**🟡 Alertas de Severidad Media ({len(alertas_medias)})**")
-                    for alerta in alertas_medias:
-                        with st.container():
-                            st.warning(f"**{alerta['titulo']}**")
-                            st.write(alerta['descripcion'])
-                            st.caption(f"⏰ Detectado: {alerta['fecha_deteccion']}")
-                            st.divider()
-            else:
-                st.success("✅ No hay alertas críticas en este momento. El negocio está funcionando normalmente.")
-        
-        with tab6:
-            st.subheader("📜 Historial de Análisis IA")
-            st.markdown("**Recomendaciones, tendencias, predicciones y alertas guardadas históricamente**")
-            
-            # Resumen mensual destacado
-            st.divider()
-            st.subheader("📊 Resumen Mensual - Lo Más Relevante")
-            
-            from datetime import datetime
-            mes_actual = datetime.now().month
-            año_actual = datetime.now().year
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                mes_seleccionado = st.selectbox(
-                    "Mes",
-                    list(range(1, 13)),
-                    index=mes_actual - 1,
-                    format_func=lambda x: datetime(2000, x, 1).strftime('%B'),
-                    key="resumen_mes"
-                )
-            with col2:
-                año_seleccionado = st.number_input(
-                    "Año",
-                    min_value=2020,
-                    max_value=2030,
-                    value=año_actual,
-                    key="resumen_año"
-                )
-            
-            # Obtener resumen mensual
-            resumen_mensual = get_resumen_mensual_analisis_ia(mes_seleccionado, año_seleccionado)
-            
-            if resumen_mensual['total_registros'] > 0:
-                st.success(f"📈 **{resumen_mensual['total_registros']} análisis** registrados en {datetime(2000, mes_seleccionado, 1).strftime('%B')} {año_seleccionado}")
-                
-                # Mostrar resumen por tipo
-                resumen_data = resumen_mensual['resumen']
-                
-                # Recomendaciones (lo más importante)
-                if 'recomendacion' in resumen_data:
-                    st.write("**💡 Recomendaciones Más Frecuentes:**")
-                    for item in resumen_data['recomendacion']['top_items']:
-                        fuentes_str = " + ".join([f"🤖 Gemini" if f == 'gemini' else "📊 Local" for f in item['fuentes']])
-                        st.info(f"**({item['frecuencia']}x)** {item['contenido']} - {fuentes_str}")
-                        st.caption(f"Última aparición: {item['ultima_aparicion']}")
-                    st.divider()
-                
-                # Alertas
-                if 'alerta' in resumen_data:
-                    st.write("**🚨 Alertas Más Frecuentes:**")
-                    for item in resumen_data['alerta']['top_items']:
-                        fuentes_str = " + ".join([f"🤖 Gemini" if f == 'gemini' else "📊 Local" for f in item['fuentes']])
-                        st.warning(f"**({item['frecuencia']}x)** {item['contenido']} - {fuentes_str}")
-                        st.caption(f"Última aparición: {item['ultima_aparicion']}")
-                    st.divider()
-                
-                # Tendencias
-                if 'tendencia' in resumen_data:
-                    st.write("**📈 Tendencias Identificadas:**")
-                    st.metric("Total", resumen_data['tendencia']['total'])
-                    if 'por_fuente' in resumen_data['tendencia']:
-                        st.caption(f"🤖 Gemini: {resumen_data['tendencia']['por_fuente'].get('gemini', 0)} | 📊 Local: {resumen_data['tendencia']['por_fuente'].get('local', 0)}")
-                    st.divider()
-                
-                # Predicciones
-                if 'prediccion' in resumen_data:
-                    st.write("**🔮 Predicciones Realizadas:**")
-                    st.metric("Total", resumen_data['prediccion']['total'])
-                    if 'por_fuente' in resumen_data['prediccion']:
-                        st.caption(f"🤖 Gemini: {resumen_data['prediccion']['por_fuente'].get('gemini', 0)} | 📊 Local: {resumen_data['prediccion']['por_fuente'].get('local', 0)}")
-                    st.divider()
-                
-                # Anomalías
-                if 'anomalia' in resumen_data:
-                    st.write("**⚠️ Anomalías Detectadas:**")
-                    st.metric("Total", resumen_data['anomalia']['total'])
-                    if 'por_fuente' in resumen_data['anomalia']:
-                        st.caption(f"🤖 Gemini: {resumen_data['anomalia']['por_fuente'].get('gemini', 0)} | 📊 Local: {resumen_data['anomalia']['por_fuente'].get('local', 0)}")
-            else:
-                st.info(f"📭 No hay análisis registrados para {datetime(2000, mes_seleccionado, 1).strftime('%B')} {año_seleccionado}")
+                total_pct = total_usd * pct_postventa
+                gasto_data = {
+                    "mes": fecha.strftime("%B"),
+                    "fecha": fecha,
+                    "sucursal": sucursal,
+                    "area": area,
+                    "pct_postventa": pct_postventa,
+                    "pct_servicios": pct_servicios,
+                    "pct_repuestos": pct_repuestos,
+                    "tipo": tipo,
+                    "clasificacion": clasificacion,
+                    "proveedor": proveedor or None,
+                    "total_pesos": None,
+                    "total_usd": total_usd,
+                    "total_pct": total_pct,
+                    "total_pct_se": total_pct * pct_servicios,
+                    "total_pct_re": total_pct * pct_repuestos,
+                    "detalles": detalles or None,
+                }
+                try:
+                    insert_gasto(gasto_data)
+                    st.success("✅ Gasto registrado.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"❌ Error al guardar: {exc}")
             
             st.divider()
-            st.subheader("📋 Historial Completo")
-            
-            # Filtros
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                tipo_filtro = st.selectbox("Filtrar por tipo", 
-                    ["Todos", "Tendencia", "Predicción", "Anomalía", "Recomendación", "Alerta"],
-                    key="historial_tipo")
-            with col2:
-                fuente_filtro = st.selectbox("Filtrar por fuente",
-                    ["Todas", "Gemini", "Local"],
-                    key="historial_fuente")
-            with col3:
-                limit_historial = st.number_input("Cantidad de registros", min_value=10, max_value=200, value=50, step=10)
-            
-            # Obtener historial
-            tipo_filtro_db = None if tipo_filtro == "Todos" else tipo_filtro.lower()
-            fuente_filtro_db = None if fuente_filtro == "Todas" else fuente_filtro.lower()
-            
-            df_historial = get_historial_analisis_ia(
-                limit=limit_historial,
-                tipo_analisis=tipo_filtro_db,
-                fuente=fuente_filtro_db
+    st.subheader("Gastos registrados")
+    df_gastos = get_gastos()
+    if len(df_gastos) == 0:
+        st.info("Aún no hay gastos cargados.")
+        return
+
+    st.dataframe(
+        df_gastos.sort_values("fecha", ascending=False).head(50),
+        use_container_width=True,
+    )
+
+    st.subheader("Editar o eliminar")
+    opciones = ["(ninguno)"] + [str(g) for g in df_gastos.sort_values("fecha", ascending=False)["id"].tolist()]
+    selected = st.selectbox("Selecciona un gasto", opciones)
+    if selected == "(ninguno)":
+        return
+
+    registro = get_gasto_by_id(int(selected))
+    if not registro:
+        st.warning("No se encontró el gasto.")
+        return
+
+    fecha_reg = datetime.strptime(str(registro["fecha"]), "%Y-%m-%d").date()
+
+    with st.form("form_editar_gasto"):
+        col_a, col_b = st.columns(2)
+        with col_a:
+            fecha_edit = st.date_input("Fecha", value=fecha_reg, key="gasto_edit_fecha")
+            sucursal_edit = st.selectbox(
+                "Sucursal",
+                sucursales_default,
+                index=sucursales_default.index(registro["sucursal"])
+                if registro["sucursal"] in sucursales_default
+                else 0,
+                key="gasto_edit_sucursal",
             )
-            
-            if len(df_historial) > 0:
-                st.info(f"📊 Mostrando {len(df_historial)} registros del historial")
-                
-                # Agrupar por fecha
-                df_historial['fecha_hora'] = pd.to_datetime(df_historial['fecha_hora'])
-                df_historial = df_historial.sort_values('fecha_hora', ascending=False)
-                
-                # Mostrar por fecha
-                fechas_unicas = df_historial['fecha_hora'].dt.date.unique()
-                
-                for fecha in fechas_unicas:
-                    registros_fecha = df_historial[df_historial['fecha_hora'].dt.date == fecha]
-                    
-                    with st.expander(f"📅 {fecha.strftime('%d/%m/%Y')} ({len(registros_fecha)} registros)", expanded=False):
-                        for idx, registro in registros_fecha.iterrows():
-                            # Icono según tipo
-                            iconos = {
-                                'tendencia': '📈',
-                                'prediccion': '🔮',
-                                'anomalia': '⚠️',
-                                'recomendacion': '💡',
-                                'alerta': '🚨'
-                            }
-                            icono = iconos.get(registro['tipo_analisis'], '📌')
-                            
-                            # Color según fuente
-                            if registro['fuente'] == 'gemini':
-                                st.success(f"{icono} **{registro['tipo_analisis'].upper()}** (🤖 Gemini) - {registro['fecha_hora'].strftime('%H:%M:%S')}")
-                            else:
-                                st.info(f"{icono} **{registro['tipo_analisis'].upper()}** (📊 Local) - {registro['fecha_hora'].strftime('%H:%M:%S')}")
-                            
-                            st.write(registro['contenido'])
-                            
-                            # Mostrar metadata si existe
-                            if registro['metadata']:
-                                try:
-                                    import json
-                                    metadata = json.loads(registro['metadata'])
-                                    if metadata:
-                                        with st.expander("ℹ️ Detalles adicionales"):
-                                            st.json(metadata)
-                                except:
-                                    pass
-                            
-                            st.divider()
-            else:
-                st.info("📭 No hay registros en el historial. Los análisis se guardarán automáticamente cuando se ejecuten.")
-        
-        # Resumen ejecutivo
-        st.divider()
-        st.subheader("📋 Resumen Ejecutivo")
-        
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            st.metric(
-                "Tendencias",
-                len(summary['insights']['tendencias']),
-                delta=f"{len(summary['insights']['alertas'])} alertas"
+            area_edit = st.selectbox(
+                "Área",
+                areas_default,
+                index=areas_default.index(registro["area"])
+                if registro["area"] in areas_default
+                else 0,
+                key="gasto_edit_area",
             )
-        
-        with col2:
-            confianza_icon = "🟢" if summary['prediccion']['confianza'] == 'Alta' else "🟡" if summary['prediccion']['confianza'] == 'Media' else "🔴"
-            st.metric(
-                "Predicción",
-                confianza_icon,
-                delta=summary['prediccion']['confianza']
+            tipo_edit = st.selectbox(
+                "Tipo",
+                ["FIJO", "VARIABLE"],
+                index=0 if registro.get("tipo") == "FIJO" else 1,
+                key="gasto_edit_tipo",
             )
-        
-        with col3:
-            st.metric(
-                "Anomalías",
-                len(summary['anomalias']),
-                delta=f"{len(todas_recomendaciones)} recomendaciones"
+            clasificacion_edit = st.text_input(
+                "Clasificación", value=registro.get("clasificacion") or "", key="gasto_edit_clasificacion"
+            )
+        with col_b:
+            proveedor_edit = st.text_input(
+                "Proveedor (opcional)", value=registro.get("proveedor") or "", key="gasto_edit_proveedor"
+            )
+            pct_postventa_edit = st.slider(
+                "% Postventa",
+                0.0,
+                1.0,
+                float(registro.get("pct_postventa") or 0),
+                0.05,
+                key="gasto_edit_pct_postventa",
+            )
+            pct_servicios_edit = st.slider(
+                "% Servicios",
+                0.0,
+                1.0,
+                float(registro.get("pct_servicios") or 0),
+                0.05,
+                key="gasto_edit_pct_servicios",
+            )
+            pct_repuestos_edit = st.slider(
+                "% Repuestos",
+                0.0,
+                1.0,
+                float(registro.get("pct_repuestos") or 0),
+                0.05,
+                key="gasto_edit_pct_repuestos",
             )
 
-# ==================== PROBAR EXTRACCIÓN PDF ====================
-elif page == "🔍 Probar Extracción PDF":
-    st.title("🔍 Probar Extracción de Datos de PDF")
-    st.info("""
-    **Extrae datos de comprobantes PDF usando pdfplumber:**
-    - Extracción automática de texto del PDF
-    - Detección de cliente, número de comprobante, fecha, total
-    - Clasificación automática de items (Repuestos, Mano de Obra, Asistencia, Terceros)
-    """)
-    
-    archivo_pdf = st.file_uploader("Subir PDF para analizar", type=['pdf'])
-    
-    if archivo_pdf is not None:
-        # Guardar temporalmente
-        temp_pdf = Path(f"temp_{archivo_pdf.name}")
-        with open(temp_pdf, "wb") as f:
-            f.write(archivo_pdf.getbuffer())
-        
-        if st.button("🔍 Extraer Datos"):
-            with st.spinner("Extrayendo datos del PDF..."):
-                datos_extraidos = {}
-                
-                # Método local con pdfplumber
-                try:
-                    if PDFPLUMBER_AVAILABLE:
-                        with pdfplumber.open(temp_pdf) as pdf:
-                            texto_completo = ""
-                            for page in pdf.pages:
-                                texto_completo += page.extract_text() or ""
-                        datos_extraidos['texto'] = texto_completo
-                        datos_extraidos['metodo'] = 'pdfplumber'
-                    elif PDF2_AVAILABLE:
-                        with open(temp_pdf, 'rb') as f:
-                            pdf_reader = PyPDF2.PdfReader(f)
-                            texto_completo = ""
-                            for page in pdf_reader.pages:
-                                texto_completo += page.extract_text()
-                        datos_extraidos['texto'] = texto_completo
-                        datos_extraidos['metodo'] = 'PyPDF2'
-                    else:
-                        st.error("❌ No hay librerías de PDF instaladas. Instala PyPDF2 o pdfplumber.")
-                except Exception as e:
-                    st.error(f"❌ Error en extracción: {e}")
-                
-                # Analizar texto con función local
-                if 'texto' in datos_extraidos:
-                    datos_estructurados = analizar_texto_pdf(datos_extraidos['texto'])
-                    
-                    # Mostrar texto completo (colapsable)
-                    with st.expander("📄 Ver texto completo extraído"):
-                        st.text_area("Texto completo", datos_extraidos['texto'], height=300, key="texto_completo", disabled=True)
-                    
-                    # Mostrar datos estructurados
-                    st.subheader("📊 Datos Estructurados")
-                    st.info("💡 Estos datos se extrajeron automáticamente usando patrones. Revísalos y corrígelos si es necesario.")
-                    
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        st.write("**Información Básica**")
-                        st.write(f"**Cliente:** {datos_estructurados['cliente'] or '❌ No detectado'}")
-                        st.write(f"**N° Comprobante:** {datos_estructurados['numero_comprobante'] or '❌ No detectado'}")
-                        st.write(f"**Fecha:** {datos_estructurados['fecha'] or '❌ No detectada'}")
-                        st.write(f"**PIN:** {datos_estructurados['pin'] or '❌ No detectado'}")
-                        st.write(f"**Sucursal:** {datos_estructurados['sucursal'] or '❌ No detectada'}")
-                        st.write(f"**Tipo:** {datos_estructurados['tipo_re_se']}")
-                        st.write(f"**Tipo Comprobante:** {datos_estructurados['tipo_comprobante']}")
-                    
-                    with col2:
-                        st.write("**Montos Detectados**")
-                        st.write(f"**Mano de Obra:** {formatear_moneda(datos_estructurados['mano_obra'])}")
-                        st.write(f"**Asistencia:** {formatear_moneda(datos_estructurados['asistencia'])}")
-                        st.write(f"**Repuestos:** {formatear_moneda(datos_estructurados['repuestos'])}")
-                        st.write(f"**Terceros:** {formatear_moneda(datos_estructurados['terceros'])}")
-                        st.write(f"**Descuento:** {formatear_moneda(datos_estructurados['descuento'])}")
-                        
-                        # Calcular total
-                        total_calculado = (datos_estructurados['mano_obra'] + 
-                                         datos_estructurados['asistencia'] + 
-                                         datos_estructurados['repuestos'] + 
-                                         datos_estructurados['terceros'] - 
-                                         datos_estructurados['descuento'])
-                        st.write(f"**Total Calculado:** {formatear_moneda(total_calculado)}")
-                        st.write(f"**Total en PDF:** {formatear_moneda(datos_estructurados['total'])}")
-                        
-                        if abs(total_calculado - datos_estructurados['total']) > 0.01:
-                            st.warning("⚠️ El total calculado no coincide con el total del PDF. Revisa los items.")
-                    
-                    # Mostrar items encontrados
-                    if datos_estructurados.get('items'):
-                        st.subheader("📋 Items Encontrados")
-                        for i, item in enumerate(datos_estructurados['items'], 1):
-                            st.write(f"{i}. **{item.get('descripcion', 'Sin descripción')}** - Código: {item.get('codigo', 'N/A')} - Cantidad: {item.get('cantidad', 0)} - Precio: {formatear_moneda(item.get('precio', 0))} - **Total: {formatear_moneda(item.get('monto', 0))}**")
-                    
-                    # Botón para usar estos datos en el formulario de venta
-                    st.divider()
-                    if st.button("✅ Usar estos datos para crear venta", type="primary"):
-                        # Guardar datos en session_state para usar en el formulario
-                        st.session_state['venta_desde_pdf'] = datos_estructurados
-                        st.session_state['archivo_pdf_venta'] = archivo_pdf
-                        st.success("✅ Datos guardados! Ve a '💰 Registrar Venta' para completar y guardar.")
-                        st.info("💡 Los datos estarán prellenados en el formulario. Revísalos y ajusta lo necesario.")
-        
-        # Limpiar archivo temporal
-        if temp_pdf.exists():
-            try:
-                temp_pdf.unlink()
-            except:
-                pass
+        total_usd_edit = st.number_input(
+            "Total USD",
+            value=float(registro.get("total_usd") or 0),
+            step=0.01,
+            key="gasto_edit_total_usd",
+        )
+        detalles_edit = st.text_area("Detalles", value=registro.get("detalles") or "", key="gasto_edit_detalles")
+
+        col_btn1, col_btn2 = st.columns([3, 1])
+        with col_btn1:
+            actualizar = st.form_submit_button("💾 Actualizar gasto")
+        with col_btn2:
+            eliminar = st.form_submit_button("🗑️ Eliminar", help="Eliminar gasto")
+
+    if actualizar:
+        total_pct = total_usd_edit * pct_postventa_edit
+        gasto_actualizado = {
+            "mes": fecha_edit.strftime("%B"),
+            "fecha": fecha_edit,
+            "sucursal": sucursal_edit,
+            "area": area_edit,
+            "pct_postventa": pct_postventa_edit,
+            "pct_servicios": pct_servicios_edit,
+            "pct_repuestos": pct_repuestos_edit,
+            "tipo": tipo_edit,
+            "clasificacion": clasificacion_edit,
+            "proveedor": proveedor_edit or None,
+            "total_pesos": registro.get("total_pesos"),
+            "total_usd": total_usd_edit,
+            "total_pct": total_pct,
+            "total_pct_se": total_pct * pct_servicios_edit,
+            "total_pct_re": total_pct * pct_repuestos_edit,
+            "detalles": detalles_edit or None,
+        }
+        try:
+            update_gasto(int(selected), gasto_actualizado)
+            st.success("✅ Gasto actualizado.")
+            st.rerun()
+        except Exception as exc:
+            st.error(f"❌ Error al actualizar: {exc}")
+
+    if eliminar:
+        try:
+            delete_gasto(int(selected))
+            st.warning("Gasto eliminado.")
+            st.rerun()
+        except Exception as exc:
+            st.error(f"❌ Error al eliminar: {exc}")
+
+    st.title("📈 Reportes")
+    tab_gastos, tab_ventas = st.tabs(["💸 Gastos", "💰 Ventas"])
+
+    with tab_gastos:
+        render_reports_gastos()
+
+    with tab_ventas:
+        render_reports_ventas()
+
+def render_reports_page():
+    st.title("📈 Reportes")
+    tab_gastos, tab_ventas, tab_operativo = st.tabs(["💸 Gastos", "💰 Ventas", "⚖️ Análisis Operativo"])
+
+    with tab_gastos:
+        render_reports_gastos()
+
+    with tab_ventas:
+        render_reports_ventas()
+
+    with tab_operativo:
+        render_reports_operativo()
+
+
+def render_settings_page():
+    st.title("⚙️ Configuración")
+    st.write("- Acá podés agregar toggles, credenciales o cualquier ajuste global.")
+    st.write("- Es buen lugar para exponer backup / restore si lo necesitás en la nueva versión.")
+
+if NAVIGATION[current_page] == "overview":
+    render_dashboard()
+elif NAVIGATION[current_page] == "sales":
+    render_sales_page()
+elif NAVIGATION[current_page] == "expenses":
+    render_expenses_page()
+elif NAVIGATION[current_page] == "reports":
+    render_reports_page()
+else:
+    render_settings_page()
+
+

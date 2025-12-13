@@ -46,3 +46,10 @@ Thumbs.db
 # Streamlit
 .streamlit/secrets.toml
 
+
+postventa.db
+postventa.db.locked
+backups/
+comprobantes/
+*.png
+

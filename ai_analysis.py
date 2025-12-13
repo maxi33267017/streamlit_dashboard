@@ -44,9 +44,188 @@ try:
 except ImportError:
     PROPHET_AVAILABLE = False
 
-def detect_critical_alerts(df_ventas: pd.DataFrame, df_gastos: pd.DataFrame) -> list:
+
+def _safe_sum_column(df: pd.DataFrame | None, column: str) -> float:
+    """Suma segura para columnas que pueden no existir."""
+    if df is None or column not in df.columns:
+        return 0.0
+    return float(df[column].fillna(0).sum())
+
+
+def _resolve_gastos_context(
+    df_gastos: pd.DataFrame | None,
+    gastos_context: dict | None = None,
+    fecha_inicio: str | None = None,
+    fecha_fin: str | None = None,
+) -> dict:
+    """
+    Devuelve un diccionario con totales de gastos usando, en orden:
+    - El contexto recibido
+    - Los datos del DataFrame proporcionado
+    - Una consulta a la base (fallback)
+    """
+    if gastos_context:
+        return gastos_context
+
+    if df_gastos is not None and len(df_gastos) > 0:
+        total_se = _safe_sum_column(df_gastos, "total_pct_se")
+        total_re = _safe_sum_column(df_gastos, "total_pct_re")
+        total = total_se + total_re
+        if total == 0.0:
+            total = _safe_sum_column(df_gastos, "monto")
+        if total == 0.0:
+            total = _safe_sum_column(df_gastos, "total_pct")
+        return {
+            "gastos_registrados": df_gastos,
+            "gastos_automaticos": None,
+            "gastos_todos": df_gastos,
+            "gastos_postventa_total": float(total),
+            "gastos_se_total": float(total_se),
+            "gastos_re_total": float(total_re),
+        }
+
+    return obtener_gastos_totales_con_automaticos(fecha_inicio, fecha_fin)
+
+
+def _format_usd(value: float) -> str:
+    try:
+        return f"${value:,.2f}"
+    except Exception:
+        return f"${value}"
+
+
+def _build_branch_results(df_ventas: pd.DataFrame, df_gastos: pd.DataFrame) -> list[dict]:
+    def _filter_compartidos(df: pd.DataFrame) -> pd.DataFrame:
+        if "sucursal" not in df.columns:
+            return df
+        return df[~df["sucursal"].fillna("").str.upper().eq("COMPARTIDOS")]
+
+    if len(df_ventas) > 0:
+        ingresos_df = _filter_compartidos(df_ventas)
+        ingresos_sucursal = (
+            ingresos_df.groupby("sucursal")["total"].sum().reset_index().rename(columns={"total": "ingresos"})
+        )
+    else:
+        ingresos_sucursal = pd.DataFrame(columns=["sucursal", "ingresos"])
+
+    if len(df_gastos) > 0:
+        df_costos = _filter_compartidos(df_gastos.copy())
+        if "total_pct" not in df_costos.columns:
+            df_costos["total_pct"] = df_costos["total_pct_se"].fillna(0) + df_costos["total_pct_re"].fillna(0)
+        costos_sucursal = (
+            df_costos.groupby("sucursal")["total_pct"].sum().reset_index().rename(columns={"total_pct": "gastos"})
+        )
+    else:
+        costos_sucursal = pd.DataFrame(columns=["sucursal", "gastos"])
+
+    if not len(ingresos_sucursal) and not len(costos_sucursal):
+        return []
+
+    resultados = (
+        ingresos_sucursal.merge(costos_sucursal, on="sucursal", how="outer")
+        .fillna(0)
+        .assign(resultado=lambda df: df["ingresos"] - df["gastos"])
+    )
+    return (
+        resultados.round({"ingresos": 2, "gastos": 2, "resultado": 2})
+        .to_dict("records")
+        if len(resultados)
+        else []
+    )
+
+
+def _build_fallback_sections(
+    resultados_sucursal: list[dict],
+    share_servicios: float,
+    share_repuestos: float,
+) -> dict:
+    rec_suc = []
+    oportunidades = []
+    riesgos = []
+
+    if resultados_sucursal:
+        ordenados = sorted(resultados_sucursal, key=lambda row: row.get("resultado", 0))
+        worst = ordenados[0]
+        best = ordenados[-1]
+        rec_suc.append(
+            f"{worst.get('sucursal', 'Sucursal')} "
+            f"aporta { _format_usd(worst.get('ingresos', 0)) } frente a gastos de "
+            f"{ _format_usd(worst.get('gastos', 0)) }. Activar acciones comerciales y revisar gastos fijos."
+        )
+        rec_suc.append(
+            f"Replicar las palancas de {best.get('sucursal', 'Sucursal')} "
+            f"(resultado { _format_usd(best.get('resultado', 0)) }) en sucursales más chicas."
+        )
+
+        for row in ordenados:
+            if row.get("resultado", 0) < 0:
+                riesgos.append(
+                    f"{row.get('sucursal', 'Sucursal')} está en déficit de { _format_usd(abs(row.get('resultado', 0))) }."
+                )
+        if not riesgos:
+            riesgos.append(
+                f"{worst.get('sucursal', 'Sucursal')} es la más ajustada (resultado { _format_usd(worst.get('resultado', 0)) })."
+            )
+
+        low_volume = sorted(resultados_sucursal, key=lambda row: row.get("ingresos", 0))
+        for row in low_volume:
+            if row.get("resultado", 0) > 0:
+                oportunidades.append(
+                    f"{row.get('sucursal', 'Sucursal')} tiene margen positivo con bajo volumen "
+                    f"({ _format_usd(row.get('ingresos', 0)) }). Escalar servicios allí generará impacto rápido."
+                )
+                break
+        if not oportunidades:
+            oportunidades.append(
+                f"{best.get('sucursal', 'Sucursal')} lidera el resultado. Profundizar cross-selling para sostener el liderazgo."
+            )
+
+    rec_mix = []
+    if share_servicios >= 0.6:
+        rec_mix.append(
+            "Los servicios explican más del 60% del mix. Impulsar repuestos de mostrador y paquetes de mantenimiento "
+            "para equilibrar el margen."
+        )
+    elif share_repuestos >= 0.6:
+        rec_mix.append(
+            "Los repuestos dominan el mix. Ofrecer bundles con mano de obra para aumentar horas facturables."
+        )
+    else:
+        rec_mix.append("El mix RE/SE está equilibrado. Mantener campañas combinadas para sostener el aporte.")
+
+    return {
+        "recomendaciones_sucursales": rec_suc,
+        "recomendaciones_mix": rec_mix,
+        "oportunidades": oportunidades,
+        "riesgos": riesgos,
+    }
+
+
+def _future_working_mask(
+    last_date: pd.Timestamp | None,
+    horizon: int = 30,
+) -> tuple[np.ndarray, int, list[pd.Timestamp]]:
+    base_date = last_date if last_date is not None and not pd.isna(last_date) else pd.Timestamp.now()
+    future_dates = [base_date + timedelta(days=i) for i in range(1, horizon + 1)]
+    mask = np.array([1.0 if date.weekday() < 6 else 0.0 for date in future_dates], dtype=float)
+    working_days = int(mask.sum())
+    if working_days == 0:
+        mask = np.ones(horizon, dtype=float)
+        working_days = horizon
+    return mask, working_days, future_dates
+
+def detect_critical_alerts(
+    df_ventas: pd.DataFrame,
+    df_gastos: pd.DataFrame,
+    gastos_context: dict | None = None,
+    fecha_inicio: str | None = None,
+    fecha_fin: str | None = None,
+    referencia_corte: pd.Timestamp | None = None,
+) -> list:
     """Detecta alertas críticas que requieren atención inmediata"""
     alertas_criticas = []
+    gastos_totales_ctx = _resolve_gastos_context(df_gastos, gastos_context, fecha_inicio, fecha_fin) or {}
+    gastos_postventa_total = gastos_totales_ctx.get("gastos_postventa_total", 0.0)
     
     if len(df_ventas) == 0:
         return alertas_criticas
@@ -79,8 +258,7 @@ def detect_critical_alerts(df_ventas: pd.DataFrame, df_gastos: pd.DataFrame) -> 
     # 2. Gastos superan ingresos
     if len(df_gastos) > 0:
         total_ingresos = df_ventas['total'].sum()
-        gastos_totales = obtener_gastos_totales_con_automaticos()
-        gastos_postventa = gastos_totales['gastos_postventa_total']
+        gastos_postventa = gastos_postventa_total
         
         if gastos_postventa > total_ingresos:
             diferencia = gastos_postventa - total_ingresos
@@ -95,8 +273,7 @@ def detect_critical_alerts(df_ventas: pd.DataFrame, df_gastos: pd.DataFrame) -> 
     # 3. Margen muy bajo (<5%)
     if len(df_gastos) > 0:
         total_ingresos = df_ventas['total'].sum()
-        gastos_totales = obtener_gastos_totales_con_automaticos()
-        gastos_postventa = gastos_totales['gastos_postventa_total']
+        gastos_postventa = gastos_postventa_total
         
         if total_ingresos > 0:
             margen_pct = ((total_ingresos - gastos_postventa) / total_ingresos) * 100
@@ -111,7 +288,8 @@ def detect_critical_alerts(df_ventas: pd.DataFrame, df_gastos: pd.DataFrame) -> 
     
     # 4. Sin ventas por más de 10 días
     if len(df_ventas) > 0:
-        dias_sin_venta = (pd.Timestamp.now() - df_ventas['fecha'].max()).days
+        referencia = referencia_corte or (pd.to_datetime(fecha_fin) if fecha_fin else pd.Timestamp.now())
+        dias_sin_venta = (referencia - df_ventas['fecha'].max()).days
         if dias_sin_venta > 10:
             alertas_criticas.append({
                 'tipo': 'CRITICA',
@@ -139,51 +317,75 @@ def detect_critical_alerts(df_ventas: pd.DataFrame, df_gastos: pd.DataFrame) -> 
     
     return alertas_criticas
 
-def get_ai_summary(df_ventas: pd.DataFrame, df_gastos: pd.DataFrame, gemini_api_key: str = None) -> dict:
+def get_ai_summary(
+    df_ventas: pd.DataFrame,
+    df_gastos: pd.DataFrame,
+    gemini_api_key: str = None,
+    fecha_inicio: str | None = None,
+    fecha_fin: str | None = None,
+    gastos_context: dict | None = None,
+    productividad_context: dict | None = None,
+) -> dict:
     """
     Genera un resumen inteligente de los datos
     Si se proporciona gemini_api_key, usa IA avanzada. Si no, usa análisis estadístico.
+    fecha_inicio/fin permiten restringir el cálculo a un período específico.
     """
     insights = {
         'tendencias': [],
         'alertas': [],
         'recomendaciones': []
     }
+    gastos_totales_ctx = _resolve_gastos_context(df_gastos, gastos_context, fecha_inicio, fecha_fin) or {}
+    gastos_postventa_total = gastos_totales_ctx.get('gastos_postventa_total', 0.0)
+    referencia_corte = pd.to_datetime(fecha_fin) if fecha_fin else pd.Timestamp.now()
     
+    resultados_sucursal = _build_branch_results(df_ventas, df_gastos)
+    share_servicios = 0.0
+    share_repuestos = 0.0
+    total_mix = 0.0
+
     # Análisis de ventas
     if len(df_ventas) > 0:
         df_ventas['fecha'] = pd.to_datetime(df_ventas['fecha'])
         ventas_mensuales = df_ventas.groupby(df_ventas['fecha'].dt.to_period('M'))['total'].sum()
         
         if len(ventas_mensuales) > 1:
-            # Tendencias
             if ventas_mensuales.iloc[-1] > ventas_mensuales.iloc[-2]:
-                insights['tendencias'].append("📈 Las ventas muestran una tendencia creciente")
+                insights['tendencias'].append("📈 Las ventas muestran una tendencia creciente dentro del período seleccionado.")
             elif ventas_mensuales.iloc[-1] < ventas_mensuales.iloc[-2]:
-                insights['tendencias'].append("📉 Las ventas muestran una tendencia decreciente")
-            
-            # Análisis por tipo
-            servicios = df_ventas[df_ventas['tipo_re_se'] == 'SE']['total'].sum()
-            repuestos = df_ventas[df_ventas['tipo_re_se'] == 'RE']['total'].sum()
-            
-            if servicios > repuestos * 1.5:
-                insights['tendencias'].append("🔧 Los servicios representan la mayor parte de los ingresos")
-            elif repuestos > servicios * 1.5:
-                insights['tendencias'].append("⚙️ Los repuestos representan la mayor parte de los ingresos")
+                insights['tendencias'].append("📉 Las ventas muestran una tendencia decreciente dentro del período seleccionado.")
+        
+        servicios = df_ventas[df_ventas['tipo_re_se'] == 'SE']['total'].sum()
+        repuestos = df_ventas[df_ventas['tipo_re_se'] == 'RE']['total'].sum()
+        total_mix = servicios + repuestos
+        if total_mix > 0:
+            share_serv = servicios / total_mix
+            share_rep = repuestos / total_mix
+            share_servicios = share_serv
+            share_repuestos = share_rep
+            insights['tendencias'].append(
+                f"⚖️ Mix del período: Servicios {share_serv:.1%} vs Repuestos {share_rep:.1%}."
+            )
+            if share_serv >= 0.6:
+                insights['tendencias'].append("🔧 Los servicios explican más del 60% del mix y sostienen la contribución.")
+            elif share_rep >= 0.6:
+                insights['tendencias'].append("⚙️ Los repuestos concentran más del 60% del mix y apalancan la rentabilidad.")
     
     # Análisis de gastos vs ingresos
     if len(df_ventas) > 0 and len(df_gastos) > 0:
         total_ingresos = df_ventas['total'].sum()
-        gastos_totales = obtener_gastos_totales_con_automaticos()
-        gastos_postventa = gastos_totales['gastos_postventa_total']
+        gastos_postventa = gastos_postventa_total
         
         margen = total_ingresos - gastos_postventa
         margen_pct = (margen / total_ingresos * 100) if total_ingresos > 0 else 0
         
-        if margen_pct < 10:
-            insights['alertas'].append(f"⚠️ Margen muy bajo: {margen_pct:.1f}%. Revisar gastos o aumentar ingresos")
-        elif margen_pct > 30:
-            insights['tendencias'].append(f"✅ Excelente margen: {margen_pct:.1f}%")
+        if margen_pct <= 0:
+            insights['alertas'].append("🚨 El período cerró con pérdida operativa luego de gastos postventa.")
+        elif margen_pct < 15:
+            insights['alertas'].append(f"⚠️ Margen ajustado: {margen_pct:.1f}%. Hay poco colchón para absorber desvíos.")
+        else:
+            insights['tendencias'].append(f"✅ Margen saludable del {margen_pct:.1f}% que cubre cómodamente los gastos fijos.")
         
         if gastos_postventa > total_ingresos:
             insights['alertas'].append("🚨 Los gastos superan los ingresos. Revisar urgentemente")
@@ -191,10 +393,83 @@ def get_ai_summary(df_ventas: pd.DataFrame, df_gastos: pd.DataFrame, gemini_api_
     # Recomendaciones
     if len(df_ventas) > 0:
         df_ventas['fecha'] = pd.to_datetime(df_ventas['fecha'])
-        dias_sin_venta = (pd.Timestamp.now() - df_ventas['fecha'].max()).days
+        dias_sin_venta = (referencia_corte - df_ventas['fecha'].max()).days
         if dias_sin_venta > 7:
-            insights['recomendaciones'].append(f"📅 Hace {dias_sin_venta} días que no se registran ventas. Considerar seguimiento activo")
+            insights['recomendaciones'].append(f"📅 Hace {dias_sin_venta} días que no se registran ventas. Considerar seguimiento activo.")
+        else:
+            ticket_promedio = df_ventas['total'].mean()
+            insights['recomendaciones'].append(
+                f"🎯 Ticket promedio del período: ${ticket_promedio:,.2f}. Reforzar upselling para sostenerlo."
+            )
     
+    fallback_sections = _build_fallback_sections(resultados_sucursal, share_servicios, share_repuestos)
+    productividad_data = None
+    if productividad_context:
+        productividad_data = {
+            'ingresos_mo_asistencia': float(productividad_context.get('ingresos_mo_asistencia', 0.0) or 0.0),
+            'horas_vendidas': float(productividad_context.get('horas_vendidas', 0.0) or 0.0),
+            'horas_disponibles': float(productividad_context.get('horas_disponibles', 0.0) or 0.0),
+            'dias_habiles': int(productividad_context.get('dias_habiles', 0) or 0),
+            'tarifa': float(productividad_context.get('tarifa', 0.0) or 0.0),
+            'tecnicos': int(productividad_context.get('tecnicos', 0) or 0),
+            'productividad_pct': float(productividad_context.get('productividad_pct', 0.0) or 0.0),
+        }
+    if productividad_data is None and len(df_ventas) and 'fecha' in df_ventas.columns:
+        try:
+            periodo_inicio = pd.to_datetime(df_ventas['fecha']).min().date()
+            periodo_fin = pd.to_datetime(df_ventas['fecha']).max().date()
+            horas_habiles, dias_habiles = compute_working_hours(periodo_inicio, periodo_fin)
+        except Exception:
+            horas_habiles, dias_habiles = 0.0, 0
+        ventas_se_local = df_ventas[df_ventas['tipo_re_se'] == 'SE'] if len(df_ventas) else pd.DataFrame()
+        mano_obra_total = ventas_se_local['mano_obra'].fillna(0).sum() if len(ventas_se_local) else 0.0
+        asistencia_total = ventas_se_local['asistencia'].fillna(0).sum() if len(ventas_se_local) else 0.0
+        ingresos_mo_asistencia = mano_obra_total + asistencia_total
+        tarifa_hora = 60.0
+        tecnicos_default = 7
+        horas_disponibles = horas_habiles * tecnicos_default if horas_habiles and tecnicos_default else 0.0
+        horas_vendidas = ingresos_mo_asistencia / tarifa_hora if tarifa_hora > 0 else 0.0
+        productividad_pct = (horas_vendidas / horas_disponibles) if horas_disponibles > 0 else 0.0
+        productividad_data = {
+            'ingresos_mo_asistencia': ingresos_mo_asistencia,
+            'horas_vendidas': horas_vendidas,
+            'horas_disponibles': horas_disponibles,
+            'dias_habiles': dias_habiles,
+            'tarifa': tarifa_hora,
+            'tecnicos': tecnicos_default,
+            'productividad_pct': productividad_pct,
+        }
+
+    if productividad_data:
+        horas_disponibles = productividad_data.get('horas_disponibles', 0.0) or 0.0
+        horas_vendidas = productividad_data.get('horas_vendidas', 0.0) or 0.0
+        productividad_pct = (horas_vendidas / horas_disponibles) if horas_disponibles > 0 else productividad_data.get('productividad_pct', 0.0)
+        ocupacion_pct = productividad_pct * 100
+        insights['tendencias'].append(
+            f"🛠️ Productividad del taller: {horas_vendidas:,.1f} h vendidas vs {horas_disponibles:,.1f} h disponibles "
+            f"({ocupacion_pct:.1f}% de ocupación)."
+        )
+        if ocupacion_pct < 50:
+            insights['alertas'].append(
+                f"⚠️ Baja ocupación operativa ({ocupacion_pct:.1f}%). Incrementar horas facturables o ajustar estructura."
+            )
+        if ocupacion_pct < 65:
+            insights['recomendaciones'].append(
+                "📉 Reforzar planificación diaria (turnos, viáticos y tiempos muertos) para elevar la ocupación hacia el 70%."
+            )
+
+    top_clientes_local = []
+    if len(df_ventas) > 0 and {'cliente', 'sucursal'}.issubset(df_ventas.columns):
+        top_clientes_local = (
+            df_ventas.groupby(['cliente', 'sucursal'])['total']
+            .sum()
+            .reset_index()
+            .sort_values('total', ascending=False)
+            .head(10)
+        )
+        top_clientes_local['total'] = top_clientes_local['total'].round(2)
+        top_clientes_local = top_clientes_local.to_dict('records')
+
     # Predicción mejorada
     prediccion = predict_next_month_advanced(df_ventas)
     
@@ -203,9 +478,19 @@ def get_ai_summary(df_ventas: pd.DataFrame, df_gastos: pd.DataFrame, gemini_api_
     
     # Recomendaciones adicionales
     recomendaciones = generate_recommendations(df_ventas, df_gastos)
+    if not insights['recomendaciones'] and recomendaciones:
+        insights['recomendaciones'].extend(recomendaciones[:2])
+        recomendaciones = recomendaciones[2:]
     
     # Detectar alertas críticas
-    alertas_criticas = detect_critical_alerts(df_ventas, df_gastos)
+    alertas_criticas = detect_critical_alerts(
+        df_ventas,
+        df_gastos,
+        gastos_context=gastos_totales_ctx,
+        fecha_inicio=fecha_inicio,
+        fecha_fin=fecha_fin,
+        referencia_corte=referencia_corte,
+    )
     
     # Si hay API key de Gemini, mejorar con IA
     gemini_status = {
@@ -218,6 +503,7 @@ def get_ai_summary(df_ventas: pd.DataFrame, df_gastos: pd.DataFrame, gemini_api_
         'debug_info': None
     }
     
+    extra_sections = {}
     if gemini_api_key and GEMINI_AVAILABLE:
         try:
             # Logging más visible
@@ -225,7 +511,9 @@ def get_ai_summary(df_ventas: pd.DataFrame, df_gastos: pd.DataFrame, gemini_api_
             sys.stderr.write(f"[GEMINI DEBUG] Llamando a get_gemini_insights con API key: {gemini_api_key[:10]}...\n")
             sys.stderr.flush()
             
-            gemini_insights = get_gemini_insights(df_ventas, df_gastos, gemini_api_key)
+            gemini_insights = get_gemini_insights(
+                df_ventas, df_gastos, gemini_api_key, productividad_data
+            )
             
             sys.stderr.write(f"[GEMINI DEBUG] Respuesta recibida. Tendencias: {len(gemini_insights.get('tendencias', []))}, Alertas: {len(gemini_insights.get('alertas', []))}, Recomendaciones: {len(gemini_insights.get('recomendaciones', []))}\n")
             sys.stderr.flush()
@@ -236,6 +524,13 @@ def get_ai_summary(df_ventas: pd.DataFrame, df_gastos: pd.DataFrame, gemini_api_
             recomendaciones_gemini = gemini_insights.get('recomendaciones', [])
             
             # Ya se logueó arriba
+            
+            extra_sections = {
+                'recomendaciones_sucursales': gemini_insights.get('recomendaciones_sucursales', []),
+                'recomendaciones_mix': gemini_insights.get('recomendaciones_mix', []),
+                'oportunidades': gemini_insights.get('oportunidades', []),
+                'riesgos': gemini_insights.get('riesgos', []),
+            }
             
             # Combinar insights de Gemini con los existentes
             # IMPORTANTE: Agregar al final para poder identificarlos después
@@ -253,6 +548,7 @@ def get_ai_summary(df_ventas: pd.DataFrame, df_gastos: pd.DataFrame, gemini_api_
             gemini_status['recomendaciones_agregadas'] = len(recomendaciones_gemini)
             gemini_status['insights_agregados'] = len(tendencias_gemini) + len(alertas_gemini) + len(recomendaciones_gemini)
             gemini_status['debug_info'] = f"Gemini procesó {len(df_ventas)} ventas y {len(df_gastos)} gastos"
+            gemini_status['extra_sections'] = extra_sections
         except Exception as e:
             import traceback
             import sys
@@ -318,6 +614,11 @@ def get_ai_summary(df_ventas: pd.DataFrame, df_gastos: pd.DataFrame, gemini_api_
             import sys
             sys.stderr.write(f"[HISTORIAL] Error al guardar historial: {e}\n")
     
+    gemini_extra = gemini_status.get('extra_sections', {}) if isinstance(gemini_status, dict) else {}
+    extra_sections_result = {}
+    for key in ['recomendaciones_sucursales', 'recomendaciones_mix', 'oportunidades', 'riesgos']:
+        extra_sections_result[key] = gemini_extra.get(key) or fallback_sections.get(key, [])
+
     return {
         'insights': insights,
         'prediccion': prediccion,
@@ -326,7 +627,13 @@ def get_ai_summary(df_ventas: pd.DataFrame, df_gastos: pd.DataFrame, gemini_api_
         'alertas_criticas': alertas_criticas,
         'usando_ia': gemini_api_key is not None and GEMINI_AVAILABLE,
         'gemini_status': gemini_status,
-        'timestamp_analisis': timestamp_analisis
+        'timestamp_analisis': timestamp_analisis,
+        'recomendaciones_sucursales': extra_sections_result.get('recomendaciones_sucursales', []),
+        'recomendaciones_mix': extra_sections_result.get('recomendaciones_mix', []),
+        'oportunidades': extra_sections_result.get('oportunidades', []),
+        'riesgos': extra_sections_result.get('riesgos', []),
+        'top_clientes_detalle': top_clientes_local,
+        'productividad': productividad_data,
     }
 
 def predict_next_month_advanced(df_ventas: pd.DataFrame) -> dict:
@@ -346,6 +653,9 @@ def predict_next_month_advanced(df_ventas: pd.DataFrame) -> dict:
     
     predicciones = []
     metodos_usados = []
+    projection_days = 30
+    last_date = ventas_diarias['fecha'].max()
+    working_mask, working_days, future_dates = _future_working_mask(last_date, projection_days)
     
     # 1. Intentar Prophet (mejor para series temporales con estacionalidad)
     if len(ventas_diarias) >= 30 and PROPHET_AVAILABLE:
@@ -359,11 +669,11 @@ def predict_next_month_advanced(df_ventas: pd.DataFrame) -> dict:
             model_prophet.fit(df_prophet)
             
             # Crear fechas futuras (30 días)
-            future = model_prophet.make_future_dataframe(periods=30)
+            future = model_prophet.make_future_dataframe(periods=projection_days)
             forecast = model_prophet.predict(future)
             
-            # Sumar los últimos 30 días de la predicción
-            prediccion_prophet = forecast.tail(30)['yhat'].sum()
+            forecast_tail = forecast.tail(projection_days)['yhat'].to_numpy()
+            prediccion_prophet = float(np.sum(forecast_tail * working_mask))
             
             predicciones.append(prediccion_prophet)
             metodos_usados.append('Prophet')
@@ -382,9 +692,8 @@ def predict_next_month_advanced(df_ventas: pd.DataFrame) -> dict:
                 model_arima = ARIMA(serie, order=(1, 1, 1))
                 fitted_model = model_arima.fit()
                 
-                # Predecir 30 días
-                forecast_arima = fitted_model.forecast(steps=30)
-                prediccion_arima = float(forecast_arima.sum())
+                forecast_arima = fitted_model.forecast(steps=projection_days)
+                prediccion_arima = float(np.sum(forecast_arima * working_mask))
                 
                 predicciones.append(prediccion_arima)
                 metodos_usados.append('ARIMA')
@@ -393,8 +702,8 @@ def predict_next_month_advanced(df_ventas: pd.DataFrame) -> dict:
                 try:
                     model_arima = ARIMA(serie, order=(1, 0, 0))
                     fitted_model = model_arima.fit()
-                    forecast_arima = fitted_model.forecast(steps=30)
-                    prediccion_arima = float(forecast_arima.sum())
+                    forecast_arima = fitted_model.forecast(steps=projection_days)
+                    prediccion_arima = float(np.sum(forecast_arima * working_mask))
                     predicciones.append(prediccion_arima)
                     metodos_usados.append('ARIMA')
                 except:
@@ -414,9 +723,9 @@ def predict_next_month_advanced(df_ventas: pd.DataFrame) -> dict:
             model.fit(X, y)
             
             ultimo_dia = ventas_diarias['dias_desde_inicio'].max()
-            dias_futuros = np.array([[ultimo_dia + i] for i in range(1, 31)])
+            dias_futuros = np.array([[ultimo_dia + i] for i in range(1, projection_days + 1)])
             predicciones_lr = model.predict(dias_futuros)
-            prediccion_lr = float(np.sum(predicciones_lr))
+            prediccion_lr = float(np.sum(predicciones_lr * working_mask))
             
             predicciones.append(prediccion_lr)
             metodos_usados.append('Regresión Lineal')
@@ -445,12 +754,17 @@ def predict_next_month_advanced(df_ventas: pd.DataFrame) -> dict:
         if len(metodos_usados) > 1:
             metodo_str += f' (Promedio de {len(metodos_usados)} modelos)'
         
+        promedio_diario = float(prediccion_final / projection_days)
+        promedio_diario_habil = float(prediccion_final / working_days) if working_days else promedio_diario
         return {
             'prediccion': float(prediccion_final),
             'confianza': confianza,
-            'promedio_diario': float(prediccion_final / 30),
+            'promedio_diario': promedio_diario,
+            'promedio_diario_habil': promedio_diario_habil,
             'mensaje': f'Basado en {metodo_str}',
             'metodo': metodo_str,
+            'dias_habiles': working_days,
+            'horizonte_dias': projection_days,
             'predicciones_individuales': {metodo: float(pred) for metodo, pred in zip(metodos_usados, predicciones)}
         }
     else:
@@ -485,8 +799,10 @@ def predict_next_month_simple(df_ventas: pd.DataFrame) -> dict:
     dias_activos = (ventas_recientes['fecha'].max() - ventas_recientes['fecha'].min()).days + 1
     promedio_diario = ventas_recientes['total'].sum() / max(dias_activos, 1)
     
-    # Predicción para 30 días
-    prediccion = promedio_diario * 30
+    projection_days = 30
+    last_date = ventas_recientes['fecha'].max()
+    working_mask, working_days, _ = _future_working_mask(last_date, projection_days)
+    prediccion = promedio_diario * working_days
     
     # Calcular confianza basada en variabilidad
     std_dev = ventas_recientes.groupby(ventas_recientes['fecha'].dt.date)['total'].sum().std()
@@ -499,12 +815,17 @@ def predict_next_month_simple(df_ventas: pd.DataFrame) -> dict:
     else:
         confianza = 'Baja'
     
+    promedio_diario_habil = promedio_diario if working_days == projection_days else prediccion / working_days
+    
     return {
         'prediccion': prediccion,
         'confianza': confianza,
         'promedio_diario': promedio_diario,
+        'promedio_diario_habil': promedio_diario_habil,
         'mensaje': f'Basado en el promedio diario de ${promedio_diario:,.2f} USD',
-        'metodo': 'Promedio Simple'
+        'metodo': 'Promedio Simple',
+        'dias_habiles': working_days,
+        'horizonte_dias': projection_days,
     }
 
 def detect_anomalies_advanced(df_ventas: pd.DataFrame, df_gastos: pd.DataFrame) -> list:
@@ -697,10 +1018,23 @@ def test_gemini_connection(api_key: str) -> dict:
             'message': 'Error al conectar con Gemini API'
         }
 
-def get_gemini_insights(df_ventas: pd.DataFrame, df_gastos: pd.DataFrame, api_key: str) -> dict:
+def get_gemini_insights(
+    df_ventas: pd.DataFrame,
+    df_gastos: pd.DataFrame,
+    api_key: str,
+    productividad: dict | None = None,
+) -> dict:
     """Obtiene insights avanzados usando Google Gemini API"""
     if not GEMINI_AVAILABLE:
-        return {'tendencias': [], 'alertas': [], 'recomendaciones': []}
+        return {
+            'tendencias': [],
+            'alertas': [],
+            'recomendaciones': [],
+            'recomendaciones_sucursales': [],
+            'recomendaciones_mix': [],
+            'oportunidades': [],
+            'riesgos': [],
+        }
     
     try:
         # Configurar Gemini
@@ -779,15 +1113,81 @@ def get_gemini_insights(df_ventas: pd.DataFrame, df_gastos: pd.DataFrame, api_ke
             'ventas_por_sucursal': df_ventas.groupby('sucursal')['total'].sum().to_dict() if len(df_ventas) > 0 and 'sucursal' in df_ventas.columns else {},
         }
         
-        if len(df_gastos) > 0:
-            gastos_totales = obtener_gastos_totales_con_automaticos()
-            resumen_datos['gastos_totales'] = float(gastos_totales['gastos_postventa_total'])
+        if len(df_gastos) > 0 and gastos_postventa_total:
+            resumen_datos['gastos_totales'] = float(gastos_postventa_total)
             resumen_datos['margen'] = float(resumen_datos['total_ingresos'] - resumen_datos['gastos_totales'])
+        # Top clientes por sucursal (cliente + sucursal)
+        top_clientes_detalle_records = []
+        if len(df_ventas) > 0 and {'cliente', 'sucursal'}.issubset(df_ventas.columns):
+            top_clientes_detalle = (
+                df_ventas.groupby(['cliente', 'sucursal'])['total']
+                .sum()
+                .reset_index()
+                .sort_values('total', ascending=False)
+                .head(10)
+            )
+            top_clientes_detalle['total'] = top_clientes_detalle['total'].round(2)
+            top_clientes_detalle_records = top_clientes_detalle.to_dict('records')
+        resumen_datos['top_clientes_detalle'] = top_clientes_detalle_records
+
+        # Ventas SE/RE por sucursal (monto y cantidad)
+        ventas_tipo_detalle = []
+        if len(df_ventas) > 0 and 'sucursal' in df_ventas.columns:
+            ventas_tipo_detalle = (
+                df_ventas.groupby(['sucursal', 'tipo_re_se'])['total']
+                .agg(['sum', 'count'])
+                .reset_index()
+                .rename(columns={'sum': 'monto', 'count': 'cantidad'})
+            )
+            ventas_tipo_detalle['monto'] = ventas_tipo_detalle['monto'].round(2)
+            ventas_tipo_detalle = ventas_tipo_detalle.to_dict('records')
+        resumen_datos['ventas_tipo_detalle'] = ventas_tipo_detalle
+
+        # Resultados por sucursal (ingresos vs gastos)
+        resultados_sucursal = []
+        if len(df_ventas) > 0:
+            ingresos_sucursal = (
+                df_ventas.groupby('sucursal')['total'].sum().reset_index().rename(columns={'total': 'ingresos'})
+            )
+        else:
+            ingresos_sucursal = pd.DataFrame(columns=['sucursal', 'ingresos'])
+        if len(df_gastos) > 0:
+            df_costos = df_gastos.copy()
+            if 'total_pct' not in df_costos.columns:
+                df_costos['total_pct'] = df_costos['total_pct_se'].fillna(0) + df_costos['total_pct_re'].fillna(0)
+            costos_sucursal = (
+                df_costos.groupby('sucursal')['total_pct'].sum().reset_index().rename(columns={'total_pct': 'gastos'})
+            )
+        else:
+            costos_sucursal = pd.DataFrame(columns=['sucursal', 'gastos'])
+        if len(ingresos_sucursal) or len(costos_sucursal):
+            resultados_sucursal = (
+                ingresos_sucursal.merge(costos_sucursal, on='sucursal', how='outer')
+                .fillna(0)
+                .assign(resultado=lambda df: df['ingresos'] - df['gastos'])
+                .round({'ingresos': 2, 'gastos': 2, 'resultado': 2})
+                .to_dict('records')
+            )
+        resumen_datos['resultado_sucursal'] = resultados_sucursal
+        if productividad:
+            resumen_datos['productividad'] = productividad
         
         # Crear prompt para Gemini - más específico y estructurado
         margen_pct = (resumen_datos.get('margen', 0) / resumen_datos['total_ingresos'] * 100) if resumen_datos['total_ingresos'] > 0 else 0
         
-        prompt = f"""Eres un analista financiero experto. Analiza estos datos de un negocio de postventa (servicios y repuestos para maquinaria agrícola) y proporciona insights valiosos.
+        productividad_block = ""
+        if productividad:
+            productividad_block = (
+                "\nPRODUCTIVIDAD DEL TALLER:\n"
+                f"- Ingresos MO + asistencia: {_format_usd(productividad.get('ingresos_mo_asistencia', 0.0))}\n"
+                f"- Horas vendidas estimadas: {productividad.get('horas_vendidas', 0.0):,.1f} h\n"
+                f"- Horas disponibles: {productividad.get('horas_disponibles', 0.0):,.1f} h "
+                f"(ocupación {productividad.get('productividad_pct', 0.0)*100:.1f}%)\n"
+                f"- Técnicos activos: {productividad.get('tecnicos', 0)} | Tarifa promedio: "
+                f"{_format_usd(productividad.get('tarifa', 0.0))}/h\n"
+            )
+
+        prompt = f"""Eres un analista financiero experto en postventa (servicios + repuestos). Analiza los datos y responde con hallazgos profundos y accionables.
 
 DATOS FINANCIEROS:
 - Total de ventas registradas: {resumen_datos['total_ventas']}
@@ -796,30 +1196,36 @@ DATOS FINANCIEROS:
 - Ventas de Servicios (SE): {resumen_datos['ventas_se']} registros, ${resumen_datos['ingresos_se']:,.2f} USD
 - Gastos totales: ${resumen_datos.get('gastos_totales', 0):,.2f} USD
 - Margen: ${resumen_datos.get('margen', 0):,.2f} USD ({margen_pct:.1f}%)
-- Top 5 clientes por volumen: {resumen_datos['top_clientes']}
 - Ventas por sucursal: {resumen_datos['ventas_por_sucursal']}
+- Top 10 clientes por sucursal (cliente, sucursal, ventas): {resumen_datos.get('top_clientes_detalle', [])}
+- Ventas RE/SE por sucursal (monto y cantidad): {resumen_datos.get('ventas_tipo_detalle', [])}
+- Resultado operativo por sucursal (ingresos, gastos, resultado): {resumen_datos.get('resultado_sucursal', [])}
+{productividad_block}
 
 INSTRUCCIONES:
-Analiza estos datos y proporciona insights específicos, accionables y diferentes a análisis estadísticos básicos. 
-NO repitas información obvia como "las ventas son X" o "el margen es Y". 
-Enfócate en:
-- Patrones no obvios
-- Oportunidades de mejora específicas
-- Riesgos o alertas que requieren atención
-- Recomendaciones estratégicas concretas
+Analiza patrones sofisticados (mix de negocios, productividad, sucursales fuertes/débiles, concentración de clientes) y responde con acciones concretas. 
+Evalúa la productividad del taller contra una referencia de 65%-70% de ocupación; si está por debajo, explica causas y acciones específicas.
+NO repitas datos triviales, aporta interpretación. Vincula cada insight a sucursales, técnicos o métricas cuando sea posible.
 
-Responde SOLO en formato JSON válido con esta estructura exacta:
+Responde SOLO en JSON válido con esta estructura exacta:
 {{
-    "tendencias": ["tendencia específica 1", "tendencia específica 2"],
-    "alertas": ["alerta importante 1", "alerta importante 2"],
-    "recomendaciones": ["recomendación accionable 1", "recomendación accionable 2"]
+  "tendencias": ["", ""],
+  "alertas": ["", ""],
+  "recomendaciones": ["", ""],
+  "recomendaciones_sucursales": ["", ""],
+  "recomendaciones_mix": ["", ""],
+  "oportunidades": ["", ""],
+  "riesgos": ["", ""]
 }}
 
-IMPORTANTE: 
-- Proporciona al menos 2-3 items en cada categoría si es posible
-- Sé específico y evita generalidades
-- Enfócate en insights que un análisis estadístico simple no revelaría
-- Responde SOLO con el JSON, sin texto adicional antes o después
+Donde:
+- recomendaciones_sucursales: planes concretos para mejorar resultados por sucursal (costos altos, pocas ventas, productividad, etc.).
+- recomendaciones_mix: acciones para equilibrar o potenciar las ventas RE vs SE (ej. impulsar mostrador en sucursal X).
+- oportunidades: iniciativas con upside (cross selling, clientes con potencial, sucursales con capacidad ociosa).
+- riesgos: amenazas detectadas al comparar ingresos vs gastos por sucursal, dependencia de clientes, caídas de margen.
+- Usa máximo 3 ítems por categoría; prioriza lo crítico.
+- Referencia nombres de sucursal y clientes cuando aplique.
+- Responde SOLO con el JSON (sin texto adicional).
 """
         
         # Llamar a Gemini
@@ -851,7 +1257,11 @@ IMPORTANTE:
                 resultado_final = {
                     'tendencias': resultado.get('tendencias', []),
                     'alertas': resultado.get('alertas', []),
-                    'recomendaciones': resultado.get('recomendaciones', [])
+                    'recomendaciones': resultado.get('recomendaciones', []),
+                    'recomendaciones_sucursales': resultado.get('recomendaciones_sucursales', []),
+                    'recomendaciones_mix': resultado.get('recomendaciones_mix', []),
+                    'oportunidades': resultado.get('oportunidades', []),
+                    'riesgos': resultado.get('riesgos', []),
                 }
                 sys.stderr.write(f"[GEMINI] Retornando {len(resultado_final['tendencias'])} tendencias, {len(resultado_final['alertas'])} alertas, {len(resultado_final['recomendaciones'])} recomendaciones\n")
                 sys.stderr.flush()
@@ -875,8 +1285,24 @@ IMPORTANTE:
         import sys
         sys.stderr.write(f"[GEMINI WARNING] Retornando diccionario vacío\n")
         sys.stderr.flush()
-        return {'tendencias': [], 'alertas': [], 'recomendaciones': []}
+        return {
+            'tendencias': [],
+            'alertas': [],
+            'recomendaciones': [],
+            'recomendaciones_sucursales': [],
+            'recomendaciones_mix': [],
+            'oportunidades': [],
+            'riesgos': [],
+        }
         
     except Exception as e:
         print(f"Error al usar Gemini: {e}")
-        return {'tendencias': [], 'alertas': [], 'recomendaciones': []}
+        return {
+            'tendencias': [],
+            'alertas': [],
+            'recomendaciones': [],
+            'recomendaciones_sucursales': [],
+            'recomendaciones_mix': [],
+            'oportunidades': [],
+            'riesgos': [],
+        }
