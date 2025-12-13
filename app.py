@@ -1932,9 +1932,16 @@ def get_month_to_date_overview(reference_date: date | None = None) -> dict:
     total_neto = float(total_bruto) - iibb
 
     gastos_totales = obtener_gastos_totales_con_automaticos(start_str, end_str)
-    gastos_postventa = float(gastos_totales.get("gastos_postventa_total", 0.0) or 0.0)
+    gastos_val = gastos_totales.get("gastos_postventa_total", 0.0)
+    try:
+        if not np.isscalar(gastos_val):
+            gastos_postventa = float(pd.to_numeric(gastos_val, errors="coerce").fillna(0).sum())
+        else:
+            gastos_postventa = float(gastos_val or 0.0)
+    except Exception:
+        gastos_postventa = float(pd.to_numeric(gastos_val, errors="coerce").sum()) if gastos_val is not None else 0.0
 
-    resultado = float(total_neto) - gastos_postventa
+    resultado = float(total_neto) - float(gastos_postventa)
 
     return {
         "bruto": total_bruto,
