@@ -60,6 +60,28 @@ NAVIGATION = {
 }
 
 st.sidebar.title("Menú principal")
+
+# --- Protección simple con clave ---
+APP_PASSWORD = "Patagonia2815$"
+if "is_authed" not in st.session_state:
+    st.session_state.is_authed = False
+
+if not st.session_state.is_authed:
+    with st.sidebar.form("auth_form", clear_on_submit=True):
+        pwd = st.text_input("Clave de acceso", type="password")
+        ok = st.form_submit_button("Ingresar")
+    if ok:
+        if pwd == APP_PASSWORD:
+            st.session_state.is_authed = True
+            st.success("Acceso concedido. Cargando app...")
+            st.experimental_rerun()
+        else:
+            st.error("Clave incorrecta.")
+            st.stop()
+    else:
+        st.info("Ingresa la clave para continuar.")
+        st.stop()
+
 current_page = st.sidebar.radio("Navegación", list(NAVIGATION.keys()))
 from collections.abc import Mapping
 
