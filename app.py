@@ -72,9 +72,13 @@ def _render_env_debug():
     db_hint = ""
     try:
         secret_has_postgres = "postgres" in st.secrets
-        if secret_has_postgres and isinstance(st.secrets["postgres"], dict):
-            secret_postgres_keys = list(st.secrets["postgres"].keys())
-            if "url" in st.secrets["postgres"]:
+        if secret_has_postgres:
+            if isinstance(st.secrets["postgres"], dict):
+                secret_postgres_keys = list(st.secrets["postgres"].keys())
+                if "url" in st.secrets["postgres"]:
+                    url_source = "secrets"
+            else:
+                # Secret es string: también marcar origen secrets
                 url_source = "secrets"
     except Exception:
         secret_has_postgres = False
@@ -117,6 +121,25 @@ def _render_env_debug():
             )
     except Exception:
         st.sidebar.caption("Gastos: error al leer")
+    # Diagnóstico directo a DB: conteos crudos
+    if database.USE_POSTGRES:
+        try:
+            conn = database.get_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM ventas")
+            ventas_raw = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM gastos")
+            gastos_raw = cur.fetchone()[0]
+            cur.execute("SELECT MIN(fecha), MAX(fecha) FROM ventas")
+            fecha_min_max = cur.fetchone()
+            st.sidebar.caption(
+                f"[DB] ventas={ventas_raw} gastos={gastos_raw} "
+                f"rango ventas: {fecha_min_max[0]} -> {fecha_min_max[1]}"
+            )
+            cur.close()
+            conn.close()
+        except Exception as exc:
+            st.sidebar.caption(f"[DB] Error conteos: {exc}")
 
 _render_env_debug()
 
