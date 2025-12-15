@@ -61,7 +61,15 @@ NAVIGATION = {
 
 st.sidebar.title("Menú principal")
 current_page = st.sidebar.radio("Navegación", list(NAVIGATION.keys()))
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY")
+def _get_gemini_api_key() -> str | None:
+    """Obtiene la API key de Gemini desde env o secrets en tiempo de ejecución."""
+    try:
+        return os.environ.get("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY")
+    except Exception:
+        return os.environ.get("GEMINI_API_KEY")
+
+# Se evalúa al inicio para compatibilidad, pero las vistas vuelven a consultar con _get_gemini_api_key
+GEMINI_API_KEY = _get_gemini_api_key()
 
 # Indicadores de entorno / DB para debug en Cloud
 def _render_env_debug():
@@ -106,6 +114,12 @@ def _render_env_debug():
         st.sidebar.caption(f"Claves en postgres: {', '.join(secret_postgres_keys)}")
     if database.USE_POSTGRES and host_hint:
         st.sidebar.caption(f"Origen: {url_source} | Host: {host_hint} | DB: {db_hint}")
+    # Mostrar pista de si se detectó clave de Gemini (sin exponerla)
+    gem_key = _get_gemini_api_key()
+    if gem_key:
+        st.sidebar.caption(f"GEMINI_API_KEY: cargada (...{gem_key[-4:]})")
+    else:
+        st.sidebar.caption("GEMINI_API_KEY: no detectada")
 
     # Contadores rápidos (vía pandas)
     try:
@@ -1242,7 +1256,8 @@ def render_reports_operativo():
     )
 
     st.subheader("📊 Análisis operativo integral")
-    if not GEMINI_API_KEY:
+    gemini_api_key = _get_gemini_api_key()
+    if not gemini_api_key:
         st.info("Configura la variable de entorno GEMINI_API_KEY para habilitar el análisis automático.")
     else:
         col_ai_btn, col_ai_help = st.columns([1, 3])
@@ -1260,7 +1275,7 @@ def render_reports_operativo():
                 ai_payload = get_ai_summary(
                     df_ventas=df_ventas.copy(),
                     df_gastos=df_gastos_todos.copy(),
-                    gemini_api_key=GEMINI_API_KEY,
+                    gemini_api_key=gemini_api_key,
                     fecha_inicio=str(fecha_inicio),
                     fecha_fin=str(fecha_fin),
                     gastos_context=gastos_totales,
