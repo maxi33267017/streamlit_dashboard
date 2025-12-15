@@ -74,7 +74,7 @@ if not st.session_state.is_authed:
         if pwd == APP_PASSWORD:
             st.session_state.is_authed = True
             st.success("Acceso concedido. Cargando app...")
-            st.experimental_rerun()
+            st.rerun()
         else:
             st.error("Clave incorrecta.")
             st.stop()
