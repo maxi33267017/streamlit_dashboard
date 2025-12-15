@@ -62,11 +62,38 @@ NAVIGATION = {
 st.sidebar.title("Menú principal")
 current_page = st.sidebar.radio("Navegación", list(NAVIGATION.keys()))
 def _get_gemini_api_key() -> str | None:
-    """Obtiene la API key de Gemini desde env o secrets en tiempo de ejecución."""
+    """
+    Obtiene la API key de Gemini desde:
+    1) variable de entorno GEMINI_API_KEY
+    2) secrets nivel raíz: GEMINI_API_KEY
+    3) sección de secrets: [gemini], [Gemini], [GEMINI] (clave GEMINI_API_KEY o valor string)
+    """
+    # Env tiene prioridad
+    env_val = os.environ.get("GEMINI_API_KEY")
+    if env_val:
+        return env_val
+
     try:
-        return os.environ.get("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY")
+        # Top-level en secrets
+        root_val = st.secrets.get("GEMINI_API_KEY")
+        if root_val:
+            return root_val
+
+        # Secciones comunes
+        for section_key in ["gemini", "Gemini", "GEMINI"]:
+            section = st.secrets.get(section_key)
+            if not section:
+                continue
+            if isinstance(section, dict) and section.get("GEMINI_API_KEY"):
+                return section.get("GEMINI_API_KEY")
+            if isinstance(section, str):
+                # Si guardaron la key como string directamente en la sección
+                return section
     except Exception:
-        return os.environ.get("GEMINI_API_KEY")
+        # Si st.secrets no está disponible (modo local sin secrets)
+        pass
+
+    return None
 
 # Se evalúa al inicio para compatibilidad, pero las vistas vuelven a consultar con _get_gemini_api_key
 GEMINI_API_KEY = _get_gemini_api_key()
