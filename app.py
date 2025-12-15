@@ -146,10 +146,19 @@ def _render_env_debug():
                 f"[DB] ventas={ventas_raw} gastos={gastos_raw} "
                 f"rango ventas: {fecha_min} -> {fecha_max}"
             )
-            cur.close()
-            conn.close()
         except Exception as exc:
             st.sidebar.caption(f"[DB] Error conteos: {type(exc).__name__}: {exc}")
+        finally:
+            try:
+                if cur:
+                    cur.close()
+            except Exception:
+                pass
+            try:
+                if conn:
+                    conn.close()
+            except Exception:
+                pass
 
 _render_env_debug()
 
