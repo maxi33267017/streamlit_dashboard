@@ -264,6 +264,11 @@ def _execute(cursor, query: str, params=None):
 
 def _read_sql(query: str, conn, params=None):
     query = _prepare_query(query)
+    if USE_POSTGRES:
+        # pandas no funciona bien con conexiones que usan RealDictCursor,
+        # así que abrimos una conexión simple solo para lecturas con pandas
+        with psycopg2.connect(POSTGRES_URL) as tmp_conn:
+            return pd.read_sql_query(query, tmp_conn, params=_convert_params(params))
     return pd.read_sql_query(query, conn, params=_convert_params(params))
 
 
