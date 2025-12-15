@@ -61,6 +61,9 @@ NAVIGATION = {
 
 st.sidebar.title("Menú principal")
 current_page = st.sidebar.radio("Navegación", list(NAVIGATION.keys()))
+from collections.abc import Mapping
+
+
 def _get_gemini_api_key() -> str | None:
     """
     Obtiene la API key de Gemini desde:
@@ -84,10 +87,15 @@ def _get_gemini_api_key() -> str | None:
             section = st.secrets.get(section_key)
             if not section:
                 continue
-            if isinstance(section, dict) and section.get("GEMINI_API_KEY"):
-                return section.get("GEMINI_API_KEY")
+            # Mapping (no solo dict) para cubrir ConfigSection
+            if isinstance(section, Mapping):
+                if section.get("GEMINI_API_KEY"):
+                    return section.get("GEMINI_API_KEY")
+                # fallback: probar claves en minúscula
+                if section.get("gemini_api_key"):
+                    return section.get("gemini_api_key")
+            # Si guardaron la sección como string directamente
             if isinstance(section, str):
-                # Si guardaron la key como string directamente en la sección
                 return section
     except Exception:
         # Si st.secrets no está disponible (modo local sin secrets)
@@ -152,10 +160,21 @@ def _render_env_debug():
         pass
     # Mostrar pista de si se detectó clave de Gemini (sin exponerla)
     gem_key = _get_gemini_api_key()
+    env_flag = bool(os.environ.get("GEMINI_API_KEY"))
     if gem_key:
         st.sidebar.caption(f"GEMINI_API_KEY: cargada (...{gem_key[-4:]})")
     else:
-        st.sidebar.caption("GEMINI_API_KEY: no detectada")
+        st.sidebar.caption(f"GEMINI_API_KEY: no detectada (env={env_flag})")
+    # Si existe sección Gemini, mostrar claves dentro (sin valores)
+    try:
+        for section_key in ["gemini", "Gemini", "GEMINI"]:
+            section = st.secrets.get(section_key)
+            if section and isinstance(section, Mapping):
+                st.sidebar.caption(
+                    f"Sección {section_key} keys: {', '.join(list(section.keys())[:6])}"
+                )
+    except Exception:
+        pass
 
     # Contadores rápidos (vía pandas)
     try:
