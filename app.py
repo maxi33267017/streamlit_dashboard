@@ -1,13 +1,13 @@
 """Streamlit Postventa - rewrite branch skeleton"""
 import os
 import tempfile
-from urllib.parse import urlparse
 
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
+from urllib.parse import urlparse
 plt.switch_backend("Agg")
 
 JD_BRAND_COLORS = {
@@ -70,6 +70,8 @@ def _render_env_debug():
     url_source = "sqlite"
     host_hint = ""
     db_hint = ""
+
+    # Detect secrets
     try:
         secret_has_postgres = "postgres" in st.secrets
         if secret_has_postgres:
@@ -78,15 +80,17 @@ def _render_env_debug():
                 if "url" in st.secrets["postgres"]:
                     url_source = "secrets"
             else:
-                # Secret es string: también marcar origen secrets
+                # Secret como string
                 url_source = "secrets"
     except Exception:
         secret_has_postgres = False
         secret_postgres_keys = []
-    # Si hay env var de DB, tienen prioridad: reportarlo
+
+    # Env vars tienen prioridad en database.POSTGRES_URL
     if os.environ.get("POSTGRES_URL") or os.environ.get("DATABASE_URL"):
         url_source = "env"
-    # Mostrar pista de host/base de datos (sin credenciales)
+
+    # Mostrar pista de host/base
     try:
         if database.POSTGRES_URL:
             parsed = urlparse(database.POSTGRES_URL)
@@ -102,39 +106,45 @@ def _render_env_debug():
         st.sidebar.caption(f"Claves en postgres: {', '.join(secret_postgres_keys)}")
     if database.USE_POSTGRES and host_hint:
         st.sidebar.caption(f"Origen: {url_source} | Host: {host_hint} | DB: {db_hint}")
-    # Contadores rápidos para verificar lectura de datos
+
+    # Contadores rápidos (vía pandas)
     try:
         df_v = get_ventas()
         st.sidebar.caption(f"Ventas: {len(df_v)}")
         if len(df_v):
-            st.sidebar.caption(
-                f"Rango ventas: {df_v['fecha'].min()} -> {df_v['fecha'].max()}"
-            )
+            st.sidebar.caption(f"Rango ventas: {df_v['fecha'].min()} -> {df_v['fecha'].max()}")
     except Exception:
         st.sidebar.caption("Ventas: error al leer")
     try:
         df_g = get_gastos()
         st.sidebar.caption(f"Gastos: {len(df_g)}")
         if len(df_g):
-            st.sidebar.caption(
-                f"Rango gastos: {df_g['fecha'].min()} -> {df_g['fecha'].max()}"
-            )
+            st.sidebar.caption(f"Rango gastos: {df_g['fecha'].min()} -> {df_g['fecha'].max()}")
     except Exception:
         st.sidebar.caption("Gastos: error al leer")
-    # Diagnóstico directo a DB: conteos crudos
+
+    # Conteos crudos directo a DB para aislar problemas
     if database.USE_POSTGRES:
         try:
             conn = database.get_connection()
             cur = conn.cursor()
-            cur.execute("SELECT COUNT(*) FROM ventas")
-            ventas_raw = cur.fetchone()[0]
-            cur.execute("SELECT COUNT(*) FROM gastos")
-            gastos_raw = cur.fetchone()[0]
-            cur.execute("SELECT MIN(fecha), MAX(fecha) FROM ventas")
-            fecha_min_max = cur.fetchone()
+
+            cur.execute("SELECT COUNT(*) AS c FROM ventas")
+            row = cur.fetchone()
+            ventas_raw = row["c"] if isinstance(row, dict) else row[0]
+
+            cur.execute("SELECT COUNT(*) AS c FROM gastos")
+            row = cur.fetchone()
+            gastos_raw = row["c"] if isinstance(row, dict) else row[0]
+
+            cur.execute("SELECT MIN(fecha) AS minf, MAX(fecha) AS maxf FROM ventas")
+            row = cur.fetchone()
+            fecha_min = row["minf"] if isinstance(row, dict) else row[0]
+            fecha_max = row["maxf"] if isinstance(row, dict) else row[1]
+
             st.sidebar.caption(
                 f"[DB] ventas={ventas_raw} gastos={gastos_raw} "
-                f"rango ventas: {fecha_min_max[0]} -> {fecha_min_max[1]}"
+                f"rango ventas: {fecha_min} -> {fecha_max}"
             )
             cur.close()
             conn.close()
@@ -2634,5 +2644,4 @@ elif NAVIGATION[current_page] == "reports":
     render_reports_page()
 else:
     render_settings_page()
-
 
