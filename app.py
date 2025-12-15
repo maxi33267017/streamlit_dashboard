@@ -1516,6 +1516,127 @@ def render_reports_ventas():
     col_top2.metric("Ventas repuestos (RE)", format_currency(total_re))
     col_top3.metric("Ventas servicios (SE)", format_currency(total_se))
 
+    # -------------------------
+    # Cuadro sucursales clave
+    # -------------------------
+    sucursales_objetivo = ["RIO GRANDE", "RIO GALLEGOS", "COMODORO"]
+    df_sucursales = df_ventas.copy()
+    if "sucursal" in df_sucursales.columns:
+        df_sucursales["sucursal_norm"] = (
+            df_sucursales["sucursal"].astype(str).str.upper().str.strip()
+        )
+        df_sucursales = df_sucursales[
+            df_sucursales["sucursal_norm"].isin(sucursales_objetivo)
+        ].copy()
+    else:
+        df_sucursales = pd.DataFrame()
+
+    if not df_sucursales.empty:
+        st.divider()
+        st.subheader(
+            "Detalle por sucursal: Río Grande, Río Gallegos y Comodoro",
+            anchor="detalle_sucursales_clave",
+        )
+
+        # Repuestos por mostrador (RE)
+        ventas_re_suc = df_sucursales[df_sucursales["tipo_re_se"] == "RE"].copy()
+        if (
+            "repuestos" in ventas_re_suc.columns
+            and ventas_re_suc["repuestos"].notna().any()
+        ):
+            ventas_re_suc["repuestos_mostrador"] = ventas_re_suc["repuestos"].fillna(
+                ventas_re_suc["total"]
+            )
+        else:
+            ventas_re_suc["repuestos_mostrador"] = ventas_re_suc["total"]
+
+        rep_mostrador = (
+            ventas_re_suc.groupby("sucursal_norm")["repuestos_mostrador"]
+            .sum()
+            .reset_index(name="Repuestos mostrador")
+        )
+
+        # Repuestos por servicios (SE)
+        ventas_se_suc = df_sucursales[df_sucursales["tipo_re_se"] == "SE"].copy()
+        if "repuestos" in ventas_se_suc.columns:
+            rep_servicios = (
+                ventas_se_suc.groupby("sucursal_norm")["repuestos"]
+                .sum()
+                .reset_index(name="Repuestos servicios")
+            )
+        else:
+            rep_servicios = pd.DataFrame(
+                {"sucursal_norm": [], "Repuestos servicios": []}
+            )
+
+        # Mano de obra, asistencia, terceros y total de ventas
+        resumen_base = (
+            df_sucursales.groupby("sucursal_norm")
+            .agg(
+                mano_obra=("mano_obra", "sum"),
+                asistencia=("asistencia", "sum"),
+                terceros=("terceros", "sum"),
+                total_ventas_suc=("total", "sum"),
+            )
+            .reset_index()
+        )
+
+        resumen = (
+            resumen_base.merge(rep_mostrador, on="sucursal_norm", how="left")
+            .merge(rep_servicios, on="sucursal_norm", how="left")
+            .fillna(0)
+        )
+
+        resumen["Total repuestos"] = (
+            resumen["Repuestos mostrador"] + resumen["Repuestos servicios"]
+        )
+        resumen["Total ventas"] = resumen["total_ventas_suc"]
+        resumen["Suma de los dos totales"] = (
+            resumen["Total repuestos"] + resumen["Total ventas"]
+        )
+
+        # Fila total general
+        total_row = {
+            "sucursal_norm": "TOTAL GENERAL",
+            "mano_obra": resumen["mano_obra"].sum(),
+            "asistencia": resumen["asistencia"].sum(),
+            "terceros": resumen["terceros"].sum(),
+            "total_ventas_suc": resumen["total_ventas_suc"].sum(),
+            "Repuestos mostrador": resumen["Repuestos mostrador"].sum(),
+            "Repuestos servicios": resumen["Repuestos servicios"].sum(),
+            "Total repuestos": resumen["Total repuestos"].sum(),
+            "Total ventas": resumen["Total ventas"].sum(),
+            "Suma de los dos totales": resumen["Suma de los dos totales"].sum(),
+        }
+        resumen = pd.concat([resumen, pd.DataFrame([total_row])], ignore_index=True)
+
+        # Renombrar columna sucursal para mostrarla amigable
+        resumen = resumen.rename(columns={"sucursal_norm": "Sucursal"})
+
+        # Orden y formato de columnas
+        columnas_orden = [
+            "Sucursal",
+            "Repuestos mostrador",
+            "Repuestos servicios",
+            "Total repuestos",
+            "mano_obra",
+            "asistencia",
+            "terceros",
+            "Total ventas",
+            "Suma de los dos totales",
+        ]
+        resumen = resumen[columnas_orden]
+
+        # Formateo a moneda
+        cols_monetarias = [
+            c for c in columnas_orden if c != "Sucursal"
+        ]
+        resumen_mostrar = resumen.copy()
+        for col in cols_monetarias:
+            resumen_mostrar[col] = resumen_mostrar[col].apply(format_currency)
+
+        st.dataframe(resumen_mostrar, use_container_width=True)
+
     st.divider()
     st.subheader("Ventas totales por sucursal")
     ventas_sucursal = df_ventas.groupby("sucursal")["total"].sum().reset_index(name="Monto USD")
