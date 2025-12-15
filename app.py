@@ -114,6 +114,15 @@ def _render_env_debug():
         st.sidebar.caption(f"Claves en postgres: {', '.join(secret_postgres_keys)}")
     if database.USE_POSTGRES and host_hint:
         st.sidebar.caption(f"Origen: {url_source} | Host: {host_hint} | DB: {db_hint}")
+    # Claves disponibles en secrets (solo nombres, sin valores)
+    try:
+        secrets_keys = list(st.secrets.keys())
+        if secrets_keys:
+            st.sidebar.caption(
+                "Secrets keys: " + ", ".join([str(k) for k in secrets_keys][:6])
+            )
+    except Exception:
+        pass
     # Mostrar pista de si se detectó clave de Gemini (sin exponerla)
     gem_key = _get_gemini_api_key()
     if gem_key:
