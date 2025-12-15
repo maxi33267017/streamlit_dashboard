@@ -139,7 +139,7 @@ def _render_env_debug():
             cur.close()
             conn.close()
         except Exception as exc:
-            st.sidebar.caption(f"[DB] Error conteos: {exc}")
+            st.sidebar.caption(f"[DB] Error conteos: {type(exc).__name__}: {exc}")
 
 _render_env_debug()
 
