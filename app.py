@@ -2313,7 +2313,7 @@ def render_dashboard():
     st.divider()
     st.subheader("🎯 Objetivo de Ventas de Repuestos - FY26")
 
-    OBJETIVO_REPUESTOS_FY26 = 1_300_000.0
+    OBJETIVO_REPUESTOS_FY26 = 1_360_000.0
     fecha_inicio_fy26 = date(2025, 11, 1)
     fecha_fin_actual = date.today()
 
