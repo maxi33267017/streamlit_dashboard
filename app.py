@@ -1,6 +1,7 @@
 """Streamlit Postventa - rewrite branch skeleton"""
 import os
 import tempfile
+from urllib.parse import urlparse
 
 import pandas as pd
 import plotly.express as px
@@ -66,24 +67,54 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_
 def _render_env_debug():
     secret_has_postgres = False
     secret_postgres_keys: list[str] = []
+    url_source = "sqlite"
+    host_hint = ""
+    db_hint = ""
     try:
         secret_has_postgres = "postgres" in st.secrets
         if secret_has_postgres and isinstance(st.secrets["postgres"], dict):
             secret_postgres_keys = list(st.secrets["postgres"].keys())
+            if "url" in st.secrets["postgres"]:
+                url_source = "secrets"
     except Exception:
         secret_has_postgres = False
         secret_postgres_keys = []
+    # Si hay env var de DB, tienen prioridad: reportarlo
+    if os.environ.get("POSTGRES_URL") or os.environ.get("DATABASE_URL"):
+        url_source = "env"
+    # Mostrar pista de host/base de datos (sin credenciales)
+    try:
+        if database.POSTGRES_URL:
+            parsed = urlparse(database.POSTGRES_URL)
+            host_hint = parsed.hostname or ""
+            db_hint = (parsed.path or "").lstrip("/")
+    except Exception:
+        host_hint = ""
+        db_hint = ""
+
     st.sidebar.info("DB: Postgres" if database.USE_POSTGRES else "DB: SQLite")
     st.sidebar.caption(f"Secret [postgres] presente: {secret_has_postgres}")
     if secret_postgres_keys:
         st.sidebar.caption(f"Claves en postgres: {', '.join(secret_postgres_keys)}")
+    if database.USE_POSTGRES and host_hint:
+        st.sidebar.caption(f"Origen: {url_source} | Host: {host_hint} | DB: {db_hint}")
     # Contadores rápidos para verificar lectura de datos
     try:
-        st.sidebar.caption(f"Ventas: {len(get_ventas())}")
+        df_v = get_ventas()
+        st.sidebar.caption(f"Ventas: {len(df_v)}")
+        if len(df_v):
+            st.sidebar.caption(
+                f"Rango ventas: {df_v['fecha'].min()} -> {df_v['fecha'].max()}"
+            )
     except Exception:
         st.sidebar.caption("Ventas: error al leer")
     try:
-        st.sidebar.caption(f"Gastos: {len(get_gastos())}")
+        df_g = get_gastos()
+        st.sidebar.caption(f"Gastos: {len(df_g)}")
+        if len(df_g):
+            st.sidebar.caption(
+                f"Rango gastos: {df_g['fecha'].min()} -> {df_g['fecha'].max()}"
+            )
     except Exception:
         st.sidebar.caption("Gastos: error al leer")
 
