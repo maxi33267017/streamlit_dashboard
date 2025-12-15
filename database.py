@@ -267,6 +267,37 @@ def _read_sql(query: str, conn, params=None):
     return pd.read_sql_query(query, conn, params=_convert_params(params))
 
 
+def _sanitize_dataframe(df: pd.DataFrame, numeric_cols: list[str]) -> pd.DataFrame:
+    """
+    Limpia un DataFrame convertido desde la base de datos:
+    - Convierte columnas numéricas a float manejando strings o valores inválidos
+    - Convierte la columna fecha a datetime.date (si existe)
+    - Elimina filas donde todas las columnas numéricas quedan como NaN (p. ej. cabeceras mal importadas)
+    """
+    if df is None or len(df) == 0:
+        return df
+
+    df = df.copy()
+
+    # Normalizar fechas para evitar comparaciones lexicográficas inesperadas
+    if "fecha" in df.columns:
+        df["fecha"] = pd.to_datetime(df["fecha"], errors="coerce").dt.date
+        df = df.dropna(subset=["fecha"])
+
+    # Coerción robusta de numéricos
+    coerced_cols = []
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+            coerced_cols.append(col)
+
+    # Si todas las columnas numéricas de una fila son NaN, descartarla (suele indicar filas con títulos)
+    if coerced_cols:
+        df = df.dropna(subset=coerced_cols, how="all")
+
+    return df
+
+
 def _fetch_scalar(cursor, default=0):
     row = cursor.fetchone()
     if row is None:
@@ -331,6 +362,11 @@ def get_ventas(fecha_inicio=None, fecha_fin=None):
     query += " ORDER BY fecha DESC, id DESC"
     
     df = _read_sql(query, conn, params)
+    if len(df):
+        df = _sanitize_dataframe(
+            df,
+            ["mano_obra", "asistencia", "repuestos", "terceros", "descuento", "total"],
+        )
     conn.close()
     
     return df
@@ -476,6 +512,20 @@ def get_gastos(fecha_inicio=None, fecha_fin=None):
     query += " ORDER BY fecha DESC, id DESC"
     
     df = _read_sql(query, conn, params)
+    if len(df):
+        df = _sanitize_dataframe(
+            df,
+            [
+                "total_pesos",
+                "total_usd",
+                "total_pct",
+                "total_pct_se",
+                "total_pct_re",
+                "pct_postventa",
+                "pct_servicios",
+                "pct_repuestos",
+            ],
+        )
     conn.close()
     
     return df
