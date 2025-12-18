@@ -1569,14 +1569,13 @@ def render_reports_ventas():
                 {"sucursal_norm": [], "Repuestos servicios": []}
             )
 
-        # Mano de obra, asistencia, terceros y total de ventas
+        # Mano de obra, asistencia, terceros
         resumen_base = (
             df_sucursales.groupby("sucursal_norm")
             .agg(
                 mano_obra=("mano_obra", "sum"),
                 asistencia=("asistencia", "sum"),
                 terceros=("terceros", "sum"),
-                total_ventas_suc=("total", "sum"),
             )
             .reset_index()
         )
@@ -1590,9 +1589,11 @@ def render_reports_ventas():
         resumen["Total repuestos"] = (
             resumen["Repuestos mostrador"] + resumen["Repuestos servicios"]
         )
-        resumen["Total ventas"] = resumen["total_ventas_suc"]
+        resumen["Total servicios"] = (
+            resumen["mano_obra"] + resumen["asistencia"] + resumen["terceros"]
+        )
         resumen["Suma de los dos totales"] = (
-            resumen["Total repuestos"] + resumen["Total ventas"]
+            resumen["Total repuestos"] + resumen["Total servicios"]
         )
 
         # Fila total general
@@ -1601,11 +1602,10 @@ def render_reports_ventas():
             "mano_obra": resumen["mano_obra"].sum(),
             "asistencia": resumen["asistencia"].sum(),
             "terceros": resumen["terceros"].sum(),
-            "total_ventas_suc": resumen["total_ventas_suc"].sum(),
             "Repuestos mostrador": resumen["Repuestos mostrador"].sum(),
             "Repuestos servicios": resumen["Repuestos servicios"].sum(),
             "Total repuestos": resumen["Total repuestos"].sum(),
-            "Total ventas": resumen["Total ventas"].sum(),
+            "Total servicios": resumen["Total servicios"].sum(),
             "Suma de los dos totales": resumen["Suma de los dos totales"].sum(),
         }
         resumen = pd.concat([resumen, pd.DataFrame([total_row])], ignore_index=True)
@@ -1622,7 +1622,7 @@ def render_reports_ventas():
             "mano_obra",
             "asistencia",
             "terceros",
-            "Total ventas",
+            "Total servicios",
             "Suma de los dos totales",
         ]
         resumen = resumen[columnas_orden]
