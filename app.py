@@ -30,6 +30,7 @@ from database import (
     get_venta_by_id,
     get_ventas,
     init_database,
+    inferir_campo_taller_existentes,
     insert_gasto,
     insert_venta,
     update_gasto,
@@ -909,7 +910,6 @@ def render_reports_operativo():
         
         # Inferir campo_taller si no existe
         if "campo_taller" not in ventas_se_campo_taller.columns or ventas_se_campo_taller["campo_taller"].isna().all():
-            from database import inferir_campo_taller_existentes
             inferir_campo_taller_existentes()
             df_ventas = get_ventas(str(fecha_inicio), str(fecha_fin))
             ventas_se_campo_taller = df_ventas[df_ventas["tipo_re_se"] == "SE"].copy()
@@ -1729,7 +1729,6 @@ def render_reports_ventas():
     if len(ventas_se_campo_taller) > 0:
         # Inferir campo_taller si no existe
         if "campo_taller" not in ventas_se_campo_taller.columns or ventas_se_campo_taller["campo_taller"].isna().all():
-            from database import inferir_campo_taller_existentes
             inferir_campo_taller_existentes()
             df_ventas = get_ventas(str(fecha_inicio), str(fecha_fin))
             ventas_se_campo_taller = df_ventas[df_ventas["tipo_re_se"] == "SE"].copy()
@@ -2579,6 +2578,18 @@ def render_sales_page():
     sucursales_default = ["COMODORO", "RIO GRANDE", "RIO GALLEGOS", "COMPARTIDOS"]
     tipos_trabajo = ["EXTERNO", "INTERNO"]
 
+    # Selector de tipo fuera del form para que se actualice dinámicamente
+    if "tipo_re_se_selector" not in st.session_state:
+        st.session_state.tipo_re_se_selector = "RE"
+    
+    tipo_re_se_selector = st.selectbox(
+        "Tipo de venta (RE o SE)", 
+        ["RE", "SE"], 
+        index=0 if st.session_state.tipo_re_se_selector == "RE" else 1,
+        key="tipo_re_se_selector"
+    )
+    st.session_state.tipo_re_se_selector = tipo_re_se_selector
+    
     with st.form("form_crear_venta"):
         col_a, col_b = st.columns(2)
         with col_a:
@@ -2593,10 +2604,16 @@ def render_sales_page():
         with col_b:
             pin = st.text_input("PIN / Identificador", value="")
             n_comprobante = st.text_input("N° de comprobante")
-            tipo_re_se = st.selectbox("Tipo (RE o SE)", ["RE", "SE"], key="tipo_re_se_form")
+            # Mostrar el tipo seleccionado (solo para referencia visual en el form)
+            st.text_input("Tipo", value=tipo_re_se_selector, disabled=True, key="tipo_display")
+            
             campo_taller = None
-            if tipo_re_se == "SE":
-                campo_taller = st.selectbox("Campo / Taller", ["Campo", "Taller"], key="campo_taller_form")
+            if tipo_re_se_selector == "SE":
+                campo_taller = st.selectbox(
+                    "Campo / Taller", 
+                    ["Campo", "Taller"], 
+                    key="campo_taller_form"
+                )
             detalles = st.text_area("Detalles", height=90)
 
         st.markdown("**Componentes económicos (USD)**")
@@ -2646,7 +2663,7 @@ def render_sales_page():
                     "tipo_comprobante": tipo_comprobante,
                     "trabajo": trabajo,
                     "n_comprobante": n_comprobante or None,
-                    "tipo_re_se": tipo_re_se,
+                    "tipo_re_se": tipo_re_se_selector,
                     "mano_obra": mano_obra,
                     "asistencia": asistencia,
                     "repuestos": repuestos,
@@ -2655,7 +2672,7 @@ def render_sales_page():
                     "total": total,
                     "detalles": detalles or None,
                     "archivo_comprobante": None,
-                    "campo_taller": campo_taller if tipo_re_se == "SE" else None,
+                    "campo_taller": campo_taller if tipo_re_se_selector == "SE" else None,
                 }
                 try:
                     insert_venta(venta_data)
