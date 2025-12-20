@@ -2602,10 +2602,10 @@ def render_sales_page():
             )
             trabajo = st.selectbox("Trabajo", tipos_trabajo)
         with col_b:
-            pin = st.text_input("PIN / Identificador", value="")
+            pin = ""
+            if tipo_re_se_selector == "SE":
+                pin = st.text_input("PIN / Identificador", value="")
             n_comprobante = st.text_input("N° de comprobante")
-            # Mostrar el tipo seleccionado (solo para referencia visual en el form)
-            st.text_input("Tipo", value=tipo_re_se_selector, disabled=True, key="tipo_display")
             
             campo_taller = None
             if tipo_re_se_selector == "SE":
@@ -2617,25 +2617,49 @@ def render_sales_page():
             detalles = st.text_area("Detalles", height=90)
 
         st.markdown("**Componentes económicos (USD)**")
-        col_m1, col_m2, col_m3 = st.columns(3)
-        with col_m1:
-            mano_obra = st.number_input("Mano de obra", min_value=0.0, value=0.0, step=0.01)
-            asistencia = st.number_input("Asistencia", min_value=0.0, value=0.0, step=0.01)
-        with col_m2:
-            repuestos = st.number_input("Repuestos", min_value=0.0, value=0.0, step=0.01)
-            terceros = st.number_input("Terceros", min_value=0.0, value=0.0, step=0.01)
-        with col_m3:
-            descuento = st.number_input("Descuento", min_value=0.0, value=0.0, step=0.01)
-
-        total_calculado = mano_obra + asistencia + repuestos + terceros - descuento
-        st.metric(
-            "💰 Total calculado",
-            format_currency(total_calculado),
-            delta=(
-                f"MO {format_currency(mano_obra)} + Asist {format_currency(asistencia)} + "
-                f"Rep {format_currency(repuestos)} + Terc {format_currency(terceros)} - Desc {format_currency(descuento)}"
-            ),
-        )
+        
+        # Inicializar valores por defecto
+        mano_obra = 0.0
+        asistencia = 0.0
+        terceros = 0.0
+        
+        if tipo_re_se_selector == "SE":
+            # Para SE: mostrar todos los campos
+            col_m1, col_m2, col_m3 = st.columns(3)
+            with col_m1:
+                mano_obra = st.number_input("Mano de obra", min_value=0.0, value=0.0, step=0.01)
+                asistencia = st.number_input("Asistencia", min_value=0.0, value=0.0, step=0.01)
+            with col_m2:
+                repuestos = st.number_input("Repuestos", min_value=0.0, value=0.0, step=0.01)
+                terceros = st.number_input("Terceros", min_value=0.0, value=0.0, step=0.01)
+            with col_m3:
+                descuento = st.number_input("Descuento", min_value=0.0, value=0.0, step=0.01)
+            
+            total_calculado = mano_obra + asistencia + repuestos + terceros - descuento
+            st.metric(
+                "💰 Total calculado",
+                format_currency(total_calculado),
+                delta=(
+                    f"MO {format_currency(mano_obra)} + Asist {format_currency(asistencia)} + "
+                    f"Rep {format_currency(repuestos)} + Terc {format_currency(terceros)} - Desc {format_currency(descuento)}"
+                ),
+            )
+        else:
+            # Para RE: solo mostrar Repuestos y Descuento
+            col_m1, col_m2 = st.columns(2)
+            with col_m1:
+                repuestos = st.number_input("Repuestos", min_value=0.0, value=0.0, step=0.01)
+            with col_m2:
+                descuento = st.number_input("Descuento", min_value=0.0, value=0.0, step=0.01)
+            
+            total_calculado = repuestos - descuento
+            st.metric(
+                "💰 Total calculado",
+                format_currency(total_calculado),
+                delta=(
+                    f"Rep {format_currency(repuestos)} - Desc {format_currency(descuento)}"
+                ),
+            )
         st.caption("El total se calcula automáticamente y se vuelve negativo si la nota de crédito lo requiere.")
 
         submit = st.form_submit_button("💾 Guardar venta")
