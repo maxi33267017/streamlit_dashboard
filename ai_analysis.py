@@ -1169,11 +1169,42 @@ def get_gemini_insights(
                 .to_dict('records')
             )
         resumen_datos['resultado_sucursal'] = resultados_sucursal
+        
+        # Ventas SE: Campo vs Taller (cantidad y montos por sucursal)
+        ventas_campo_taller = []
+        if len(df_ventas) > 0:
+            ventas_se = df_ventas[df_ventas['tipo_re_se'] == 'SE'].copy()
+            if len(ventas_se) > 0:
+                # Inferir campo_taller si no existe
+                if 'campo_taller' not in ventas_se.columns or ventas_se['campo_taller'].isna().any():
+                    ventas_se['campo_taller'] = ventas_se.apply(
+                        lambda row: 'Campo' if row.get('asistencia', 0) and row.get('asistencia', 0) > 0 else 'Taller',
+                        axis=1
+                    )
+                
+                if 'campo_taller' in ventas_se.columns and 'sucursal' in ventas_se.columns:
+                    ventas_campo_taller = (
+                        ventas_se.groupby(['sucursal', 'campo_taller'])['total']
+                        .agg(['sum', 'count'])
+                        .reset_index()
+                        .rename(columns={'sum': 'monto', 'count': 'cantidad'})
+                    )
+                    ventas_campo_taller['monto'] = ventas_campo_taller['monto'].round(2)
+                    ventas_campo_taller = ventas_campo_taller.to_dict('records')
+        resumen_datos['ventas_campo_taller'] = ventas_campo_taller
+        
         if productividad:
             resumen_datos['productividad'] = productividad
         
         # Crear prompt para Gemini - más específico y estructurado
         margen_pct = (resumen_datos.get('margen', 0) / resumen_datos['total_ingresos'] * 100) if resumen_datos['total_ingresos'] > 0 else 0
+        
+        campo_taller_block = ""
+        if ventas_campo_taller:
+            campo_taller_block = (
+                "\nVENTAS SE: CAMPO VS TALLER:\n"
+                f"- Distribución por sucursal (sucursal, tipo Campo/Taller, cantidad, monto): {ventas_campo_taller}\n"
+            )
         
         productividad_block = ""
         if productividad:
@@ -1200,11 +1231,12 @@ DATOS FINANCIEROS:
 - Top 10 clientes por sucursal (cliente, sucursal, ventas): {resumen_datos.get('top_clientes_detalle', [])}
 - Ventas RE/SE por sucursal (monto y cantidad): {resumen_datos.get('ventas_tipo_detalle', [])}
 - Resultado operativo por sucursal (ingresos, gastos, resultado): {resumen_datos.get('resultado_sucursal', [])}
-{productividad_block}
+{campo_taller_block}{productividad_block}
 
 INSTRUCCIONES:
-Analiza patrones sofisticados (mix de negocios, productividad, sucursales fuertes/débiles, concentración de clientes) y responde con acciones concretas. 
+Analiza patrones sofisticados (mix de negocios, productividad, sucursales fuertes/débiles, concentración de clientes, distribución Campo vs Taller) y responde con acciones concretas. 
 Evalúa la productividad del taller contra una referencia de 65%-70% de ocupación; si está por debajo, explica causas y acciones específicas.
+Analiza la distribución Campo vs Taller en servicios: si hay desbalance (mucho campo y poco taller o viceversa), identifica oportunidades de optimización.
 NO repitas datos triviales, aporta interpretación. Vincula cada insight a sucursales, técnicos o métricas cuando sea posible.
 
 Responde SOLO en JSON válido con esta estructura exacta:
