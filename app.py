@@ -988,7 +988,7 @@ def render_reports_operativo():
                     labels={"sucursal": "Sucursal", "monto": "USD", "campo_taller": "Tipo"},
                     title="Ventas SE: Campo vs Taller por sucursal",
                 )
-                st.plotly_chart(fig_campo_taller, use_container_width=True)
+                st.plotly_chart(fig_campo_taller, use_container_width=True, key="campo_taller_operativo")
 
     st.divider()
     st.subheader("Punto de equilibrio")
@@ -1806,7 +1806,7 @@ def render_reports_ventas():
                 labels={"sucursal": "Sucursal", "monto": "USD", "campo_taller": "Tipo"},
                 title="Ventas SE: Campo vs Taller por sucursal",
             )
-            st.plotly_chart(fig_campo_taller, use_container_width=True)
+            st.plotly_chart(fig_campo_taller, use_container_width=True, key="campo_taller_ventas")
 
     st.divider()
     st.subheader("Ventas totales por sucursal")
