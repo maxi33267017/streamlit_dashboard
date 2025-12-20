@@ -513,25 +513,54 @@ def inferir_campo_taller_existentes():
     conn = get_connection()
     cursor = conn.cursor()
     
-    # Obtener registros SE sin campo_taller usando _read_sql para compatibilidad
-    query = "SELECT id, asistencia FROM ventas WHERE tipo_re_se = 'SE' AND (campo_taller IS NULL OR campo_taller = '')"
-    df_registros = _read_sql(query, conn)
-    
-    actualizados = 0
-    for _, row in df_registros.iterrows():
-        venta_id = row['id']
-        asistencia = row.get('asistencia', 0) or 0
+    try:
+        # Verificar si la columna existe primero
+        if USE_POSTGRES:
+            check_query = """
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name='ventas' AND column_name='campo_taller'
+            """
+        else:
+            check_query = """
+                SELECT name FROM pragma_table_info('ventas') WHERE name='campo_taller'
+            """
         
-        # Si asistencia > 0 es Campo, sino Taller
-        campo_taller = "Campo" if asistencia > 0 else "Taller"
+        cursor.execute(check_query)
+        col_exists = cursor.fetchone() is not None
         
-        update_query = "UPDATE ventas SET campo_taller = ? WHERE id = ?"
-        _execute(cursor, update_query, (campo_taller, venta_id))
-        actualizados += 1
-    
-    conn.commit()
-    conn.close()
-    return actualizados
+        if not col_exists:
+            # La columna no existe, no hay nada que inferir
+            conn.close()
+            return 0
+        
+        # Obtener registros SE sin campo_taller usando _read_sql para compatibilidad
+        query = "SELECT id, asistencia FROM ventas WHERE tipo_re_se = 'SE' AND (campo_taller IS NULL OR campo_taller = '')"
+        df_registros = _read_sql(query, conn)
+        
+        actualizados = 0
+        for _, row in df_registros.iterrows():
+            venta_id = row['id']
+            asistencia = row.get('asistencia', 0) or 0
+            
+            # Si asistencia > 0 es Campo, sino Taller
+            campo_taller = "Campo" if asistencia > 0 else "Taller"
+            
+            update_query = "UPDATE ventas SET campo_taller = ? WHERE id = ?"
+            _execute(cursor, update_query, (campo_taller, venta_id))
+            actualizados += 1
+        
+        conn.commit()
+        conn.close()
+        return actualizados
+    except Exception as e:
+        # Si hay algún error, cerrar la conexión y retornar 0
+        try:
+            conn.close()
+        except:
+            pass
+        # No lanzar el error, solo retornar 0 para que la app continúe
+        return 0
 
 def get_gastos(fecha_inicio=None, fecha_fin=None):
     """Obtiene todos los gastos, opcionalmente filtrados por fecha"""

@@ -2588,7 +2588,7 @@ def render_sales_page():
         index=0 if st.session_state.tipo_re_se_selector == "RE" else 1,
         key="tipo_re_se_selector"
     )
-    st.session_state.tipo_re_se_selector = tipo_re_se_selector
+    # No asignar manualmente, el key ya lo maneja automáticamente
     
     with st.form("form_crear_venta"):
         col_a, col_b = st.columns(2)
