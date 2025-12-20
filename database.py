@@ -100,6 +100,7 @@ VENTAS_TABLE_SQLITE = """
         total REAL NOT NULL,
         detalles TEXT,
         archivo_comprobante TEXT,
+        campo_taller TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
 """
@@ -125,6 +126,7 @@ VENTAS_TABLE_PG = """
         total DOUBLE PRECISION NOT NULL,
         detalles TEXT,
         archivo_comprobante TEXT,
+        campo_taller TEXT,
         created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
     )
 """
@@ -332,14 +334,19 @@ def init_database():
     if USE_POSTGRES:
         _execute(cursor, VENTAS_TABLE_PG)
         _execute(cursor, "ALTER TABLE IF EXISTS ventas ADD COLUMN IF NOT EXISTS archivo_comprobante TEXT")
+        _execute(cursor, "ALTER TABLE IF EXISTS ventas ADD COLUMN IF NOT EXISTS campo_taller TEXT")
         _execute(cursor, GASTOS_TABLE_PG)
         _execute(cursor, PLANTILLAS_TABLE_PG)
         _execute(cursor, HISTORIAL_TABLE_PG)
     else:
         _execute(cursor, VENTAS_TABLE_SQLITE)
-        # Agregar columna archivo_comprobante si no existe (para bases de datos existentes)
+        # Agregar columnas si no existen (para bases de datos existentes)
         try:
             _execute(cursor, "ALTER TABLE ventas ADD COLUMN archivo_comprobante TEXT")
+        except sqlite3.OperationalError:
+            pass  # La columna ya existe
+        try:
+            _execute(cursor, "ALTER TABLE ventas ADD COLUMN campo_taller TEXT")
         except sqlite3.OperationalError:
             pass  # La columna ya existe
         _execute(cursor, GASTOS_TABLE_SQLITE)
@@ -397,8 +404,8 @@ def insert_venta(venta_data):
         INSERT INTO ventas (
             mes, fecha, sucursal, cliente, pin, comprobante, tipo_comprobante,
             trabajo, n_comprobante, tipo_re_se, mano_obra, asistencia,
-            repuestos, terceros, descuento, total, detalles, archivo_comprobante
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            repuestos, terceros, descuento, total, detalles, archivo_comprobante, campo_taller
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
     params = (
         venta_data.get('mes'),
@@ -418,7 +425,8 @@ def insert_venta(venta_data):
         venta_data.get('descuento', 0),
         venta_data.get('total', 0),
         venta_data.get('detalles'),
-        venta_data.get('archivo_comprobante')
+        venta_data.get('archivo_comprobante'),
+        venta_data.get('campo_taller')
     )
 
     if USE_POSTGRES:
@@ -444,7 +452,7 @@ def update_venta(venta_id, venta_data):
             comprobante = ?, tipo_comprobante = ?, trabajo = ?,
             n_comprobante = ?, tipo_re_se = ?, mano_obra = ?,
             asistencia = ?, repuestos = ?, terceros = ?, descuento = ?,
-            total = ?, detalles = ?, archivo_comprobante = ?
+            total = ?, detalles = ?, archivo_comprobante = ?, campo_taller = ?
         WHERE id = ?
     """, (
         venta_data.get('mes'),
@@ -465,6 +473,7 @@ def update_venta(venta_id, venta_data):
         venta_data.get('total', 0),
         venta_data.get('detalles'),
         venta_data.get('archivo_comprobante'),
+        venta_data.get('campo_taller'),
         venta_id
     ))
     
@@ -498,6 +507,31 @@ def delete_venta(venta_id):
     _execute(cursor, "DELETE FROM ventas WHERE id = ?", (venta_id,))
     conn.commit()
     conn.close()
+
+def inferir_campo_taller_existentes():
+    """Infiere campo_taller para registros SE existentes que no lo tengan"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    # Obtener registros SE sin campo_taller usando _read_sql para compatibilidad
+    query = "SELECT id, asistencia FROM ventas WHERE tipo_re_se = 'SE' AND (campo_taller IS NULL OR campo_taller = '')"
+    df_registros = _read_sql(query, conn)
+    
+    actualizados = 0
+    for _, row in df_registros.iterrows():
+        venta_id = row['id']
+        asistencia = row.get('asistencia', 0) or 0
+        
+        # Si asistencia > 0 es Campo, sino Taller
+        campo_taller = "Campo" if asistencia > 0 else "Taller"
+        
+        update_query = "UPDATE ventas SET campo_taller = ? WHERE id = ?"
+        _execute(cursor, update_query, (campo_taller, venta_id))
+        actualizados += 1
+    
+    conn.commit()
+    conn.close()
+    return actualizados
 
 def get_gastos(fecha_inicio=None, fecha_fin=None):
     """Obtiene todos los gastos, opcionalmente filtrados por fecha"""

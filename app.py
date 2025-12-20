@@ -903,6 +903,93 @@ def render_reports_operativo():
     else:
         st.caption("No hay datos de sucursales para mostrar.")
 
+    # Sección Campo/Taller para ventas SE
+    if len(ventas_se) > 0:
+        ventas_se_campo_taller = ventas_se.copy()
+        
+        # Inferir campo_taller si no existe
+        if "campo_taller" not in ventas_se_campo_taller.columns or ventas_se_campo_taller["campo_taller"].isna().all():
+            from database import inferir_campo_taller_existentes
+            inferir_campo_taller_existentes()
+            df_ventas = get_ventas(str(fecha_inicio), str(fecha_fin))
+            ventas_se_campo_taller = df_ventas[df_ventas["tipo_re_se"] == "SE"].copy()
+        
+        # Si aún no tiene campo_taller, inferirlo en memoria
+        if "campo_taller" not in ventas_se_campo_taller.columns or ventas_se_campo_taller["campo_taller"].isna().any():
+            ventas_se_campo_taller["campo_taller"] = ventas_se_campo_taller.apply(
+                lambda row: "Campo" if row.get("asistencia", 0) and row.get("asistencia", 0) > 0 else "Taller",
+                axis=1
+            )
+        
+        st.divider()
+        st.subheader("Ventas SE: Campo vs Taller")
+        
+        # Resumen por sucursal y campo_taller
+        resumen_campo_taller = ventas_se_campo_taller.groupby(["sucursal", "campo_taller"]).agg(
+            cantidad=("id", "count"),
+            monto=("total", "sum")
+        ).reset_index()
+        
+        # Totales por campo_taller
+        totales_campo_taller = ventas_se_campo_taller.groupby("campo_taller").agg(
+            cantidad=("id", "count"),
+            monto=("total", "sum")
+        ).reset_index()
+        totales_campo_taller["sucursal"] = "TOTAL"
+        
+        # Combinar
+        resumen_completo = pd.concat([resumen_campo_taller, totales_campo_taller], ignore_index=True)
+        
+        # Pivot para mejor visualización
+        if len(resumen_completo) > 0:
+            # Tabla de montos
+            pivot_montos = resumen_completo.pivot_table(
+                index="sucursal",
+                columns="campo_taller",
+                values="monto",
+                aggfunc="sum",
+                fill_value=0
+            ).reset_index()
+            
+            # Tabla de cantidades
+            pivot_cantidades = resumen_completo.pivot_table(
+                index="sucursal",
+                columns="campo_taller",
+                values="cantidad",
+                aggfunc="sum",
+                fill_value=0
+            ).reset_index()
+            
+            col_ct1, col_ct2 = st.columns(2)
+            with col_ct1:
+                st.write("**Cantidad de ventas**")
+                pivot_cantidades_display = pivot_cantidades.copy()
+                for col in pivot_cantidades_display.columns:
+                    if col != "sucursal":
+                        pivot_cantidades_display[col] = pivot_cantidades_display[col].astype(int)
+                st.dataframe(pivot_cantidades_display, use_container_width=True)
+            
+            with col_ct2:
+                st.write("**Montos (USD)**")
+                pivot_montos_display = pivot_montos.copy()
+                for col in pivot_montos_display.columns:
+                    if col != "sucursal":
+                        pivot_montos_display[col] = pivot_montos_display[col].apply(format_currency)
+                st.dataframe(pivot_montos_display, use_container_width=True)
+            
+            # Gráfico
+            if len(resumen_campo_taller) > 0:
+                fig_campo_taller = px.bar(
+                    resumen_campo_taller,
+                    x="sucursal",
+                    y="monto",
+                    color="campo_taller",
+                    barmode="group",
+                    labels={"sucursal": "Sucursal", "monto": "USD", "campo_taller": "Tipo"},
+                    title="Ventas SE: Campo vs Taller por sucursal",
+                )
+                st.plotly_chart(fig_campo_taller, use_container_width=True)
+
     st.divider()
     st.subheader("Punto de equilibrio")
 
@@ -1636,6 +1723,91 @@ def render_reports_ventas():
             resumen_mostrar[col] = resumen_mostrar[col].apply(format_currency)
 
         st.dataframe(resumen_mostrar, use_container_width=True)
+
+    # Sección Campo/Taller para ventas SE
+    ventas_se_campo_taller = df_ventas[df_ventas["tipo_re_se"] == "SE"].copy()
+    if len(ventas_se_campo_taller) > 0:
+        # Inferir campo_taller si no existe
+        if "campo_taller" not in ventas_se_campo_taller.columns or ventas_se_campo_taller["campo_taller"].isna().all():
+            from database import inferir_campo_taller_existentes
+            inferir_campo_taller_existentes()
+            df_ventas = get_ventas(str(fecha_inicio), str(fecha_fin))
+            ventas_se_campo_taller = df_ventas[df_ventas["tipo_re_se"] == "SE"].copy()
+        
+        # Si aún no tiene campo_taller, inferirlo en memoria
+        if "campo_taller" not in ventas_se_campo_taller.columns or ventas_se_campo_taller["campo_taller"].isna().any():
+            ventas_se_campo_taller["campo_taller"] = ventas_se_campo_taller.apply(
+                lambda row: "Campo" if row.get("asistencia", 0) and row.get("asistencia", 0) > 0 else "Taller",
+                axis=1
+            )
+        
+        st.divider()
+        st.subheader("Ventas SE: Campo vs Taller")
+        
+        # Resumen por sucursal y campo_taller
+        resumen_campo_taller = ventas_se_campo_taller.groupby(["sucursal", "campo_taller"]).agg(
+            cantidad=("id", "count"),
+            monto=("total", "sum")
+        ).reset_index()
+        
+        # Totales por campo_taller
+        totales_campo_taller = ventas_se_campo_taller.groupby("campo_taller").agg(
+            cantidad=("id", "count"),
+            monto=("total", "sum")
+        ).reset_index()
+        totales_campo_taller["sucursal"] = "TOTAL"
+        
+        # Combinar
+        resumen_completo = pd.concat([resumen_campo_taller, totales_campo_taller], ignore_index=True)
+        
+        # Pivot para mejor visualización
+        if len(resumen_completo) > 0:
+            # Tabla de montos
+            pivot_montos = resumen_completo.pivot_table(
+                index="sucursal",
+                columns="campo_taller",
+                values="monto",
+                aggfunc="sum",
+                fill_value=0
+            ).reset_index()
+            
+            # Tabla de cantidades
+            pivot_cantidades = resumen_completo.pivot_table(
+                index="sucursal",
+                columns="campo_taller",
+                values="cantidad",
+                aggfunc="sum",
+                fill_value=0
+            ).reset_index()
+            
+            col_ct1, col_ct2 = st.columns(2)
+            with col_ct1:
+                st.write("**Cantidad de ventas**")
+                pivot_cantidades_display = pivot_cantidades.copy()
+                for col in pivot_cantidades_display.columns:
+                    if col != "sucursal":
+                        pivot_cantidades_display[col] = pivot_cantidades_display[col].astype(int)
+                st.dataframe(pivot_cantidades_display, use_container_width=True)
+            
+            with col_ct2:
+                st.write("**Montos (USD)**")
+                pivot_montos_display = pivot_montos.copy()
+                for col in pivot_montos_display.columns:
+                    if col != "sucursal":
+                        pivot_montos_display[col] = pivot_montos_display[col].apply(format_currency)
+                st.dataframe(pivot_montos_display, use_container_width=True)
+            
+            # Gráfico
+            fig_campo_taller = px.bar(
+                resumen_campo_taller,
+                x="sucursal",
+                y="monto",
+                color="campo_taller",
+                barmode="group",
+                labels={"sucursal": "Sucursal", "monto": "USD", "campo_taller": "Tipo"},
+                title="Ventas SE: Campo vs Taller por sucursal",
+            )
+            st.plotly_chart(fig_campo_taller, use_container_width=True)
 
     st.divider()
     st.subheader("Ventas totales por sucursal")
@@ -2421,7 +2593,10 @@ def render_sales_page():
         with col_b:
             pin = st.text_input("PIN / Identificador", value="")
             n_comprobante = st.text_input("N° de comprobante")
-            tipo_re_se = st.selectbox("Tipo (RE o SE)", ["RE", "SE"])
+            tipo_re_se = st.selectbox("Tipo (RE o SE)", ["RE", "SE"], key="tipo_re_se_form")
+            campo_taller = None
+            if tipo_re_se == "SE":
+                campo_taller = st.selectbox("Campo / Taller", ["Campo", "Taller"], key="campo_taller_form")
             detalles = st.text_area("Detalles", height=90)
 
         st.markdown("**Componentes económicos (USD)**")
@@ -2480,6 +2655,7 @@ def render_sales_page():
                     "total": total,
                     "detalles": detalles or None,
                     "archivo_comprobante": None,
+                    "campo_taller": campo_taller if tipo_re_se == "SE" else None,
                 }
                 try:
                     insert_venta(venta_data)
@@ -2546,6 +2722,15 @@ def render_sales_page():
                 index=0 if registro["tipo_re_se"] == "RE" else 1,
                 key="venta_tipo_edit",
             )
+            campo_taller_edit = None
+            if tipo_re_se_edit == "SE":
+                campo_taller_val = registro.get("campo_taller") or "Taller"
+                campo_taller_edit = st.selectbox(
+                    "Campo / Taller",
+                    ["Campo", "Taller"],
+                    index=0 if campo_taller_val == "Campo" else 1,
+                    key="venta_campo_taller_edit",
+                )
             detalles_edit = st.text_area("Detalles", value=registro.get("detalles") or "", key="venta_detalles_edit")
 
         col_m1, col_m2, col_m3 = st.columns(3)
@@ -2621,6 +2806,7 @@ def render_sales_page():
             "total": total_edit,
             "detalles": detalles_edit or None,
             "archivo_comprobante": registro.get("archivo_comprobante"),
+            "campo_taller": campo_taller_edit if tipo_re_se_edit == "SE" else None,
         }
         try:
             update_venta(int(selected), venta_actualizada)
