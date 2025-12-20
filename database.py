@@ -333,8 +333,31 @@ def init_database():
 
     if USE_POSTGRES:
         _execute(cursor, VENTAS_TABLE_PG)
-        _execute(cursor, "ALTER TABLE IF EXISTS ventas ADD COLUMN IF NOT EXISTS archivo_comprobante TEXT")
-        _execute(cursor, "ALTER TABLE IF EXISTS ventas ADD COLUMN IF NOT EXISTS campo_taller TEXT")
+        # Agregar columnas si no existen (para bases de datos existentes)
+        try:
+            # Verificar si archivo_comprobante existe
+            cursor.execute("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name='ventas' AND column_name='archivo_comprobante'
+            """)
+            if cursor.fetchone() is None:
+                _execute(cursor, "ALTER TABLE ventas ADD COLUMN archivo_comprobante TEXT")
+        except Exception:
+            pass  # La columna ya existe o hay un error
+        
+        try:
+            # Verificar si campo_taller existe
+            cursor.execute("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name='ventas' AND column_name='campo_taller'
+            """)
+            if cursor.fetchone() is None:
+                _execute(cursor, "ALTER TABLE ventas ADD COLUMN campo_taller TEXT")
+        except Exception:
+            pass  # La columna ya existe o hay un error
+        
         _execute(cursor, GASTOS_TABLE_PG)
         _execute(cursor, PLANTILLAS_TABLE_PG)
         _execute(cursor, HISTORIAL_TABLE_PG)
@@ -400,6 +423,26 @@ def insert_venta(venta_data):
     conn = get_connection()
     cursor = conn.cursor()
     
+    # Verificar y agregar columna campo_taller si no existe
+    try:
+        if USE_POSTGRES:
+            cursor.execute("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name='ventas' AND column_name='campo_taller'
+            """)
+            if cursor.fetchone() is None:
+                _execute(cursor, "ALTER TABLE ventas ADD COLUMN campo_taller TEXT")
+                conn.commit()
+        else:
+            try:
+                _execute(cursor, "ALTER TABLE ventas ADD COLUMN campo_taller TEXT")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass  # La columna ya existe
+    except Exception:
+        pass  # Si hay error, continuar (la columna puede ya existir)
+    
     insert_sql = """
         INSERT INTO ventas (
             mes, fecha, sucursal, cliente, pin, comprobante, tipo_comprobante,
@@ -445,6 +488,26 @@ def update_venta(venta_id, venta_data):
     """Actualiza una venta existente"""
     conn = get_connection()
     cursor = conn.cursor()
+    
+    # Verificar y agregar columna campo_taller si no existe
+    try:
+        if USE_POSTGRES:
+            cursor.execute("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name='ventas' AND column_name='campo_taller'
+            """)
+            if cursor.fetchone() is None:
+                _execute(cursor, "ALTER TABLE ventas ADD COLUMN campo_taller TEXT")
+                conn.commit()
+        else:
+            try:
+                _execute(cursor, "ALTER TABLE ventas ADD COLUMN campo_taller TEXT")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass  # La columna ya existe
+    except Exception:
+        pass  # Si hay error, continuar (la columna puede ya existir)
     
     _execute(cursor, """
         UPDATE ventas SET
