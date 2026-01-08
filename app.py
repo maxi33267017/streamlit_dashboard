@@ -1603,6 +1603,55 @@ def render_reports_ventas():
     col_top2.metric("Ventas repuestos (RE)", format_currency(total_re))
     col_top3.metric("Ventas servicios (SE)", format_currency(total_se))
 
+    # Cantidad de tickets por tipo
+    cantidad_re = len(ventas_re) if len(ventas_re) else 0
+    cantidad_se = len(ventas_se) if len(ventas_se) else 0
+    
+    st.divider()
+    st.subheader("Cantidad de tickets por tipo")
+    
+    # Tabla de cantidad de tickets por sucursal
+    if len(df_ventas) > 0 and "sucursal" in df_ventas.columns:
+        tickets_sucursal = df_ventas.groupby(["sucursal", "tipo_re_se"]).size().reset_index(name="Cantidad")
+        tickets_pivot = tickets_sucursal.pivot_table(
+            index="sucursal",
+            columns="tipo_re_se",
+            values="Cantidad",
+            fill_value=0
+        ).reset_index()
+        
+        # Agregar fila de totales
+        total_row = {
+            "sucursal": "TOTAL",
+            "RE": tickets_pivot["RE"].sum() if "RE" in tickets_pivot.columns else 0,
+            "SE": tickets_pivot["SE"].sum() if "SE" in tickets_pivot.columns else 0,
+        }
+        tickets_pivot = pd.concat([tickets_pivot, pd.DataFrame([total_row])], ignore_index=True)
+        
+        # Renombrar columnas para mejor visualización
+        tickets_pivot = tickets_pivot.rename(columns={
+            "sucursal": "Sucursal",
+            "RE": "Tickets Repuestos (RE)",
+            "SE": "Tickets Servicios (SE)"
+        })
+        
+        # Asegurar que las columnas existan
+        if "Tickets Repuestos (RE)" not in tickets_pivot.columns:
+            tickets_pivot["Tickets Repuestos (RE)"] = 0
+        if "Tickets Servicios (SE)" not in tickets_pivot.columns:
+            tickets_pivot["Tickets Servicios (SE)"] = 0
+        
+        # Convertir a enteros
+        tickets_pivot["Tickets Repuestos (RE)"] = tickets_pivot["Tickets Repuestos (RE)"].astype(int)
+        tickets_pivot["Tickets Servicios (SE)"] = tickets_pivot["Tickets Servicios (SE)"].astype(int)
+        
+        st.dataframe(tickets_pivot, use_container_width=True)
+    else:
+        # Si no hay datos de sucursal, mostrar solo totales
+        col_tickets1, col_tickets2 = st.columns(2)
+        col_tickets1.metric("Tickets Repuestos (RE)", cantidad_re)
+        col_tickets2.metric("Tickets Servicios (SE)", cantidad_se)
+
     # -------------------------
     # Cuadro sucursales clave
     # -------------------------
