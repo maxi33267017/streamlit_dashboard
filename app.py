@@ -2840,18 +2840,20 @@ def render_sales_page():
                 )
             detalles_edit = st.text_area("Detalles", value=registro.get("detalles") or "", key="venta_detalles_edit")
 
+        # Permitir valores negativos (notas de crédito) en el formulario de edición
         col_m1, col_m2, col_m3 = st.columns(3)
         with col_m1:
             mano_obra_edit = st.number_input(
                 "Mano de obra",
-                min_value=0.0,
+                min_value=None,
                 value=float(registro.get("mano_obra") or 0),
                 step=0.01,
                 key="venta_mano_edit",
+                help="Puede ser negativo en notas de crédito",
             )
             asistencia_edit = st.number_input(
                 "Asistencia",
-                min_value=0.0,
+                min_value=None,
                 value=float(registro.get("asistencia") or 0),
                 step=0.01,
                 key="venta_asistencia_edit",
@@ -2859,14 +2861,14 @@ def render_sales_page():
         with col_m2:
             repuestos_edit = st.number_input(
                 "Repuestos",
-                min_value=0.0,
+                min_value=None,
                 value=float(registro.get("repuestos") or 0),
                 step=0.01,
                 key="venta_repuestos_edit",
             )
             terceros_edit = st.number_input(
                 "Terceros",
-                min_value=0.0,
+                min_value=None,
                 value=float(registro.get("terceros") or 0),
                 step=0.01,
                 key="venta_terceros_edit",
@@ -2874,17 +2876,18 @@ def render_sales_page():
         with col_m3:
             descuento_edit = st.number_input(
                 "Descuento",
-                min_value=0.0,
+                min_value=None,
                 value=float(registro.get("descuento") or 0),
                 step=0.01,
                 key="venta_descuento_edit",
             )
             total_edit = st.number_input(
                 "Total facturado",
-                min_value=0.0,
+                min_value=None,
                 value=float(registro.get("total") or 0),
                 step=0.01,
                 key="venta_total_edit",
+                help="Negativo en notas de crédito",
             )
 
         col_btn1, col_btn2 = st.columns([3, 1])
