@@ -2761,22 +2761,39 @@ def render_sales_page():
         st.info("Aún no hay ventas cargadas.")
         return
 
-    st.dataframe(
-        df_ventas.sort_values("fecha", ascending=False).head(50),
-        use_container_width=True,
-    )
+    # Tabla con ID visible como primera columna para poder identificar cada registro
+    df_tabla = df_ventas.sort_values("fecha", ascending=False).head(50).copy()
+    if "id" in df_tabla.columns:
+        cols = ["id"] + [c for c in df_tabla.columns if c != "id"]
+        df_tabla = df_tabla[cols].rename(columns={"id": "ID"})
+    st.caption("Últimas 50 ventas. Usa la columna **ID** para identificar el registro en el editor.")
+    st.dataframe(df_tabla, use_container_width=True)
 
     st.subheader("Editar o eliminar")
-    opciones = ["(ninguna)"] + [str(v) for v in df_ventas.sort_values("fecha", ascending=False)["id"].tolist()]
-    selected = st.selectbox("Selecciona una venta", opciones)
-    if selected == "(ninguna)":
+    df_sorted = df_ventas.sort_values("fecha", ascending=False)
+    opciones_display = ["(ninguna)"]
+    id_por_etiqueta = {"(ninguna)": None}
+    for _, row in df_sorted.iterrows():
+        cliente = (row.get("cliente") or "Sin cliente")[:30]
+        total_val = float(row.get("total") or 0)
+        etiqueta = f"ID {row['id']} · {row['fecha']} · {cliente} · USD {total_val:,.2f}"
+        opciones_display.append(etiqueta)
+        id_por_etiqueta[etiqueta] = int(row["id"])
+    selected_label = st.selectbox(
+        "Selecciona una venta (ID, fecha, cliente, total)",
+        opciones_display,
+        key="venta_selector_edit",
+    )
+    selected = id_por_etiqueta.get(selected_label)
+    if selected is None:
         return
 
-    registro = get_venta_by_id(int(selected))
+    registro = get_venta_by_id(selected)
     if not registro:
         st.warning("No se encontró el registro.")
         return
 
+    st.info(f"Editando venta **ID {selected}** — {registro.get('cliente') or 'Sin cliente'} · {registro.get('fecha')} · USD {float(registro.get('total') or 0):,.2f}")
     fecha_reg = datetime.strptime(str(registro["fecha"]), "%Y-%m-%d").date()
 
     with st.form("form_editar_venta"):
@@ -2899,7 +2916,7 @@ def render_sales_page():
             "campo_taller": campo_taller_edit if tipo_re_se_edit == "SE" else None,
         }
         try:
-            update_venta(int(selected), venta_actualizada)
+            update_venta(selected, venta_actualizada)
             st.success("✅ Venta actualizada.")
             st.rerun()
         except Exception as exc:
@@ -2907,7 +2924,7 @@ def render_sales_page():
 
     if eliminar:
         try:
-            delete_venta(int(selected))
+            delete_venta(selected)
             st.warning("Venta eliminada.")
             st.rerun()
         except Exception as exc:
