@@ -2756,21 +2756,55 @@ def render_sales_page():
 
     st.divider()
     st.subheader("Ventas registradas")
-    df_ventas = get_ventas()
+
+    # Filtro por fechas (opcional): si se define, se filtra la tabla y la descarga
+    col_f1, col_f2, col_f3 = st.columns([1, 1, 2])
+    with col_f1:
+        filtro_desde = st.date_input("Desde", value=None, key="ventas_filtro_desde")
+    with col_f2:
+        filtro_hasta = st.date_input("Hasta", value=None, key="ventas_filtro_hasta")
+    if filtro_desde and filtro_hasta and filtro_desde > filtro_hasta:
+        st.warning("La fecha «Desde» debe ser anterior o igual a «Hasta».")
+    if filtro_desde and filtro_hasta:
+        df_ventas = get_ventas(str(filtro_desde), str(filtro_hasta))
+    else:
+        df_ventas = get_ventas()
+
     if len(df_ventas) == 0:
-        st.info("Aún no hay ventas cargadas.")
+        st.info("Aún no hay ventas cargadas." + (" Ajusta el rango de fechas si aplicaste filtro." if (filtro_desde or filtro_hasta) else ""))
         return
 
-    # Tabla con ID visible como primera columna para poder identificar cada registro
-    df_tabla = df_ventas.sort_values("fecha", ascending=False).head(50).copy()
+    # Tabla: ID como primera columna; mostramos hasta 200 registros para no sobrecargar la vista
+    df_sorted = df_ventas.sort_values("fecha", ascending=False)
+    limite_tabla = 200
+    df_tabla = df_sorted.head(limite_tabla).copy()
     if "id" in df_tabla.columns:
         cols = ["id"] + [c for c in df_tabla.columns if c != "id"]
         df_tabla = df_tabla[cols].rename(columns={"id": "ID"})
-    st.caption("Últimas 50 ventas. Usa la columna **ID** para identificar el registro en el editor.")
+    total_reg = len(df_sorted)
+    if total_reg > limite_tabla:
+        st.caption(f"Mostrando {limite_tabla} de **{total_reg}** ventas. Usa el filtro por fechas para acotar o **Descargar CSV** para obtener todos los registros del rango.")
+    else:
+        st.caption(f"**{total_reg}** ventas. Usa la columna **ID** para identificar el registro en el editor.")
     st.dataframe(df_tabla, use_container_width=True)
 
+    # Descarga CSV con todos los registros del rango (o todas si no hay filtro)
+    df_export = df_sorted.copy()
+    if "id" in df_export.columns:
+        df_export = df_export.rename(columns={"id": "ID"})
+    csv_bytes = df_export.to_csv(index=False).encode("utf-8")
+    nombre_archivo = "ventas.csv"
+    if filtro_desde and filtro_hasta:
+        nombre_archivo = f"ventas_{filtro_desde}_{filtro_hasta}.csv"
+    st.download_button(
+        "📥 Descargar CSV",
+        data=csv_bytes,
+        file_name=nombre_archivo,
+        mime="text/csv",
+        key="ventas_descargar_csv",
+    )
+
     st.subheader("Editar o eliminar")
-    df_sorted = df_ventas.sort_values("fecha", ascending=False)
     opciones_display = ["(ninguna)"]
     id_por_etiqueta = {"(ninguna)": None}
     for _, row in df_sorted.iterrows():
