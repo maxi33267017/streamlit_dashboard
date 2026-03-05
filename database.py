@@ -776,18 +776,40 @@ def delete_gasto(gasto_id):
     conn.close()
 
 def get_plantillas_gastos(activas_only=False):
-    """Obtiene todas las plantillas de gastos"""
+    """Obtiene todas las plantillas de gastos.
+
+    Es tolerante a bases donde la tabla aún no existe (p. ej. instalaciones antiguas):
+    en ese caso crea la tabla y devuelve un DataFrame vacío.
+    """
     conn = get_connection()
-    
-    query = "SELECT * FROM plantillas_gastos"
-    if activas_only:
-        query += " WHERE activa = 1"
-    query += " ORDER BY nombre"
-    
-    df = _read_sql(query, conn)
-    conn.close()
-    
-    return df
+    try:
+        query = "SELECT * FROM plantillas_gastos"
+        if activas_only:
+            query += " WHERE activa = 1"
+        query += " ORDER BY nombre"
+
+        try:
+            df = _read_sql(query, conn)
+        except Exception:
+            # Si la tabla no existe o hay un error de esquema, intentamos crearla
+            cursor = conn.cursor()
+            try:
+                if USE_POSTGRES:
+                    _execute(cursor, PLANTILLAS_TABLE_PG)
+                else:
+                    _execute(cursor, PLANTILLAS_TABLE_SQLITE)
+                conn.commit()
+            except Exception:
+                # Si esto también falla, devolvemos DataFrame vacío para no romper la app
+                pass
+            df = pd.DataFrame()
+
+        return df
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 def get_plantilla_gasto_by_id(plantilla_id):
     """Obtiene una plantilla de gasto por su ID"""
