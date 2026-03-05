@@ -1641,9 +1641,13 @@ def render_reports_ventas():
         if "Tickets Servicios (SE)" not in tickets_pivot.columns:
             tickets_pivot["Tickets Servicios (SE)"] = 0
         
-        # Convertir a enteros
-        tickets_pivot["Tickets Repuestos (RE)"] = tickets_pivot["Tickets Repuestos (RE)"].astype(int)
-        tickets_pivot["Tickets Servicios (SE)"] = tickets_pivot["Tickets Servicios (SE)"].astype(int)
+        # Convertir a enteros (asegurando que no haya NaN)
+        tickets_pivot["Tickets Repuestos (RE)"] = (
+            tickets_pivot["Tickets Repuestos (RE)"].fillna(0).astype(int)
+        )
+        tickets_pivot["Tickets Servicios (SE)"] = (
+            tickets_pivot["Tickets Servicios (SE)"].fillna(0).astype(int)
+        )
         
         st.dataframe(tickets_pivot, use_container_width=True)
     else:
