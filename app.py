@@ -3180,57 +3180,59 @@ def render_expenses_page():
             "Podés generarlas desde Configuración usando el historial."
         )
 
+    # Resolver índices por defecto desde plantilla (comparación sin importar mayúsculas/espacios)
+    def _idx_en_lista(valor, lista):
+        if not valor and not lista:
+            return 0
+        v = str(valor or "").strip().upper()
+        for i, opc in enumerate(lista):
+            if str(opc or "").strip().upper() == v:
+                return i
+        return 0
+
     with st.form("form_crear_gasto"):
         col_a, col_b = st.columns(2)
         with col_a:
             fecha = st.date_input("Fecha", value=date.today(), key="gasto_fecha")
-            # Valores por defecto según plantilla (si existe)
-            suc_def = (
-                plantilla_sel.get("sucursal")
-                if plantilla_sel and plantilla_sel.get("sucursal") in sucursales_default
-                else sucursales_default[0]
+            idx_suc = _idx_en_lista(
+                plantilla_sel.get("sucursal") if plantilla_sel else None,
+                sucursales_default,
             )
             sucursal = st.selectbox(
                 "Sucursal",
                 sucursales_default,
-                index=sucursales_default.index(suc_def),
+                index=idx_suc,
                 key="gasto_sucursal",
             )
-            area_def = (
-                plantilla_sel.get("area")
-                if plantilla_sel and plantilla_sel.get("area") in areas_default
-                else areas_default[0]
+            idx_area = _idx_en_lista(
+                plantilla_sel.get("area") if plantilla_sel else None,
+                areas_default,
             )
             area = st.selectbox(
                 "Área",
                 areas_default,
-                index=areas_default.index(area_def),
+                index=idx_area,
                 key="gasto_area",
             )
-            tipo_def = (
-                plantilla_sel.get("tipo")
-                if plantilla_sel and plantilla_sel.get("tipo") in ["FIJO", "VARIABLE"]
-                else "FIJO"
+            idx_tipo = _idx_en_lista(
+                plantilla_sel.get("tipo") if plantilla_sel else None,
+                ["FIJO", "VARIABLE"],
             )
             tipo = st.selectbox(
                 "Tipo",
                 ["FIJO", "VARIABLE"],
-                index=0 if tipo_def == "FIJO" else 1,
+                index=idx_tipo,
                 key="gasto_tipo",
             )
             clasificacion = st.text_input(
                 "Clasificación",
-                value=plantilla_sel.get("clasificacion") or ""
-                if plantilla_sel
-                else "",
+                value=(plantilla_sel.get("clasificacion") or "") if plantilla_sel else "",
                 key="gasto_clasificacion",
             )
         with col_b:
             proveedor = st.text_input(
                 "Proveedor (opcional)",
-                value=plantilla_sel.get("proveedor") or ""
-                if plantilla_sel
-                else "",
+                value=(plantilla_sel.get("proveedor") or "") if plantilla_sel else "",
                 key="gasto_proveedor",
             )
             def _clamp_pct(val, default):
