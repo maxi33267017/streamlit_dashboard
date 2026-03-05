@@ -2982,9 +2982,9 @@ def render_expenses_page():
     plantillas_todas = database.get_plantillas_gastos(activas_only=True)
     with st.expander("Carga rápida: Sueldo + Cargas sociales + Obra social"):
         st.caption(
-            "Los **% Postventa / Servicios / Repuestos** se toman de la **plantilla** que corresponde "
-            "a cada persona, sucursal, área y concepto (Sueldo, Cargas sociales, Obra social). "
-            "Solo cargás los importes; los % ya están definidos en Configuración."
+            "Los **%** se toman de la **plantilla** de esa persona/sucursal/área. "
+            "Basta con tener **una** plantilla (ej. solo SUELDO): sus % se reutilizan para Cargas y Obra social. "
+            "Solo cargás los importes."
         )
         if (
             len(plantillas_todas)
@@ -3082,16 +3082,22 @@ def render_expenses_page():
                         nonlocal creados, errores
                         if monto == 0:
                             return
-                        fila_cand = df_personal[
+                        base = (
                             (df_personal["proveedor"] == persona_sel)
-                            & (df_personal["clasificacion"].str.upper() == clasif_objetivo)
                             & (df_personal["sucursal"].astype(str).str.strip() == str(suc_sel).strip())
                             & (df_personal["area"].astype(str).str.strip() == str(area_sel).strip())
+                        )
+                        # Primero buscar plantilla del mismo concepto (ej. SUELDO para SUELDO)
+                        fila_cand = df_personal[
+                            base & (df_personal["clasificacion"].str.upper() == clasif_objetivo)
                         ]
+                        # Si no hay, usar cualquier plantilla de esa persona/sucursal/área (ej. % del SUELDO para CARGAS y OBRA)
+                        if len(fila_cand) == 0:
+                            fila_cand = df_personal[base]
                         if len(fila_cand) == 0:
                             errores.append(
-                                f"No se encontró plantilla para {clasif_objetivo} de {persona_sel} "
-                                f"en {suc_sel} / {area_sel}."
+                                f"No se encontró plantilla para {persona_sel} en {suc_sel} / {area_sel}. "
+                                f"Basta con tener al menos una (ej. SUELDO) para reutilizar sus %."
                             )
                             return
                         row = fila_cand.iloc[0]
@@ -3108,7 +3114,7 @@ def render_expenses_page():
                             "pct_servicios": pct_serv,
                             "pct_repuestos": pct_rep,
                             "tipo": row.get("tipo"),
-                            "clasificacion": row.get("clasificacion"),
+                            "clasificacion": clasif_objetivo,
                             "proveedor": row.get("proveedor"),
                             "total_pesos": None,
                             "total_usd": monto,
