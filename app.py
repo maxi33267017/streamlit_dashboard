@@ -3137,52 +3137,50 @@ def render_expenses_page():
     # Plantillas activas disponibles para autocompletar
     plantillas_df = database.get_plantillas_gastos(activas_only=True)
 
+    plantilla_sel = None
+    if len(plantillas_df):
+        filtro_texto_raw = st.text_input(
+            "Buscar plantilla (por nombre, proveedor o clasificación)",
+            value="",
+            key="gasto_plantilla_buscar",
+        )
+        filtro_texto = (filtro_texto_raw or "").strip().lower()
+        df_opts = plantillas_df.copy()
+        if filtro_texto:
+            def _match_row(row):
+                texto = " ".join(
+                    str(row.get(col) or "")
+                    for col in ["nombre", "proveedor", "clasificacion", "sucursal", "area"]
+                ).lower()
+                return filtro_texto in texto
+
+            df_opts = df_opts[df_opts.apply(_match_row, axis=1)]
+
+        opciones_plantillas = ["(sin plantilla)"] + [
+            f"{row.get('nombre')} · {row.get('proveedor') or ''} · {row.get('clasificacion') or ''}"
+            for _, row in df_opts.iterrows()
+        ]
+        nombre_sel = st.selectbox(
+            "Plantilla de gasto (opcional)",
+            opciones_plantillas,
+            key="gasto_plantilla",
+        )
+        if nombre_sel and nombre_sel != "(sin plantilla)":
+            nombre_real = nombre_sel.split(" · ", 1)[0]
+            fila = plantillas_df[plantillas_df["nombre"] == nombre_real]
+            if len(fila):
+                plantilla_sel = fila.iloc[0].to_dict()
+                st.caption(
+                    "Aplicando configuración estándar desde plantilla: "
+                    f"{plantilla_sel.get('nombre')}"
+                )
+    else:
+        st.caption(
+            "No hay plantillas de gastos configuradas aún. "
+            "Podés generarlas desde Configuración usando el historial."
+        )
+
     with st.form("form_crear_gasto"):
-        # Búsqueda y selección de plantilla para precargar sucursal/área/tipo/% según historial estándar
-        plantilla_sel = None
-        if len(plantillas_df):
-            # Campo de búsqueda libre sobre nombre, proveedor y clasificación
-            filtro_texto = st.text_input(
-                "Buscar plantilla (por nombre, proveedor o clasificación)",
-                value="",
-                key="gasto_plantilla_buscar",
-            ).strip().lower()
-            df_opts = plantillas_df.copy()
-            if filtro_texto:
-                def _match_row(row):
-                    texto = " ".join(
-                        str(row.get(col) or "")
-                        for col in ["nombre", "proveedor", "clasificacion", "sucursal", "area"]
-                    ).lower()
-                    return filtro_texto in texto
-
-                df_opts = df_opts[df_opts.apply(_match_row, axis=1)]
-
-            opciones_plantillas = ["(sin plantilla)"] + [
-                f"{row.get('nombre')} · {row.get('proveedor') or ''} · {row.get('clasificacion') or ''}"
-                for _, row in df_opts.iterrows()
-            ]
-            nombre_sel = st.selectbox(
-                "Plantilla de gasto (opcional)",
-                opciones_plantillas,
-                key="gasto_plantilla",
-            )
-            if nombre_sel != "(sin plantilla)":
-                # Extraer nombre real antes del primer separador
-                nombre_real = nombre_sel.split(" · ", 1)[0]
-                fila = plantillas_df[plantillas_df["nombre"] == nombre_real]
-                if len(fila):
-                    plantilla_sel = fila.iloc[0].to_dict()
-                    st.caption(
-                        "Aplicando configuración estándar desde plantilla: "
-                        f"{plantilla_sel.get('nombre')}"
-                    )
-        else:
-            st.caption(
-                "No hay plantillas de gastos configuradas aún. "
-                "Podés generarlas desde Configuración usando el historial."
-            )
-
         col_a, col_b = st.columns(2)
         with col_a:
             fecha = st.date_input("Fecha", value=date.today(), key="gasto_fecha")
