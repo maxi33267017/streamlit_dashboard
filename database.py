@@ -1051,7 +1051,7 @@ def inferir_plantillas_gastos_desde_historial(sobrescribir=False):
             set(df_existentes["nombre"].str.lower()) if len(df_existentes) > 0 else set()
         )
 
-        resultado = {"creadas": 0, "actualizadas": 0}
+        resultado = {"creadas": 0, "actualizadas": 0, "errores": 0}
 
         for _, row in df_latest.iterrows():
             suc = row.get("sucursal")
@@ -1087,23 +1087,28 @@ def inferir_plantillas_gastos_desde_historial(sobrescribir=False):
                 "clasificacion": clas,
                 "proveedor": prov,
                 "detalles": None,
-                "activa": 1,
+                # Usar tipo compatible con la base: bool para Postgres, 1/0 para SQLite
+                "activa": True if USE_POSTGRES else 1,
             }
 
             nombre_lower = nombre.lower()
-            if nombre_lower in nombres_existentes:
-                if sobrescribir and len(df_existentes) > 0:
-                    fila = df_existentes[
-                        df_existentes["nombre"].str.lower() == nombre_lower
-                    ]
-                    if len(fila) > 0:
-                        plantilla_id = int(fila.iloc[0]["id"])
-                        update_plantilla_gasto(plantilla_id, plantilla_data)
-                        resultado["actualizadas"] += 1
-            else:
-                insert_plantilla_gasto(plantilla_data)
-                nombres_existentes.add(nombre_lower)
-                resultado["creadas"] += 1
+            try:
+                if nombre_lower in nombres_existentes:
+                    if sobrescribir and len(df_existentes) > 0:
+                        fila = df_existentes[
+                            df_existentes["nombre"].str.lower() == nombre_lower
+                        ]
+                        if len(fila) > 0:
+                            plantilla_id = int(fila.iloc[0]["id"])
+                            update_plantilla_gasto(plantilla_id, plantilla_data)
+                            resultado["actualizadas"] += 1
+                else:
+                    insert_plantilla_gasto(plantilla_data)
+                    nombres_existentes.add(nombre_lower)
+                    resultado["creadas"] += 1
+            except Exception:
+                # En caso de error de tipos/esquema en alguna fila, la omitimos
+                resultado["errores"] += 1
 
         return resultado
     finally:

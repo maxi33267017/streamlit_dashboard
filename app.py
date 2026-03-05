@@ -3361,10 +3361,14 @@ def render_settings_page():
             resultado = database.inferir_plantillas_gastos_desde_historial(
                 sobrescribir=True
             )
-            st.success(
+            msg = (
                 f"Plantillas generadas: {resultado.get('creadas', 0)}, "
                 f"actualizadas: {resultado.get('actualizadas', 0)}"
             )
+            errores = resultado.get("errores", 0)
+            if errores:
+                msg += f" (omitidas por error de tipos/esquema: {errores})"
+            st.success(msg)
     with col_info:
         st.caption(
             "Usá este botón para construir configuraciones estándar (por ejemplo, "
