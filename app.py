@@ -3032,27 +3032,92 @@ def render_expenses_page():
             
             st.divider()
     st.subheader("Gastos registrados")
-    df_gastos = get_gastos()
+
+    # Filtro por fechas (opcional): si se define, se filtra la tabla y la descarga
+    col_f1, col_f2, col_f3 = st.columns([1, 1, 2])
+    with col_f1:
+        filtro_desde_g = st.date_input("Desde", value=None, key="gastos_filtro_desde")
+    with col_f2:
+        filtro_hasta_g = st.date_input("Hasta", value=None, key="gastos_filtro_hasta")
+    if filtro_desde_g and filtro_hasta_g and filtro_desde_g > filtro_hasta_g:
+        st.warning("La fecha «Desde» debe ser anterior o igual a «Hasta».")
+
+    if filtro_desde_g and filtro_hasta_g:
+        df_gastos = get_gastos(str(filtro_desde_g), str(filtro_hasta_g))
+    else:
+        df_gastos = get_gastos()
+
     if len(df_gastos) == 0:
-        st.info("Aún no hay gastos cargados.")
+        st.info(
+            "Aún no hay gastos cargados."
+            + (" Ajusta el rango de fechas si aplicaste filtro." if (filtro_desde_g or filtro_hasta_g) else "")
+        )
         return
 
-    st.dataframe(
-        df_gastos.sort_values("fecha", ascending=False).head(50),
-        use_container_width=True,
+    # Tabla: ID como primera columna; mostramos hasta 200 registros para no sobrecargar la vista
+    df_sorted_g = df_gastos.sort_values("fecha", ascending=False)
+    limite_tabla_g = 200
+    df_tabla_g = df_sorted_g.head(limite_tabla_g).copy()
+    if "id" in df_tabla_g.columns:
+        cols = ["id"] + [c for c in df_tabla_g.columns if c != "id"]
+        df_tabla_g = df_tabla_g[cols].rename(columns={"id": "ID"})
+    total_reg_g = len(df_sorted_g)
+    if total_reg_g > limite_tabla_g:
+        st.caption(
+            f"Mostrando {limite_tabla_g} de **{total_reg_g}** gastos. "
+            "Usa el filtro por fechas para acotar o **Descargar CSV** para obtener todos los registros del rango."
+        )
+    else:
+        st.caption(f"**{total_reg_g}** gastos. Usa la columna **ID** para identificar el registro en el editor.")
+    st.dataframe(df_tabla_g, use_container_width=True)
+
+    # Descarga CSV con todos los registros del rango (o todos si no hay filtro)
+    df_export_g = df_sorted_g.copy()
+    if "id" in df_export_g.columns:
+        df_export_g = df_export_g.rename(columns={"id": "ID"})
+    csv_bytes_g = df_export_g.to_csv(index=False).encode("utf-8")
+    nombre_archivo_g = "gastos.csv"
+    if filtro_desde_g and filtro_hasta_g:
+        nombre_archivo_g = f"gastos_{filtro_desde_g}_{filtro_hasta_g}.csv"
+    st.download_button(
+        "📥 Descargar CSV",
+        data=csv_bytes_g,
+        file_name=nombre_archivo_g,
+        mime="text/csv",
+        key="gastos_descargar_csv",
     )
 
     st.subheader("Editar o eliminar")
-    opciones = ["(ninguno)"] + [str(g) for g in df_gastos.sort_values("fecha", ascending=False)["id"].tolist()]
-    selected = st.selectbox("Selecciona un gasto", opciones)
-    if selected == "(ninguno)":
+    opciones_display = ["(ninguna)"]
+    id_gasto_por_etiqueta = {"(ninguno)": None}
+    for _, row in df_sorted_g.iterrows():
+        clasif = (row.get("clasificacion") or "Sin clasificar")[:30]
+        suc = (row.get("sucursal") or "").strip()
+        total_val = float(row.get("total_usd") or 0)
+        etiqueta = f"ID {row['id']} · {row['fecha']} · {suc} · {clasif} · USD {total_val:,.2f}"
+        opciones_display.append(etiqueta)
+        id_gasto_por_etiqueta[etiqueta] = int(row["id"])
+    selected_label = st.selectbox(
+        "Selecciona un gasto (ID, fecha, sucursal, clasificación, total)",
+        opciones_display,
+        key="gasto_selector_edit",
+    )
+    selected = id_gasto_por_etiqueta.get(selected_label)
+    if selected is None:
         return
 
-    registro = get_gasto_by_id(int(selected))
+    registro = get_gasto_by_id(selected)
     if not registro:
         st.warning("No se encontró el gasto.")
         return
 
+    st.info(
+        f"Editando gasto **ID {selected}** — "
+        f"{registro.get('clasificacion') or 'Sin clasificar'} · "
+        f"{registro.get('fecha')} · "
+        f\"{(registro.get('sucursal') or '').strip()} · "
+        f"USD {float(registro.get('total_usd') or 0):,.2f}"
+    )
     fecha_reg = datetime.strptime(str(registro["fecha"]), "%Y-%m-%d").date()
 
     with st.form("form_editar_gasto"):
@@ -3148,7 +3213,7 @@ def render_expenses_page():
             "detalles": detalles_edit or None,
         }
         try:
-            update_gasto(int(selected), gasto_actualizado)
+            update_gasto(selected, gasto_actualizado)
             st.success("✅ Gasto actualizado.")
             st.rerun()
         except Exception as exc:
@@ -3156,7 +3221,7 @@ def render_expenses_page():
 
     if eliminar:
         try:
-            delete_gasto(int(selected))
+            delete_gasto(selected)
             st.warning("Gasto eliminado.")
             st.rerun()
         except Exception as exc:
