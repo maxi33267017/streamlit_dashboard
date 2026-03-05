@@ -3134,7 +3134,7 @@ def render_expenses_page():
                         if errores:
                             for e in errores:
                                 st.warning(e)
-                        st.experimental_rerun()
+                        st.rerun()
                     else:
                         st.warning(
                             "No se creó ningún gasto. Verificá que los importes sean distintos de 0 "
@@ -3681,7 +3681,7 @@ def render_settings_page():
                     try:
                         database.update_plantilla_gasto(int(id_sel), plantilla_data)
                         st.success("Plantilla actualizada.")
-                        st.experimental_rerun()
+                        st.rerun()
                     except Exception as exc:
                         st.error(f"No se pudo actualizar la plantilla: {exc}")
                 if desactivar:
@@ -3709,7 +3709,7 @@ def render_settings_page():
                     try:
                         database.delete_plantilla_gasto(int(id_sel))
                         st.warning("Plantilla eliminada.")
-                        st.experimental_rerun()
+                        st.rerun()
                     except Exception as exc:
                         st.error(f"No se pudo eliminar la plantilla: {exc}")
 
