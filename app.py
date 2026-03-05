@@ -3001,53 +3001,34 @@ def render_expenses_page():
                     "Generá plantillas desde Configuración usando el historial."
                 )
             else:
-                personas = (
-                    df_personal["proveedor"]
-                    .fillna("")
-                    .astype(str)
-                    .str.strip()
-                    .replace("", "SIN NOMBRE")
-                    .unique()
-                )
-                personas = sorted(personas)
+                # Combinaciones únicas (persona, sucursal, área) desde las plantillas
+                df_combos = df_personal[["proveedor", "sucursal", "area"]].drop_duplicates()
+                opciones_combo = []
+                combo_a_valores = {}
+                for _, r in df_combos.iterrows():
+                    p_raw = str(r["proveedor"] or "").strip()
+                    s = str(r["sucursal"] or "").strip()
+                    a = str(r["area"] or "").strip()
+                    etiqueta = f"{p_raw or 'SIN NOMBRE'} · {s} · {a}"
+                    opciones_combo.append(etiqueta)
+                    combo_a_valores[etiqueta] = (p_raw, s, a)
+                opciones_combo = sorted(opciones_combo)
                 with st.form("form_carga_rapida_personal"):
                     col_p1, col_p2 = st.columns(2)
                     with col_p1:
-                        persona_sel = st.selectbox("Persona", personas, key="rapida_persona")
+                        combo_sel = st.selectbox(
+                            "Plantilla (Persona · Sucursal · Área)",
+                            opciones_combo,
+                            key="rapida_combo",
+                            help="Sucursal y área vienen de la plantilla guardada.",
+                        )
+                        persona_sel, suc_sel, area_sel = combo_a_valores.get(
+                            combo_sel, ("", "", "")
+                        )
                         fecha_p = st.date_input(
                             "Fecha",
                             value=date.today(),
                             key="rapida_fecha",
-                        )
-                        sucursales_persona = (
-                            df_personal[df_personal["proveedor"] == persona_sel]["sucursal"]
-                            .dropna()
-                            .astype(str)
-                            .str.strip()
-                            .unique()
-                        )
-                        sucursales_persona = (
-                            sucursales_persona
-                            if len(sucursales_persona)
-                            else sucursales_default
-                        )
-                        suc_sel = st.selectbox(
-                            "Sucursal",
-                            sucursales_persona,
-                            key="rapida_sucursal",
-                        )
-                        areas_persona = (
-                            df_personal[df_personal["proveedor"] == persona_sel]["area"]
-                            .dropna()
-                            .astype(str)
-                            .str.strip()
-                            .unique()
-                        )
-                        areas_persona = areas_persona if len(areas_persona) else areas_default
-                        area_sel = st.selectbox(
-                            "Área",
-                            areas_persona,
-                            key="rapida_area",
                         )
                     with col_p2:
                         sueldo_val = st.number_input(
@@ -3082,8 +3063,9 @@ def render_expenses_page():
                         nonlocal creados, errores
                         if monto == 0:
                             return
+                        prov_norm = df_personal["proveedor"].fillna("").astype(str).str.strip()
                         base = (
-                            (df_personal["proveedor"] == persona_sel)
+                            (prov_norm == str(persona_sel).strip())
                             & (df_personal["sucursal"].astype(str).str.strip() == str(suc_sel).strip())
                             & (df_personal["area"].astype(str).str.strip() == str(area_sel).strip())
                         )
