@@ -3156,25 +3156,25 @@ def render_expenses_page():
 
             df_opts = df_opts[df_opts.apply(_match_row, axis=1)]
 
-        opciones_plantillas = ["(sin plantilla)"] + [
-            f"{row.get('nombre')} · {row.get('proveedor') or ''} · {row.get('clasificacion') or ''}"
-            for _, row in df_opts.iterrows()
-        ]
+        opciones_plantillas = ["(sin plantilla)"]
+        opcion_a_plantilla = {}
+        for _, row in df_opts.iterrows():
+            etiqueta = f"{row.get('nombre')} · {row.get('proveedor') or ''} · {row.get('clasificacion') or ''}"
+            opciones_plantillas.append(etiqueta)
+            opcion_a_plantilla[etiqueta] = row.to_dict()
         nombre_sel = st.selectbox(
             "Plantilla de gasto (opcional)",
             opciones_plantillas,
             key="gasto_plantilla",
         )
-        if nombre_sel and nombre_sel != "(sin plantilla)":
-            nombre_real = nombre_sel.split(" · ", 1)[0]
-            fila = plantillas_df[plantillas_df["nombre"] == nombre_real]
-            if len(fila):
-                plantilla_sel = fila.iloc[0].to_dict()
-                st.caption(
-                    "Aplicando configuración estándar desde plantilla: "
-                    f"{plantilla_sel.get('nombre')}"
-                )
+        if nombre_sel and nombre_sel != "(sin plantilla)" and nombre_sel in opcion_a_plantilla:
+            plantilla_sel = opcion_a_plantilla[nombre_sel]
+            st.caption(
+                "Aplicando configuración estándar desde plantilla: "
+                f"{plantilla_sel.get('nombre')}"
+            )
     else:
+        nombre_sel = "(sin plantilla)"
         st.caption(
             "No hay plantillas de gastos configuradas aún. "
             "Podés generarlas desde Configuración usando el historial."
@@ -3190,10 +3190,14 @@ def render_expenses_page():
                 return i
         return 0
 
+    # Key que cambia con la plantilla para que los widgets del form tomen los valores de la plantilla elegida
+    _sel = (nombre_sel if (nombre_sel and nombre_sel != "(sin plantilla)") else "") or "sin"
+    plantilla_key = str(hash(_sel)) if _sel != "sin" else "sin"
+
     with st.form("form_crear_gasto"):
         col_a, col_b = st.columns(2)
         with col_a:
-            fecha = st.date_input("Fecha", value=date.today(), key="gasto_fecha")
+            fecha = st.date_input("Fecha", value=date.today(), key=f"gasto_fecha_{plantilla_key}")
             idx_suc = _idx_en_lista(
                 plantilla_sel.get("sucursal") if plantilla_sel else None,
                 sucursales_default,
@@ -3202,7 +3206,7 @@ def render_expenses_page():
                 "Sucursal",
                 sucursales_default,
                 index=idx_suc,
-                key="gasto_sucursal",
+                key=f"gasto_sucursal_{plantilla_key}",
             )
             idx_area = _idx_en_lista(
                 plantilla_sel.get("area") if plantilla_sel else None,
@@ -3212,7 +3216,7 @@ def render_expenses_page():
                 "Área",
                 areas_default,
                 index=idx_area,
-                key="gasto_area",
+                key=f"gasto_area_{plantilla_key}",
             )
             idx_tipo = _idx_en_lista(
                 plantilla_sel.get("tipo") if plantilla_sel else None,
@@ -3222,18 +3226,18 @@ def render_expenses_page():
                 "Tipo",
                 ["FIJO", "VARIABLE"],
                 index=idx_tipo,
-                key="gasto_tipo",
+                key=f"gasto_tipo_{plantilla_key}",
             )
             clasificacion = st.text_input(
                 "Clasificación",
                 value=(plantilla_sel.get("clasificacion") or "") if plantilla_sel else "",
-                key="gasto_clasificacion",
+                key=f"gasto_clasificacion_{plantilla_key}",
             )
         with col_b:
             proveedor = st.text_input(
                 "Proveedor (opcional)",
                 value=(plantilla_sel.get("proveedor") or "") if plantilla_sel else "",
-                key="gasto_proveedor",
+                key=f"gasto_proveedor_{plantilla_key}",
             )
             def _clamp_pct(val, default):
                 try:
@@ -3248,7 +3252,7 @@ def render_expenses_page():
                 else 1.0
             )
             pct_postventa = st.slider(
-                "% Postventa", 0.0, 1.0, pct_post_def, 0.05, key="gasto_pct_postventa"
+                "% Postventa", 0.0, 1.0, pct_post_def, 0.05, key=f"gasto_pct_postventa_{plantilla_key}"
             )
             pct_serv_def = (
                 _clamp_pct(plantilla_sel.get("pct_servicios"), 1.0)
@@ -3256,7 +3260,7 @@ def render_expenses_page():
                 else 1.0
             )
             pct_servicios = st.slider(
-                "% Servicios", 0.0, 1.0, pct_serv_def, 0.05, key="gasto_pct_servicios"
+                "% Servicios", 0.0, 1.0, pct_serv_def, 0.05, key=f"gasto_pct_servicios_{plantilla_key}"
             )
             pct_rep_def = (
                 _clamp_pct(plantilla_sel.get("pct_repuestos"), 0.0)
@@ -3264,7 +3268,7 @@ def render_expenses_page():
                 else 0.0
             )
             pct_repuestos = st.slider(
-                "% Repuestos", 0.0, 1.0, pct_rep_def, 0.05, key="gasto_pct_repuestos"
+                "% Repuestos", 0.0, 1.0, pct_rep_def, 0.05, key=f"gasto_pct_repuestos_{plantilla_key}"
             )
 
         total_usd = st.number_input(
