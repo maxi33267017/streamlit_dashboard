@@ -959,6 +959,137 @@ def importar_plantillas_gastos(plantillas_data, sobrescribir=False):
     
     return resultado
 
+
+def inferir_plantillas_gastos_desde_historial(sobrescribir=False):
+    """
+    Genera o actualiza plantillas de gastos a partir del historial en la tabla 'gastos'.
+
+    Agrupa por (sucursal, area, tipo, clasificacion, proveedor) y toma el registro
+    más reciente de cada grupo como configuración estándar de porcentajes.
+
+    Args:
+        sobrescribir: si es True, actualiza plantillas existentes con el mismo nombre.
+
+    Returns:
+        dict con 'creadas' y 'actualizadas'
+    """
+    conn = get_connection()
+    try:
+        df = _read_sql(
+            """
+            SELECT
+                sucursal,
+                area,
+                tipo,
+                clasificacion,
+                proveedor,
+                pct_postventa,
+                pct_servicios,
+                pct_repuestos,
+                fecha,
+                created_at
+            FROM gastos
+            """,
+            conn,
+        )
+        if df is None or len(df) == 0:
+            return {"creadas": 0, "actualizadas": 0}
+
+        df = df.copy()
+
+        # Clave lógica por combinación
+        for col in ["sucursal", "area", "tipo", "clasificacion", "proveedor"]:
+            if col not in df.columns:
+                df[col] = None
+        df["clave"] = (
+            df["sucursal"].fillna("").astype(str).str.strip().str.upper()
+            + "|"
+            + df["area"].fillna("").astype(str).str.strip().str.upper()
+            + "|"
+            + df["tipo"].fillna("").astype(str).str.strip().str.upper()
+            + "|"
+            + df["clasificacion"].fillna("").astype(str).str.strip().str.upper()
+            + "|"
+            + df["proveedor"].fillna("").astype(str).str.strip().str.upper()
+        )
+
+        # Orden temporal para elegir el registro "más reciente"
+        df["fecha_orden"] = pd.to_datetime(df.get("fecha"), errors="coerce")
+        if "created_at" in df.columns:
+            df["created_at_orden"] = pd.to_datetime(df.get("created_at"), errors="coerce")
+        else:
+            df["created_at_orden"] = df["fecha_orden"]
+
+        df = df.sort_values(["clave", "fecha_orden", "created_at_orden"])
+        df_latest = df.groupby("clave", as_index=False).tail(1)
+
+        # Plantillas existentes para decidir crear/actualizar
+        df_existentes = get_plantillas_gastos()
+        nombres_existentes = (
+            set(df_existentes["nombre"].str.lower()) if len(df_existentes) > 0 else set()
+        )
+
+        resultado = {"creadas": 0, "actualizadas": 0}
+
+        for _, row in df_latest.iterrows():
+            suc = row.get("sucursal")
+            area = row.get("area")
+            tipo = row.get("tipo")
+            clas = row.get("clasificacion")
+            prov = row.get("proveedor")
+
+            def _norm(value, vacio):
+                if pd.isna(value) or value is None:
+                    return vacio
+                s = str(value).strip()
+                return s if s else vacio
+
+            nombre = " | ".join(
+                [
+                    _norm(prov, "SIN PROVEEDOR"),
+                    _norm(clas, "SIN CLASIF"),
+                    _norm(suc, "SIN SUC"),
+                    _norm(area, "SIN AREA"),
+                ]
+            )
+
+            plantilla_data = {
+                "nombre": nombre,
+                "descripcion": "Generada desde historial de gastos",
+                "sucursal": suc,
+                "area": area,
+                "pct_postventa": float(row.get("pct_postventa") or 0.0),
+                "pct_servicios": float(row.get("pct_servicios") or 0.0),
+                "pct_repuestos": float(row.get("pct_repuestos") or 0.0),
+                "tipo": tipo,
+                "clasificacion": clas,
+                "proveedor": prov,
+                "detalles": None,
+                "activa": 1,
+            }
+
+            nombre_lower = nombre.lower()
+            if nombre_lower in nombres_existentes:
+                if sobrescribir and len(df_existentes) > 0:
+                    fila = df_existentes[
+                        df_existentes["nombre"].str.lower() == nombre_lower
+                    ]
+                    if len(fila) > 0:
+                        plantilla_id = int(fila.iloc[0]["id"])
+                        update_plantilla_gasto(plantilla_id, plantilla_data)
+                        resultado["actualizadas"] += 1
+            else:
+                insert_plantilla_gasto(plantilla_data)
+                nombres_existentes.add(nombre_lower)
+                resultado["creadas"] += 1
+
+        return resultado
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
 def _limpiar_valor_monetario(valor):
     """Convierte valores monetarios en texto a float (ej: 'US $556,00' -> 556.0, '-US $700,00' -> -700.0)"""
     if pd.isna(valor):

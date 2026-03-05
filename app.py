@@ -2979,18 +2979,115 @@ def render_expenses_page():
     areas_default = ["POSTVENTA", "SERVICIO", "REPUESTOS"]
 
     with st.form("form_crear_gasto"):
+        # Plantilla opcional para precargar sucursal/área/tipo/% según historial estándar
+        plantillas_df = database.get_plantillas_gastos(activas_only=True)
+        plantilla_sel = None
+        if len(plantillas_df):
+            opciones_plantillas = ["(sin plantilla)"] + [
+                str(row["nombre"]) for _, row in plantillas_df.iterrows()
+            ]
+            nombre_sel = st.selectbox(
+                "Plantilla de gasto (opcional)",
+                opciones_plantillas,
+                key="gasto_plantilla",
+            )
+            if nombre_sel != "(sin plantilla)":
+                fila = plantillas_df[plantillas_df["nombre"] == nombre_sel]
+                if len(fila):
+                    plantilla_sel = fila.iloc[0].to_dict()
+                    st.caption(
+                        "Aplicando configuración estándar desde plantilla: "
+                        f"{plantilla_sel.get('nombre')}"
+                    )
+        else:
+            st.caption(
+                "No hay plantillas de gastos configuradas aún. "
+                "Podés generarlas desde Configuración usando el historial."
+            )
+
         col_a, col_b = st.columns(2)
         with col_a:
             fecha = st.date_input("Fecha", value=date.today(), key="gasto_fecha")
-            sucursal = st.selectbox("Sucursal", sucursales_default, key="gasto_sucursal")
-            area = st.selectbox("Área", areas_default, key="gasto_area")
-            tipo = st.selectbox("Tipo", ["FIJO", "VARIABLE"], key="gasto_tipo")
-            clasificacion = st.text_input("Clasificación", key="gasto_clasificacion")
+            # Valores por defecto según plantilla (si existe)
+            suc_def = (
+                plantilla_sel.get("sucursal")
+                if plantilla_sel and plantilla_sel.get("sucursal") in sucursales_default
+                else sucursales_default[0]
+            )
+            sucursal = st.selectbox(
+                "Sucursal",
+                sucursales_default,
+                index=sucursales_default.index(suc_def),
+                key="gasto_sucursal",
+            )
+            area_def = (
+                plantilla_sel.get("area")
+                if plantilla_sel and plantilla_sel.get("area") in areas_default
+                else areas_default[0]
+            )
+            area = st.selectbox(
+                "Área",
+                areas_default,
+                index=areas_default.index(area_def),
+                key="gasto_area",
+            )
+            tipo_def = (
+                plantilla_sel.get("tipo")
+                if plantilla_sel and plantilla_sel.get("tipo") in ["FIJO", "VARIABLE"]
+                else "FIJO"
+            )
+            tipo = st.selectbox(
+                "Tipo",
+                ["FIJO", "VARIABLE"],
+                index=0 if tipo_def == "FIJO" else 1,
+                key="gasto_tipo",
+            )
+            clasificacion = st.text_input(
+                "Clasificación",
+                value=plantilla_sel.get("clasificacion") or ""
+                if plantilla_sel
+                else "",
+                key="gasto_clasificacion",
+            )
         with col_b:
-            proveedor = st.text_input("Proveedor (opcional)", key="gasto_proveedor")
-            pct_postventa = st.slider("% Postventa", 0.0, 1.0, 1.0, 0.05, key="gasto_pct_postventa")
-            pct_servicios = st.slider("% Servicios", 0.0, 1.0, 1.0, 0.05, key="gasto_pct_servicios")
-            pct_repuestos = st.slider("% Repuestos", 0.0, 1.0, 0.0, 0.05, key="gasto_pct_repuestos")
+            proveedor = st.text_input(
+                "Proveedor (opcional)",
+                value=plantilla_sel.get("proveedor") or ""
+                if plantilla_sel
+                else "",
+                key="gasto_proveedor",
+            )
+            def _clamp_pct(val, default):
+                try:
+                    v = float(val)
+                except (TypeError, ValueError):
+                    v = default
+                return max(0.0, min(1.0, v))
+
+            pct_post_def = (
+                _clamp_pct(plantilla_sel.get("pct_postventa"), 1.0)
+                if plantilla_sel
+                else 1.0
+            )
+            pct_postventa = st.slider(
+                "% Postventa", 0.0, 1.0, pct_post_def, 0.05, key="gasto_pct_postventa"
+            )
+            pct_serv_def = (
+                _clamp_pct(plantilla_sel.get("pct_servicios"), 1.0)
+                if plantilla_sel
+                else 1.0
+            )
+            pct_servicios = st.slider(
+                "% Servicios", 0.0, 1.0, pct_serv_def, 0.05, key="gasto_pct_servicios"
+            )
+            pct_rep_def = (
+                _clamp_pct(plantilla_sel.get("pct_repuestos"), 0.0)
+                if plantilla_sel
+                else 0.0
+            )
+            pct_repuestos = st.slider(
+                "% Repuestos", 0.0, 1.0, pct_rep_def, 0.05, key="gasto_pct_repuestos"
+            )
 
         total_usd = st.number_input(
             "Total USD", min_value=-1_000_000.0, value=0.0, step=0.01, key="gasto_total_usd"
@@ -3252,8 +3349,47 @@ def render_reports_page():
 
 def render_settings_page():
     st.title("⚙️ Configuración")
-    st.write("- Acá podés agregar toggles, credenciales o cualquier ajuste global.")
-    st.write("- Es buen lugar para exponer backup / restore si lo necesitás en la nueva versión.")
+    st.subheader("Plantillas de gastos (configuraciones estándar)")
+
+    col_btn, col_info = st.columns([1, 2])
+    with col_btn:
+        if st.button(
+            "Generar / actualizar plantillas desde historial de gastos",
+            help="Agrupa gastos históricos por persona/sucursal/área/tipo/clasificación y toma los últimos porcentajes como estándar.",
+            key="btn_inferir_plantillas_gastos",
+        ):
+            resultado = database.inferir_plantillas_gastos_desde_historial(
+                sobrescribir=True
+            )
+            st.success(
+                f"Plantillas generadas: {resultado.get('creadas', 0)}, "
+                f"actualizadas: {resultado.get('actualizadas', 0)}"
+            )
+    with col_info:
+        st.caption(
+            "Usá este botón para construir configuraciones estándar (por ejemplo, "
+            "sueldos y cargas de Diego Messina) a partir de los gastos ya cargados."
+        )
+
+    df_plant = database.get_plantillas_gastos(activas_only=False)
+    if len(df_plant):
+        cols_ver = [
+            "id",
+            "nombre",
+            "sucursal",
+            "area",
+            "tipo",
+            "clasificacion",
+            "proveedor",
+            "pct_postventa",
+            "pct_servicios",
+            "pct_repuestos",
+            "activa",
+        ]
+        cols_ver = [c for c in cols_ver if c in df_plant.columns]
+        st.dataframe(df_plant[cols_ver], use_container_width=True)
+    else:
+        st.caption("Aún no hay plantillas de gastos generadas.")
 
 if NAVIGATION[current_page] == "overview":
     render_dashboard()
