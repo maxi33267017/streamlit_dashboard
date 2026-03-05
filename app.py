@@ -3115,7 +3115,7 @@ def render_expenses_page():
         f"Editando gasto **ID {selected}** — "
         f"{registro.get('clasificacion') or 'Sin clasificar'} · "
         f"{registro.get('fecha')} · "
-        f\"{(registro.get('sucursal') or '').strip()} · "
+        f"{(registro.get('sucursal') or '').strip()} · "
         f"USD {float(registro.get('total_usd') or 0):,.2f}"
     )
     fecha_reg = datetime.strptime(str(registro["fecha"]), "%Y-%m-%d").date()
