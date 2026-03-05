@@ -785,7 +785,11 @@ def get_plantillas_gastos(activas_only=False):
     try:
         query = "SELECT * FROM plantillas_gastos"
         if activas_only:
-            query += " WHERE activa = 1"
+            # En Postgres la columna es BOOLEAN, en SQLite es INTEGER (0/1)
+            if USE_POSTGRES:
+                query += " WHERE activa = TRUE"
+            else:
+                query += " WHERE activa = 1"
         query += " ORDER BY nombre"
 
         try:
