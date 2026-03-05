@@ -2978,13 +2978,196 @@ def render_expenses_page():
     sucursales_default = ["COMODORO", "RIO GRANDE", "RIO GALLEGOS", "COMPARTIDOS"]
     areas_default = ["POSTVENTA", "SERVICIO", "REPUESTOS"]
 
+    # Carga rápida de sueldos / cargas / obra social por persona usando plantillas
+    plantillas_todas = database.get_plantillas_gastos(activas_only=True)
+    with st.expander("Carga rápida: Sueldo + Cargas sociales + Obra social"):
+        if (
+            len(plantillas_todas)
+            and "clasificacion" in plantillas_todas.columns
+            and "proveedor" in plantillas_todas.columns
+        ):
+            mask_personal = plantillas_todas["clasificacion"].str.upper().isin(
+                ["SUELDO", "CARGAS SOCIALES", "OBRA SOCIAL"]
+            )
+            df_personal = plantillas_todas[mask_personal].copy()
+            if len(df_personal) == 0:
+                st.caption(
+                    "No se encontraron plantillas de SUELDO / CARGAS SOCIALES / OBRA SOCIAL. "
+                    "Generá plantillas desde Configuración usando el historial."
+                )
+            else:
+                personas = (
+                    df_personal["proveedor"]
+                    .fillna("")
+                    .astype(str)
+                    .str.strip()
+                    .replace("", "SIN NOMBRE")
+                    .unique()
+                )
+                personas = sorted(personas)
+                with st.form("form_carga_rapida_personal"):
+                    col_p1, col_p2 = st.columns(2)
+                    with col_p1:
+                        persona_sel = st.selectbox("Persona", personas, key="rapida_persona")
+                        fecha_p = st.date_input(
+                            "Fecha",
+                            value=date.today(),
+                            key="rapida_fecha",
+                        )
+                        sucursales_persona = (
+                            df_personal[df_personal["proveedor"] == persona_sel]["sucursal"]
+                            .dropna()
+                            .astype(str)
+                            .str.strip()
+                            .unique()
+                        )
+                        sucursales_persona = (
+                            sucursales_persona
+                            if len(sucursales_persona)
+                            else sucursales_default
+                        )
+                        suc_sel = st.selectbox(
+                            "Sucursal",
+                            sucursales_persona,
+                            key="rapida_sucursal",
+                        )
+                        areas_persona = (
+                            df_personal[df_personal["proveedor"] == persona_sel]["area"]
+                            .dropna()
+                            .astype(str)
+                            .str.strip()
+                            .unique()
+                        )
+                        areas_persona = areas_persona if len(areas_persona) else areas_default
+                        area_sel = st.selectbox(
+                            "Área",
+                            areas_persona,
+                            key="rapida_area",
+                        )
+                    with col_p2:
+                        sueldo_val = st.number_input(
+                            "Importe SUELDO (USD)",
+                            min_value=-1_000_000.0,
+                            value=0.0,
+                            step=0.01,
+                            key="rapida_sueldo",
+                        )
+                        cargas_val = st.number_input(
+                            "Importe CARGAS SOCIALES (USD)",
+                            min_value=-1_000_000.0,
+                            value=0.0,
+                            step=0.01,
+                            key="rapida_cargas",
+                        )
+                        obra_val = st.number_input(
+                            "Importe OBRA SOCIAL (USD)",
+                            min_value=-1_000_000.0,
+                            value=0.0,
+                            step=0.01,
+                            key="rapida_obra",
+                        )
+
+                    submit_rapida = st.form_submit_button("💾 Registrar sueldos/cargas/obra")
+
+                if submit_rapida:
+                    creados = 0
+                    errores = []
+
+                    def _crear_desde_clas(clasif_objetivo, monto):
+                        nonlocal creados, errores
+                        if monto == 0:
+                            return
+                        fila_cand = df_personal[
+                            (df_personal["proveedor"] == persona_sel)
+                            & (df_personal["clasificacion"].str.upper() == clasif_objetivo)
+                            & (df_personal["sucursal"].astype(str).str.strip() == str(suc_sel).strip())
+                            & (df_personal["area"].astype(str).str.strip() == str(area_sel).strip())
+                        ]
+                        if len(fila_cand) == 0:
+                            errores.append(
+                                f"No se encontró plantilla para {clasif_objetivo} de {persona_sel} "
+                                f"en {suc_sel} / {area_sel}."
+                            )
+                            return
+                        row = fila_cand.iloc[0]
+                        pct_post = float(row.get("pct_postventa") or 0.0)
+                        pct_serv = float(row.get("pct_servicios") or 0.0)
+                        pct_rep = float(row.get("pct_repuestos") or 0.0)
+                        total_pct = monto * pct_post
+                        gasto_data = {
+                            "mes": fecha_p.strftime("%B"),
+                            "fecha": fecha_p,
+                            "sucursal": row.get("sucursal"),
+                            "area": row.get("area"),
+                            "pct_postventa": pct_post,
+                            "pct_servicios": pct_serv,
+                            "pct_repuestos": pct_rep,
+                            "tipo": row.get("tipo"),
+                            "clasificacion": row.get("clasificacion"),
+                            "proveedor": row.get("proveedor"),
+                            "total_pesos": None,
+                            "total_usd": monto,
+                            "total_pct": total_pct,
+                            "total_pct_se": total_pct * pct_serv,
+                            "total_pct_re": total_pct * pct_rep,
+                            "detalles": None,
+                        }
+                        try:
+                            insert_gasto(gasto_data)
+                            creados += 1
+                        except Exception as exc:
+                            errores.append(
+                                f"Error al crear gasto {clasif_objetivo} de {persona_sel}: {exc}"
+                            )
+
+                    _crear_desde_clas("SUELDO", sueldo_val)
+                    _crear_desde_clas("CARGAS SOCIALES", cargas_val)
+                    _crear_desde_clas("OBRA SOCIAL", obra_val)
+
+                    if creados:
+                        st.success(f"Se registraron {creados} gastos de personal.")
+                        if errores:
+                            for e in errores:
+                                st.warning(e)
+                        st.experimental_rerun()
+                    else:
+                        st.warning(
+                            "No se creó ningún gasto. Verificá que los importes sean distintos de 0 "
+                            "y que existan plantillas para cada concepto."
+                        )
+        else:
+            st.caption(
+                "No se encontraron plantillas de gastos activas. "
+                "Generá plantillas desde Configuración para habilitar la carga rápida."
+            )
+
+    # Plantillas activas disponibles para autocompletar
+    plantillas_df = database.get_plantillas_gastos(activas_only=True)
+
     with st.form("form_crear_gasto"):
-        # Plantilla opcional para precargar sucursal/área/tipo/% según historial estándar
-        plantillas_df = database.get_plantillas_gastos(activas_only=True)
+        # Búsqueda y selección de plantilla para precargar sucursal/área/tipo/% según historial estándar
         plantilla_sel = None
         if len(plantillas_df):
+            # Campo de búsqueda libre sobre nombre, proveedor y clasificación
+            filtro_texto = st.text_input(
+                "Buscar plantilla (por nombre, proveedor o clasificación)",
+                value="",
+                key="gasto_plantilla_buscar",
+            ).strip().lower()
+            df_opts = plantillas_df.copy()
+            if filtro_texto:
+                def _match_row(row):
+                    texto = " ".join(
+                        str(row.get(col) or "")
+                        for col in ["nombre", "proveedor", "clasificacion", "sucursal", "area"]
+                    ).lower()
+                    return filtro_texto in texto
+
+                df_opts = df_opts[df_opts.apply(_match_row, axis=1)]
+
             opciones_plantillas = ["(sin plantilla)"] + [
-                str(row["nombre"]) for _, row in plantillas_df.iterrows()
+                f"{row.get('nombre')} · {row.get('proveedor') or ''} · {row.get('clasificacion') or ''}"
+                for _, row in df_opts.iterrows()
             ]
             nombre_sel = st.selectbox(
                 "Plantilla de gasto (opcional)",
@@ -2992,7 +3175,9 @@ def render_expenses_page():
                 key="gasto_plantilla",
             )
             if nombre_sel != "(sin plantilla)":
-                fila = plantillas_df[plantillas_df["nombre"] == nombre_sel]
+                # Extraer nombre real antes del primer separador
+                nombre_real = nombre_sel.split(" · ", 1)[0]
+                fila = plantillas_df[plantillas_df["nombre"] == nombre_real]
                 if len(fila):
                     plantilla_sel = fila.iloc[0].to_dict()
                     st.caption(
@@ -3392,6 +3577,167 @@ def render_settings_page():
         ]
         cols_ver = [c for c in cols_ver if c in df_plant.columns]
         st.dataframe(df_plant[cols_ver], use_container_width=True)
+
+        st.subheader("Editar o eliminar plantilla")
+        # Selector con búsqueda integrada (Streamlit) por nombre
+        opciones_edit = [
+            f"ID {int(row['id'])} · {row['nombre']}"
+            for _, row in df_plant.sort_values("nombre").iterrows()
+        ]
+        sel_etiqueta = st.selectbox(
+            "Seleccioná una plantilla para editar",
+            opciones_edit,
+            key="plantilla_edit_selector",
+        )
+        id_sel = None
+        if sel_etiqueta:
+            try:
+                id_str = sel_etiqueta.split(" ", 2)[1]
+                id_sel = int(id_str)
+            except Exception:
+                id_sel = None
+
+        if id_sel is not None:
+            fila_sel = df_plant[df_plant["id"] == id_sel]
+            if len(fila_sel):
+                fila = fila_sel.iloc[0]
+                with st.form("form_editar_plantilla"):
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        nombre = st.text_input("Nombre", value=str(fila.get("nombre") or ""))
+                        sucursal = st.text_input(
+                            "Sucursal", value=str(fila.get("sucursal") or "")
+                        )
+                        area = st.text_input("Área", value=str(fila.get("area") or ""))
+                        tipo = st.text_input("Tipo", value=str(fila.get("tipo") or ""))
+                        clasificacion = st.text_input(
+                            "Clasificación", value=str(fila.get("clasificacion") or "")
+                        )
+                    with col2:
+                        proveedor = st.text_input(
+                            "Proveedor / Persona",
+                            value=str(fila.get("proveedor") or ""),
+                        )
+                        pct_postventa = st.slider(
+                            "% Postventa",
+                            0.0,
+                            1.0,
+                            float(fila.get("pct_postventa") or 0.0),
+                            0.05,
+                        )
+                        pct_servicios = st.slider(
+                            "% Servicios",
+                            0.0,
+                            1.0,
+                            float(fila.get("pct_servicios") or 0.0),
+                            0.05,
+                        )
+                        pct_repuestos = st.slider(
+                            "% Repuestos",
+                            0.0,
+                            1.0,
+                            float(fila.get("pct_repuestos") or 0.0),
+                            0.05,
+                        )
+                        activa = st.checkbox(
+                            "Activa",
+                            value=bool(fila.get("activa", True)),
+                        )
+
+                    detalles = st.text_area(
+                        "Detalles (opcional)", value=str(fila.get("detalles") or "")
+                    )
+
+                    col_btn1, col_btn2, col_btn3 = st.columns([2, 1, 1])
+                    with col_btn1:
+                        guardar = st.form_submit_button("💾 Guardar cambios")
+                    with col_btn2:
+                        desactivar = st.form_submit_button("⏸️ Desactivar", help="Marca la plantilla como inactiva.")
+                    with col_btn3:
+                        eliminar = st.form_submit_button(
+                            "🗑️ Eliminar", help="Eliminar definitivamente la plantilla seleccionada."
+                        )
+
+                if guardar:
+                    plantilla_data = {
+                        "nombre": nombre.strip(),
+                        "descripcion": fila.get("descripcion"),
+                        "sucursal": sucursal.strip() or None,
+                        "area": area.strip() or None,
+                        "pct_postventa": pct_postventa,
+                        "pct_servicios": pct_servicios,
+                        "pct_repuestos": pct_repuestos,
+                        "tipo": tipo.strip() or None,
+                        "clasificacion": clasificacion.strip() or None,
+                        "proveedor": proveedor.strip() or None,
+                        "detalles": detalles.strip() or None,
+                        "activa": bool(activa),
+                    }
+                    try:
+                        database.update_plantilla_gasto(int(id_sel), plantilla_data)
+                        st.success("Plantilla actualizada.")
+                        st.experimental_rerun()
+                    except Exception as exc:
+                        st.error(f"No se pudo actualizar la plantilla: {exc}")
+                if desactivar:
+                    try:
+                        plantilla_desact = {
+                            "nombre": fila.get("nombre"),
+                            "descripcion": fila.get("descripcion"),
+                            "sucursal": fila.get("sucursal"),
+                            "area": fila.get("area"),
+                            "pct_postventa": float(fila.get("pct_postventa") or 0),
+                            "pct_servicios": float(fila.get("pct_servicios") or 0),
+                            "pct_repuestos": float(fila.get("pct_repuestos") or 0),
+                            "tipo": fila.get("tipo"),
+                            "clasificacion": fila.get("clasificacion"),
+                            "proveedor": fila.get("proveedor"),
+                            "detalles": fila.get("detalles"),
+                            "activa": False,
+                        }
+                        database.update_plantilla_gasto(int(id_sel), plantilla_desact)
+                        st.info("Plantilla desactivada.")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"No se pudo desactivar la plantilla: {exc}")
+                if eliminar:
+                    try:
+                        database.delete_plantilla_gasto(int(id_sel))
+                        st.warning("Plantilla eliminada.")
+                        st.experimental_rerun()
+                    except Exception as exc:
+                        st.error(f"No se pudo eliminar la plantilla: {exc}")
+
+        # Vista agrupada para sueldos / cargas / obra social por persona
+        st.subheader("Resumen de plantillas de personal")
+        if "clasificacion" in df_plant.columns and "proveedor" in df_plant.columns:
+            mask_personal = df_plant["clasificacion"].str.upper().isin(
+                ["SUELDO", "CARGAS SOCIALES", "OBRA SOCIAL"]
+            )
+            df_personal = df_plant[mask_personal].copy()
+            if len(df_personal):
+                df_personal_view = df_personal[
+                    [
+                        c
+                        for c in [
+                            "proveedor",
+                            "sucursal",
+                            "area",
+                            "tipo",
+                            "clasificacion",
+                            "pct_postventa",
+                            "pct_servicios",
+                            "pct_repuestos",
+                            "activa",
+                        ]
+                        if c in df_personal.columns
+                    ]
+                ].sort_values(["proveedor", "sucursal", "area", "clasificacion"])
+                st.dataframe(df_personal_view, use_container_width=True)
+            else:
+                st.caption(
+                    "No se encontraron plantillas de SUELDO / CARGAS SOCIALES / OBRA SOCIAL aún."
+                )
     else:
         st.caption("Aún no hay plantillas de gastos generadas.")
 
