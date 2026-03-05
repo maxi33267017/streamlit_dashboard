@@ -2981,6 +2981,11 @@ def render_expenses_page():
     # Carga rápida de sueldos / cargas / obra social por persona usando plantillas
     plantillas_todas = database.get_plantillas_gastos(activas_only=True)
     with st.expander("Carga rápida: Sueldo + Cargas sociales + Obra social"):
+        st.caption(
+            "Los **% Postventa / Servicios / Repuestos** se toman de la **plantilla** que corresponde "
+            "a cada persona, sucursal, área y concepto (Sueldo, Cargas sociales, Obra social). "
+            "Solo cargás los importes; los % ya están definidos en Configuración."
+        )
         if (
             len(plantillas_todas)
             and "clasificacion" in plantillas_todas.columns
