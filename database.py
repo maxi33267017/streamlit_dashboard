@@ -1513,12 +1513,17 @@ def import_ventas_from_oficio_pdf(pdf_path: Path) -> tuple[int, list[str], dict]
     - Notas de crédito se detectan por el texto del comprobante.
     """
     import importlib.util
+    import sys
 
     root = Path(__file__).resolve().parent
+    mod_name = "parse_oficio_pdf_to_csv"
     spec = importlib.util.spec_from_file_location(
-        "parse_oficio_pdf_to_csv", root / "scripts" / "parse_oficio_pdf_to_csv.py"
+        mod_name, root / "scripts" / "parse_oficio_pdf_to_csv.py"
     )
     mod = importlib.util.module_from_spec(spec)
+    # Registrar en sys.modules antes de exec_module: @dataclass necesita
+    # sys.modules[cls.__module__] al definir las clases del archivo.
+    sys.modules[mod_name] = mod
     spec.loader.exec_module(mod)
 
     df_raw = mod.parse_pdf(Path(pdf_path))
