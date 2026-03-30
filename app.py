@@ -326,12 +326,35 @@ def format_percentage(value: float) -> str:
 
 
 def sanitize_latin1(text: str | None) -> str:
-    """Remueve caracteres fuera de latin-1 para evitar errores en FPDF."""
+    """Normaliza texto a latin-1 para FPDF (reemplaza caracteres no representables)."""
     if text is None:
         return ""
     if not isinstance(text, str):
         text = str(text)
-    return text.encode("latin-1", "ignore").decode("latin-1")
+    text = (
+        text.replace("\u2212", "-")
+        .replace("\u2013", "-")
+        .replace("\u2014", "-")
+    )
+    return text.encode("latin-1", "replace").decode("latin-1")
+
+
+class SafeLatin1FPDF(FPDF):
+    """FPDF que sanea ``cell`` / ``multi_cell`` para que ``output`` no falle con Unicode."""
+
+    def cell(self, w, h=0, txt="", *args, **kwargs):
+        if txt is None:
+            txt = ""
+        else:
+            txt = sanitize_latin1(str(txt))
+        return super().cell(w, h, txt, *args, **kwargs)
+
+    def multi_cell(self, w, h, txt="", *args, **kwargs):
+        if txt is None:
+            txt = ""
+        else:
+            txt = sanitize_latin1(str(txt))
+        return super().multi_cell(w, h, txt, *args, **kwargs)
 
 
 def sanitize_list_latin1(items: list[str] | None, limit: int | None = None) -> list[str]:
@@ -2247,7 +2270,7 @@ def build_operativo_pdf(
         ]
         bullet_block("Anomalías relevantes", anomalias, max_items=3)
 
-    pdf = FPDF()
+    pdf = SafeLatin1FPDF()
     pdf.add_page()
     pdf.set_font("Arial", "B", 16)
     pdf.cell(0, 10, f"Informe de Gestión Postventa - {empresa}", ln=1)

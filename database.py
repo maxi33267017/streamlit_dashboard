@@ -370,26 +370,91 @@ def alinear_montos_nota_credito(
     return t, r, mo, a, ter, cr
 
 
-def _ensure_ventas_column_costo_repuestos(cursor, conn) -> None:
-    """Asegura columna ``costo_repuestos`` en ``ventas`` (bases creadas antes de esta migración)."""
-    try:
-        if USE_POSTGRES:
-            cursor.execute("""
-                SELECT column_name 
-                FROM information_schema.columns 
-                WHERE table_name='ventas' AND column_name='costo_repuestos'
-            """)
-            if cursor.fetchone() is None:
-                _execute(cursor, "ALTER TABLE ventas ADD COLUMN costo_repuestos DOUBLE PRECISION")
-                conn.commit()
-        else:
+def _pg_ventas_column_exists(cursor, column_name: str) -> bool:
+    _execute(
+        cursor,
+        """
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'ventas' AND column_name = ?
+        """,
+        (column_name,),
+    )
+    return cursor.fetchone() is not None
+
+
+def _ensure_ventas_optional_columns(cursor, conn) -> None:
+    """Añade columnas que el INSERT/UPDATE esperan si la tabla es antigua (p. ej. Postgres en la nube)."""
+    if USE_POSTGRES:
+        try:
+            added_servicio = False
+            if not _pg_ventas_column_exists(cursor, "archivo_comprobante"):
+                _execute(cursor, "ALTER TABLE ventas ADD COLUMN archivo_comprobante TEXT")
+            if not _pg_ventas_column_exists(cursor, "campo_taller"):
+                _execute(cursor, "ALTER TABLE ventas ADD COLUMN campo_taller TEXT")
+            if not _pg_ventas_column_exists(cursor, "servicio"):
+                _execute(
+                    cursor,
+                    "ALTER TABLE ventas ADD COLUMN servicio DOUBLE PRECISION DEFAULT 0",
+                )
+                added_servicio = True
+            if not _pg_ventas_column_exists(cursor, "costo_repuestos"):
+                _execute(
+                    cursor,
+                    "ALTER TABLE ventas ADD COLUMN costo_repuestos DOUBLE PRECISION",
+                )
+            if added_servicio:
+                _execute(
+                    cursor,
+                    """
+                    UPDATE ventas SET servicio = CASE
+                        WHEN UPPER(COALESCE(tipo_re_se, '')) = 'RE' THEN 0
+                        ELSE COALESCE(total, 0) - COALESCE(repuestos, 0)
+                    END
+                    """,
+                )
+            conn.commit()
+        except Exception:
             try:
-                _execute(cursor, "ALTER TABLE ventas ADD COLUMN costo_repuestos REAL")
+                conn.rollback()
+            except Exception:
+                pass
+            raise
+    else:
+        added_servicio_sqlite = False
+        for ddl in (
+            "ALTER TABLE ventas ADD COLUMN archivo_comprobante TEXT",
+            "ALTER TABLE ventas ADD COLUMN campo_taller TEXT",
+        ):
+            try:
+                _execute(cursor, ddl)
                 conn.commit()
             except sqlite3.OperationalError:
                 pass
-    except Exception:
-        pass
+        try:
+            _execute(cursor, "ALTER TABLE ventas ADD COLUMN servicio REAL DEFAULT 0")
+            conn.commit()
+            added_servicio_sqlite = True
+        except sqlite3.OperationalError:
+            pass
+        try:
+            _execute(cursor, "ALTER TABLE ventas ADD COLUMN costo_repuestos REAL")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
+        if added_servicio_sqlite:
+            try:
+                _execute(
+                    cursor,
+                    """
+                    UPDATE ventas SET servicio = CASE
+                        WHEN UPPER(COALESCE(tipo_re_se, '')) = 'RE' THEN 0
+                        ELSE COALESCE(total, 0) - COALESCE(repuestos, 0)
+                    END
+                    """,
+                )
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass
 
 
 def get_connection():
@@ -411,92 +476,18 @@ def init_database():
 
     if USE_POSTGRES:
         _execute(cursor, VENTAS_TABLE_PG)
-        # Agregar columnas si no existen (para bases de datos existentes)
         try:
-            # Verificar si archivo_comprobante existe
-            cursor.execute("""
-                SELECT column_name 
-                FROM information_schema.columns 
-                WHERE table_name='ventas' AND column_name='archivo_comprobante'
-            """)
-            if cursor.fetchone() is None:
-                _execute(cursor, "ALTER TABLE ventas ADD COLUMN archivo_comprobante TEXT")
-        except Exception:
-            pass  # La columna ya existe o hay un error
-        
-        try:
-            # Verificar si campo_taller existe
-            cursor.execute("""
-                SELECT column_name 
-                FROM information_schema.columns 
-                WHERE table_name='ventas' AND column_name='campo_taller'
-            """)
-            if cursor.fetchone() is None:
-                _execute(cursor, "ALTER TABLE ventas ADD COLUMN campo_taller TEXT")
-        except Exception:
-            pass  # La columna ya existe o hay un error
-
-        try:
-            cursor.execute("""
-                SELECT column_name 
-                FROM information_schema.columns 
-                WHERE table_name='ventas' AND column_name='servicio'
-            """)
-            if cursor.fetchone() is None:
-                _execute(cursor, "ALTER TABLE ventas ADD COLUMN servicio DOUBLE PRECISION DEFAULT 0")
-                _execute(
-                    cursor,
-                    """
-                    UPDATE ventas SET servicio = CASE
-                        WHEN UPPER(COALESCE(tipo_re_se, '')) = 'RE' THEN 0
-                        ELSE COALESCE(total, 0) - COALESCE(repuestos, 0)
-                    END
-                    """,
-                )
+            _ensure_ventas_optional_columns(cursor, conn)
         except Exception:
             pass
-
-        try:
-            cursor.execute("""
-                SELECT column_name 
-                FROM information_schema.columns 
-                WHERE table_name='ventas' AND column_name='costo_repuestos'
-            """)
-            if cursor.fetchone() is None:
-                _execute(cursor, "ALTER TABLE ventas ADD COLUMN costo_repuestos DOUBLE PRECISION")
-        except Exception:
-            pass
-        
         _execute(cursor, GASTOS_TABLE_PG)
         _execute(cursor, PLANTILLAS_TABLE_PG)
         _execute(cursor, HISTORIAL_TABLE_PG)
     else:
         _execute(cursor, VENTAS_TABLE_SQLITE)
-        # Agregar columnas si no existen (para bases de datos existentes)
         try:
-            _execute(cursor, "ALTER TABLE ventas ADD COLUMN archivo_comprobante TEXT")
-        except sqlite3.OperationalError:
-            pass  # La columna ya existe
-        try:
-            _execute(cursor, "ALTER TABLE ventas ADD COLUMN campo_taller TEXT")
-        except sqlite3.OperationalError:
-            pass  # La columna ya existe
-        try:
-            _execute(cursor, "ALTER TABLE ventas ADD COLUMN servicio REAL DEFAULT 0")
-            _execute(
-                cursor,
-                """
-                UPDATE ventas SET servicio = CASE
-                    WHEN UPPER(COALESCE(tipo_re_se, '')) = 'RE' THEN 0
-                    ELSE COALESCE(total, 0) - COALESCE(repuestos, 0)
-                END
-                """,
-            )
-        except sqlite3.OperationalError:
-            pass
-        try:
-            _execute(cursor, "ALTER TABLE ventas ADD COLUMN costo_repuestos REAL")
-        except sqlite3.OperationalError:
+            _ensure_ventas_optional_columns(cursor, conn)
+        except Exception:
             pass
         _execute(cursor, GASTOS_TABLE_SQLITE)
         _execute(cursor, PLANTILLAS_TABLE_SQLITE)
@@ -548,29 +539,9 @@ def insert_venta(venta_data):
     """Inserta una nueva venta"""
     conn = get_connection()
     cursor = conn.cursor()
-    
-    # Verificar y agregar columna campo_taller si no existe
-    try:
-        if USE_POSTGRES:
-            cursor.execute("""
-                SELECT column_name 
-                FROM information_schema.columns 
-                WHERE table_name='ventas' AND column_name='campo_taller'
-            """)
-            if cursor.fetchone() is None:
-                _execute(cursor, "ALTER TABLE ventas ADD COLUMN campo_taller TEXT")
-                conn.commit()
-        else:
-            try:
-                _execute(cursor, "ALTER TABLE ventas ADD COLUMN campo_taller TEXT")
-                conn.commit()
-            except sqlite3.OperationalError:
-                pass  # La columna ya existe
-    except Exception:
-        pass  # Si hay error, continuar (la columna puede ya existir)
 
     venta_data = dict(venta_data)
-    _ensure_ventas_column_costo_repuestos(cursor, conn)
+    _ensure_ventas_optional_columns(cursor, conn)
     raw_costo = venta_data.get("costo_repuestos")
     costo_in = float(raw_costo) if raw_costo is not None and raw_costo != "" else 0.0
     t, r, mo, a, ter, cr = alinear_montos_nota_credito(
@@ -644,29 +615,9 @@ def update_venta(venta_id, venta_data):
     """Actualiza una venta existente"""
     conn = get_connection()
     cursor = conn.cursor()
-    
-    # Verificar y agregar columna campo_taller si no existe
-    try:
-        if USE_POSTGRES:
-            cursor.execute("""
-                SELECT column_name 
-                FROM information_schema.columns 
-                WHERE table_name='ventas' AND column_name='campo_taller'
-            """)
-            if cursor.fetchone() is None:
-                _execute(cursor, "ALTER TABLE ventas ADD COLUMN campo_taller TEXT")
-                conn.commit()
-        else:
-            try:
-                _execute(cursor, "ALTER TABLE ventas ADD COLUMN campo_taller TEXT")
-                conn.commit()
-            except sqlite3.OperationalError:
-                pass  # La columna ya existe
-    except Exception:
-        pass  # Si hay error, continuar (la columna puede ya existir)
 
     venta_data = dict(venta_data)
-    _ensure_ventas_column_costo_repuestos(cursor, conn)
+    _ensure_ventas_optional_columns(cursor, conn)
     raw_costo = venta_data.get("costo_repuestos")
     costo_in = float(raw_costo) if raw_costo is not None and raw_costo != "" else 0.0
     t, r, mo, a, ter, cr = alinear_montos_nota_credito(
