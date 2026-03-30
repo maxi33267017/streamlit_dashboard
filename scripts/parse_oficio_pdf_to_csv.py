@@ -9,6 +9,10 @@ Metodología alineada con control manual:
 - Repuestos: primera cifra de ``Total repuestos`` = venta a **precio de lista** (misma base
   que el detalle del informe).
 - RE / SE: canal mostrador vs servicio.
+- **Total repuestos** (PDF): primera cifra del bloque ``Total repuestos`` del comprobante; si el
+  bloque se repite, se usa la **última** línea fusionada. Ese valor es la columna ``repuestos`` en BD.
+- **Servicio** (SE): ``total − repuestos`` después de aplicar (o no) neto IVA con
+  ``aplica_neto_iva21_desde_pdf`` (ERASJIDO o sucursal 2 → ÷ 1,21 en total y en repuestos).
 - Columna **Otros (\*)**: tercer número de ``Total comprobante`` cuando hay 5+ importes.
   ``total_sin_impuestos − venta_precio_lista`` incluye mano de obra + otros + segunda columna
   de repuestos del renglón; solo coincide con **Otros (\*)** cuando no hay más conceptos.
@@ -101,22 +105,29 @@ def parse_total_comprobante_fields(
     return total_sin_imp, impuestos, total_con_imp, otros
 
 
+def aplica_neto_iva21_desde_pdf(usuario: str | None, sucursal_codigo: str | None) -> bool:
+    """Indica si total y línea «Total repuestos» deben pasar a neto sin IVA (÷ 1,21).
+
+    - **Sí** (neto): usuario contiene **ERASJIDO** (p. ej. ``11-ERASJIDO``) **o** código de sucursal **2**
+      (Comodoro). Así el **servicio** (SE) = total_neto − repuestos_neto en la misma base.
+    - **No**: sucursal **1** (Río Grande en el PDF) con usuario **distinto** de ERASJIDO: se usan
+      importes del PDF tal cual (sin ÷ 1,21) para total y repuestos.
+    """
+    u = (usuario or "").upper()
+    if "ERASJIDO" in u:
+        return True
+    if (sucursal_codigo or "").strip() == "2":
+        return True
+    return False
+
+
 def total_comprobante_neto_sin_iva21(
     total_con_imp: float | None, usuario: str | None, sucursal_codigo: str | None
 ) -> float | None:
-    """Importe llevado a neto sin IVA 21 % (÷ 1,21) donde aplica.
-
-    Usado para el **total del comprobante** y, al importar en neto, para la línea **Total repuestos**,
-    para que ambos queden en la misma base.
-
-    Regla de negocio: facturas de usuario **ERASJIDO** (Río Gallegos) y **sucursal 2**
-    (Comodoro) vienen con IVA en el importe del PDF; en neto se divide por 1,21.
-    **No** es ``total * 0,79`` (eso no revierte el IVA 21 %).
-    """
+    """Importe llevado a neto sin IVA 21 % (÷ 1,21) solo si `aplica_neto_iva21_desde_pdf`."""
     if total_con_imp is None:
         return None
-    u = (usuario or "").upper()
-    if "ERASJIDO" in u or (sucursal_codigo or "").strip() == "2":
+    if aplica_neto_iva21_desde_pdf(usuario, sucursal_codigo):
         return float(total_con_imp) / 1.21
     return float(total_con_imp)
 
@@ -407,13 +418,26 @@ def to_app_sales_csv(df: pd.DataFrame, *, use_total_neto_iva21: bool = False) ->
         )
     out["tipo_comprobante"] = df["comprobante_texto"].apply(_tipo_comprobante_desde_texto)
     out["comprobante"] = df["comprobante_texto"]
-    out["detalles"] = (
-        "OR: " + df["or_relacionada"].fillna("")
-        + " | Usuario: " + df["usuario"].fillna("")
-        + " | Costo FIFO: " + df["costo_fifo"].fillna(0).astype(str)
-        + " | Util$ ventas: " + df["utilidad_sobre_ventas_monto"].fillna(0).astype(str)
-        + " | Util% ventas: " + df["utilidad_sobre_ventas_pct"].fillna(0).astype(str)
+    out["usuario_autologica"] = (
+        df["usuario"].fillna("").astype(str).str.strip()
+        if "usuario" in df.columns
+        else pd.Series("", index=df.index, dtype=object)
     )
+    _pct = (
+        df["utilidad_sobre_ventas_pct"]
+        if "utilidad_sobre_ventas_pct" in df.columns
+        else pd.Series(float("nan"), index=df.index)
+    )
+    _monto = (
+        df["utilidad_sobre_ventas_monto"]
+        if "utilidad_sobre_ventas_monto" in df.columns
+        else pd.Series(float("nan"), index=df.index)
+    )
+    out["utilidad_ventas_pct"] = pd.to_numeric(_pct, errors="coerce")
+    out["utilidad_ventas_monto"] = pd.to_numeric(_monto, errors="coerce")
+    # Solo OR en texto libre; usuario / FIFO / utilidades van en columnas propias o costo_repuestos
+    _or = df["or_relacionada"].fillna("").astype(str).str.strip()
+    out["detalles"] = _or.apply(lambda s: f"OR: {s}" if s else None)
     # Servicio (no repuestos) para importar a ventas.servicio; RE = 0
     tre = out["tipo_re_se"].astype(str).str.upper()
     out["servicio"] = (out["total"] - out["repuestos"].fillna(0)).where(tre == "SE", 0.0)

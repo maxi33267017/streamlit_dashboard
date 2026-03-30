@@ -402,6 +402,18 @@ def _ensure_ventas_optional_columns(cursor, conn) -> None:
                     cursor,
                     "ALTER TABLE ventas ADD COLUMN costo_repuestos DOUBLE PRECISION",
                 )
+            if not _pg_ventas_column_exists(cursor, "usuario_autologica"):
+                _execute(cursor, "ALTER TABLE ventas ADD COLUMN usuario_autologica TEXT")
+            if not _pg_ventas_column_exists(cursor, "utilidad_ventas_pct"):
+                _execute(
+                    cursor,
+                    "ALTER TABLE ventas ADD COLUMN utilidad_ventas_pct DOUBLE PRECISION",
+                )
+            if not _pg_ventas_column_exists(cursor, "utilidad_ventas_monto"):
+                _execute(
+                    cursor,
+                    "ALTER TABLE ventas ADD COLUMN utilidad_ventas_monto DOUBLE PRECISION",
+                )
             if added_servicio:
                 _execute(
                     cursor,
@@ -441,6 +453,16 @@ def _ensure_ventas_optional_columns(cursor, conn) -> None:
             conn.commit()
         except sqlite3.OperationalError:
             pass
+        for ddl in (
+            "ALTER TABLE ventas ADD COLUMN usuario_autologica TEXT",
+            "ALTER TABLE ventas ADD COLUMN utilidad_ventas_pct REAL",
+            "ALTER TABLE ventas ADD COLUMN utilidad_ventas_monto REAL",
+        ):
+            try:
+                _execute(cursor, ddl)
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass
         if added_servicio_sqlite:
             try:
                 _execute(
@@ -517,7 +539,18 @@ def get_ventas(fecha_inicio=None, fecha_fin=None):
     if len(df):
         df = _sanitize_dataframe(
             df,
-            ["mano_obra", "asistencia", "repuestos", "terceros", "servicio", "descuento", "total", "costo_repuestos"],
+            [
+                "mano_obra",
+                "asistencia",
+                "repuestos",
+                "terceros",
+                "servicio",
+                "descuento",
+                "total",
+                "costo_repuestos",
+                "utilidad_ventas_pct",
+                "utilidad_ventas_monto",
+            ],
         )
     conn.close()
     
@@ -572,8 +605,8 @@ def insert_venta(venta_data):
             mes, fecha, sucursal, cliente, pin, comprobante, tipo_comprobante,
             trabajo, n_comprobante, tipo_re_se, mano_obra, asistencia,
             repuestos, terceros, servicio, descuento, total, detalles, archivo_comprobante, campo_taller,
-            costo_repuestos
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            costo_repuestos, usuario_autologica, utilidad_ventas_pct, utilidad_ventas_monto
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
     params = (
         venta_data.get('mes'),
@@ -597,6 +630,9 @@ def insert_venta(venta_data):
         venta_data.get('archivo_comprobante'),
         venta_data.get('campo_taller'),
         costo_para_db,
+        venta_data.get('usuario_autologica'),
+        venta_data.get('utilidad_ventas_pct'),
+        venta_data.get('utilidad_ventas_monto'),
     )
 
     if USE_POSTGRES:
@@ -650,7 +686,7 @@ def update_venta(venta_id, venta_data):
             n_comprobante = ?, tipo_re_se = ?, mano_obra = ?,
             asistencia = ?, repuestos = ?, terceros = ?, servicio = ?, descuento = ?,
             total = ?, detalles = ?, archivo_comprobante = ?, campo_taller = ?,
-            costo_repuestos = ?
+            costo_repuestos = ?, usuario_autologica = ?, utilidad_ventas_pct = ?, utilidad_ventas_monto = ?
         WHERE id = ?
     """, (
         venta_data.get('mes'),
@@ -674,6 +710,9 @@ def update_venta(venta_id, venta_data):
         venta_data.get('archivo_comprobante'),
         venta_data.get('campo_taller'),
         costo_para_db,
+        venta_data.get('usuario_autologica'),
+        venta_data.get('utilidad_ventas_pct'),
+        venta_data.get('utilidad_ventas_monto'),
         venta_id
     ))
     
@@ -1458,9 +1497,12 @@ def import_ventas_from_oficio_pdf(pdf_path: Path) -> tuple[int, list[str], dict]
     """Importa ventas desde el PDF «Ventas detalladas (por comprobante)» de Autologica.
 
     - Un registro por comprobante (bloques duplicados en el PDF se fusionan).
-    - El **total** guardado usa ``total_con_impuestos_neto_iva21`` (÷ 1,21 en usuario ERASJIDO
-      y sucursal 2 Comodoro). La línea **repuestos** usa la misma regla para no mezclar bases.
-    - **costo_repuestos** = costo FIFO / mercadería del PDF (columna ``costo_fifo`` del parseo).
+    - **total** y **repuestos** (línea «Total repuestos» del PDF): neto sin IVA (÷ 1,21) solo si
+      aplica a ese comprobante (usuario **ERASJIDO** o sucursal **2** Comodoro); si no, importes
+      tal cual. **servicio** (SE) = total − repuestos con esos valores ya alineados.
+    - **costo_repuestos** = costo FIFO del PDF (3.er número en «Total repuestos»).
+    - **usuario_autologica**, **utilidad_ventas_pct**, **utilidad_ventas_monto** en columnas propias;
+      **detalles** solo conserva texto de OR si existe.
     - Notas de crédito se detectan por el texto del comprobante.
     """
     import importlib.util
@@ -1502,6 +1544,22 @@ def import_ventas_from_oficio_pdf(pdf_path: Path) -> tuple[int, list[str], dict]
             fecha = pd.to_datetime(row["fecha"]).date()
             tc = str(row.get("tipo_comprobante") or "FACTURA VENTA")
             cr_pdf = row.get("costo_repuestos")
+
+            def _opt_float_pdf(key: str):
+                v = row.get(key)
+                if v is None or (isinstance(v, float) and pd.isna(v)):
+                    return None
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    return None
+
+            ua = row.get("usuario_autologica")
+            if ua is not None and not (isinstance(ua, float) and pd.isna(ua)):
+                ua = str(ua).strip() or None
+            else:
+                ua = None
+
             venta_data = {
                 "mes": fecha.strftime("%B"),
                 "fecha": fecha,
@@ -1531,6 +1589,9 @@ def import_ventas_from_oficio_pdf(pdf_path: Path) -> tuple[int, list[str], dict]
                 "costo_repuestos": float(cr_pdf)
                 if cr_pdf is not None and not (isinstance(cr_pdf, float) and pd.isna(cr_pdf))
                 else None,
+                "usuario_autologica": ua,
+                "utilidad_ventas_pct": _opt_float_pdf("utilidad_ventas_pct"),
+                "utilidad_ventas_monto": _opt_float_pdf("utilidad_ventas_monto"),
             }
             insert_venta(venta_data)
             count += 1

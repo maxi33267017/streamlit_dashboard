@@ -2709,9 +2709,9 @@ def render_sales_page():
             Subí el PDF del informe **Autologica › Ventas › Ventas detalladas (por comprobante)**.
 
             - Se importa **un registro por comprobante** (si el PDF repite el mismo número en otra página, se fusiona).
-            - **Total** en base: importe neto sin IVA 21 % (**÷ 1,21**) en facturas de usuario **ERASJIDO** y **sucursal 2 (Comodoro)**; el resto queda como en el PDF.
-            - **Repuestos** (línea del comprobante) usa la **misma** regla ÷ 1,21 cuando aplica, para que total y repuestos no mezclen neto y bruto.
-            - **Servicio** en SE = total − repuestos con esos valores ya alineados.
+            - **Total** y **repuestos** (línea «Total repuestos» del PDF): neto sin IVA (**÷ 1,21**) solo si el comprobante es usuario **ERASJIDO** o sucursal **2 (Comodoro)**; en sucursal **1** con otro usuario, importes tal cual.
+            - **Costo FIFO** del PDF se guarda en **costo_repuestos**. **Usuario** Autologica y **utilidades** (% y $) van en columnas dedicadas; **detalles** solo guarda la OR si existe.
+            - **Servicio** (SE) = total − repuestos con esos montos ya homogéneos.
             - Volvé a cargar el mismo PDF **duplica** filas: si reimportás un período, borrá antes los registros o usá fechas para no mezclar.
             """
         )
