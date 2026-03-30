@@ -1758,23 +1758,20 @@ def render_reports_ventas():
             "Detalle por sucursal: Río Grande, Río Gallegos y Comodoro",
             anchor="detalle_sucursales_clave",
         )
+        st.caption(
+            "«Ventas RE (total)» coincide con la métrica «Ventas repuestos (RE)»: suma del **total** "
+            "de cada comprobante RE. No usa solo el campo `repuestos` del renglón (que puede ser menor "
+            "si el comprobante incluye otros conceptos)."
+        )
 
-        # Repuestos por mostrador (RE)
+        # Misma base que total_re arriba: total del comprobante RE (no solo columna repuestos)
         ventas_re_suc = df_sucursales[df_sucursales["tipo_re_se"] == "RE"].copy()
-        if (
-            "repuestos" in ventas_re_suc.columns
-            and ventas_re_suc["repuestos"].notna().any()
-        ):
-            ventas_re_suc["repuestos_mostrador"] = ventas_re_suc["repuestos"].fillna(
-                ventas_re_suc["total"]
-            )
-        else:
-            ventas_re_suc["repuestos_mostrador"] = ventas_re_suc["total"]
+        ventas_re_suc["ventas_re_total"] = ventas_re_suc["total"]
 
         rep_mostrador = (
-            ventas_re_suc.groupby("sucursal_norm")["repuestos_mostrador"]
+            ventas_re_suc.groupby("sucursal_norm")["ventas_re_total"]
             .sum()
-            .reset_index(name="Repuestos mostrador")
+            .reset_index(name="Ventas RE (total)")
         )
 
         # Repuestos por servicios (SE)
@@ -1813,23 +1810,23 @@ def render_reports_ventas():
             .fillna(0)
         )
 
-        resumen["Total repuestos"] = (
-            resumen["Repuestos mostrador"] + resumen["Repuestos servicios"]
+        resumen["Subtotal (RE + rep. SE)"] = (
+            resumen["Ventas RE (total)"] + resumen["Repuestos servicios"]
         )
-        resumen["Total servicios"] = resumen["servicio"]
+        resumen["Total servicios (SE)"] = resumen["servicio"]
         resumen = resumen.drop(columns=["servicio"])
-        resumen["Suma de los dos totales"] = (
-            resumen["Total repuestos"] + resumen["Total servicios"]
+        resumen["Total sucursal"] = (
+            resumen["Subtotal (RE + rep. SE)"] + resumen["Total servicios (SE)"]
         )
 
         # Fila total general
         total_row = {
             "sucursal_norm": "TOTAL GENERAL",
-            "Repuestos mostrador": resumen["Repuestos mostrador"].sum(),
+            "Ventas RE (total)": resumen["Ventas RE (total)"].sum(),
             "Repuestos servicios": resumen["Repuestos servicios"].sum(),
-            "Total repuestos": resumen["Total repuestos"].sum(),
-            "Total servicios": resumen["Total servicios"].sum(),
-            "Suma de los dos totales": resumen["Suma de los dos totales"].sum(),
+            "Subtotal (RE + rep. SE)": resumen["Subtotal (RE + rep. SE)"].sum(),
+            "Total servicios (SE)": resumen["Total servicios (SE)"].sum(),
+            "Total sucursal": resumen["Total sucursal"].sum(),
         }
         resumen = pd.concat([resumen, pd.DataFrame([total_row])], ignore_index=True)
 
@@ -1839,11 +1836,11 @@ def render_reports_ventas():
         # Orden y formato de columnas (Total servicios = total − repuestos en SE)
         columnas_orden = [
             "Sucursal",
-            "Repuestos mostrador",
+            "Ventas RE (total)",
             "Repuestos servicios",
-            "Total repuestos",
-            "Total servicios",
-            "Suma de los dos totales",
+            "Subtotal (RE + rep. SE)",
+            "Total servicios (SE)",
+            "Total sucursal",
         ]
         resumen = resumen[columnas_orden]
 
@@ -1969,15 +1966,14 @@ def render_reports_ventas():
     st.plotly_chart(fig_re_se, use_container_width=True)
 
     st.divider()
-    st.subheader("Repuestos por sucursal (Mostrador vs Servicios)")
+    st.subheader("Ventas RE vs repuestos en servicios (SE) por sucursal")
 
     mostrador = ventas_re.copy()
-    if "repuestos" in mostrador.columns and mostrador["repuestos"].notna().any():
-        mostrador["repuestos_mostrador"] = mostrador["repuestos"].fillna(mostrador["total"])
-    else:
-        mostrador["repuestos_mostrador"] = mostrador["total"]
+    mostrador["ventas_re_bar"] = mostrador["total"]
 
-    repuestos_mostrador = mostrador.groupby("sucursal")["repuestos_mostrador"].sum().reset_index(name="Mostrador")
+    repuestos_mostrador = mostrador.groupby("sucursal")["ventas_re_bar"].sum().reset_index(
+        name="Ventas RE (total)"
+    )
     repuestos_servicio = (
         ventas_se.groupby("sucursal")["repuestos"].sum().reset_index(name="Servicios")
         if "repuestos" in ventas_se.columns
@@ -1986,15 +1982,20 @@ def render_reports_ventas():
     repuestos_servicio["Servicios"] = repuestos_servicio["Servicios"].fillna(0)
 
     df_repuestos = pd.merge(repuestos_mostrador, repuestos_servicio, on="sucursal", how="outer").fillna(0)
-    df_repuestos["Total"] = df_repuestos["Mostrador"] + df_repuestos["Servicios"]
+    df_repuestos["Total"] = (
+        df_repuestos["Ventas RE (total)"] + df_repuestos["Servicios"]
+    )
 
     fig_repuestos = px.bar(
-        df_repuestos.melt(id_vars="sucursal", value_vars=["Mostrador", "Servicios"]),
+        df_repuestos.melt(
+            id_vars="sucursal",
+            value_vars=["Ventas RE (total)", "Servicios"],
+        ),
         x="sucursal",
         y="value",
         color="variable",
         barmode="group",
-        title="Repuestos por sucursal (Mostrador vs Servicios)",
+        title="Ventas RE (total comprobante) vs repuestos facturados en SE",
         labels={"sucursal": "Sucursal", "value": "USD", "variable": "Origen"},
     )
     st.plotly_chart(fig_repuestos, use_container_width=True)
