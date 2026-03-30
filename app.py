@@ -1,6 +1,7 @@
 """Streamlit Postventa - rewrite branch skeleton"""
 import os
 import tempfile
+from pathlib import Path
 
 import pandas as pd
 import plotly.express as px
@@ -23,12 +24,15 @@ from ai_analysis import get_ai_summary
 import database
 
 from database import (
+    compute_servicio_venta,
     delete_gasto,
     delete_venta,
     get_gasto_by_id,
     get_gastos,
     get_venta_by_id,
     get_ventas,
+    import_ventas_from_oficio_pdf,
+    delete_ventas_entre_fechas,
     init_database,
     inferir_campo_taller_existentes,
     insert_gasto,
@@ -51,6 +55,20 @@ def bootstrap_database():
     return True
 
 bootstrap_database()
+
+
+def servicio_ingresos_se(df_se: pd.DataFrame) -> float:
+    """Suma ingresos no-repuestos (total − repuestos en SE). Compatible con filas sin columna servicio."""
+    if df_se is None or len(df_se) == 0:
+        return 0.0
+    if "servicio" in df_se.columns:
+        return float(df_se["servicio"].fillna(0).sum())
+    t = df_se["total"].fillna(0).astype(float)
+    r = df_se["repuestos"].fillna(0).astype(float) if "repuestos" in df_se.columns else 0.0
+    tre = df_se["tipo_re_se"].astype(str).str.upper() if "tipo_re_se" in df_se.columns else "SE"
+    mask_se = tre == "SE"
+    return float((t - r).where(mask_se, 0.0).sum())
+
 
 NAVIGATION = {
     "📊 Dashboard": "overview",
@@ -1114,10 +1132,7 @@ def render_reports_operativo():
         else:
             repuestos_mostrador = ventas_re["total"].sum()
     repuestos_servicios = ventas_se["repuestos"].fillna(0).sum() if "repuestos" in ventas_se.columns else 0.0
-    mano_obra_total = ventas_se["mano_obra"].fillna(0).sum() if "mano_obra" in ventas_se.columns else 0.0
-    asistencia_total = ventas_se["asistencia"].fillna(0).sum() if "asistencia" in ventas_se.columns else 0.0
-    ingresos_servicios_totales = mano_obra_total + asistencia_total
-    terceros_total = ventas_se["terceros"].fillna(0).sum() if "terceros" in ventas_se.columns else 0.0
+    ingresos_servicios_totales = servicio_ingresos_se(ventas_se)
     ventas_repuestos_total = repuestos_mostrador + repuestos_servicios
 
     costo_repuestos_auto = 0.0
@@ -1153,14 +1168,14 @@ def render_reports_operativo():
     ingreso_total_por_hora = None
     repuestos_por_hora = None
     if horas_totales and horas_totales > 0:
-        ingreso_total_por_hora = (mano_obra_total + repuestos_servicios) / horas_totales
+        ingreso_total_por_hora = (ingresos_servicios_totales + repuestos_servicios) / horas_totales
         repuestos_por_hora = repuestos_servicios / horas_totales
 
     horas_habiles_periodo, dias_habiles_periodo = compute_working_hours(fecha_inicio, fecha_fin)
     horas_disponibles_total = (
         horas_habiles_periodo * tecnicos_activos if horas_habiles_periodo and tecnicos_activos else 0.0
     )
-    ingresos_mo_y_asistencia = mano_obra_total + asistencia_total
+    ingresos_mo_y_asistencia = ingresos_servicios_totales
     horas_vendidas_estimadas = ingresos_mo_y_asistencia / tarifa_hora_tecnico if tarifa_hora_tecnico > 0 else 0.0
     productividad_taller = (
         (horas_vendidas_estimadas / horas_disponibles_total) if horas_disponibles_total > 0 else 0.0
@@ -1171,7 +1186,7 @@ def render_reports_operativo():
     col_prod1.metric(
         "Horas vendidas (estimadas)",
         f"{horas_vendidas_estimadas:,.1f} h" if horas_vendidas_estimadas else "0 h",
-        delta=f"Ingresos MO + Asistencia: {format_currency(ingresos_mo_y_asistencia)}",
+        delta=f"Ingresos servicio (total − repuestos): {format_currency(ingresos_mo_y_asistencia)}",
     )
     horas_disp_label = (
         f"{horas_disponibles_total:,.1f} h" if horas_disponibles_total else "0 h"
@@ -1188,7 +1203,7 @@ def render_reports_operativo():
         delta=f"{dias_habiles_periodo} días trabajados" if dias_habiles_periodo else None,
     )
     st.caption(
-        "Se estiman las horas vendidas dividiendo los ingresos de mano de obra + asistencia por la tarifa promedio."
+        "Se estiman las horas vendidas dividiendo los ingresos de servicio (total − repuestos en SE) por la tarifa promedio."
     )
 
     productividad_context = {
@@ -1274,7 +1289,7 @@ def render_reports_operativo():
     if ingresos_servicios_totales > 0:
         resumen_cards.append(
             (
-                "Margen servicios (MO + Asist)",
+                "Margen servicios (total − repuestos)",
                 f"{format_currency(margen_mano_obra)} ({pct_str(margen_mano_obra, ingresos_servicios_totales)})",
             )
         )
@@ -1296,9 +1311,10 @@ def render_reports_operativo():
         "ingresos_detalle": {
             "repuestos_mostrador": repuestos_mostrador,
             "repuestos_servicios": repuestos_servicios,
-            "mano_obra": mano_obra_total,
-            "asistencia": asistencia_total,
-            "terceros": terceros_total,
+            "servicio": ingresos_servicios_totales,
+            "mano_obra": 0.0,
+            "asistencia": 0.0,
+            "terceros": 0.0,
         },
         "ventas_sucursales": ventas_suc_resumen,
         "tickets": {
@@ -1496,7 +1512,7 @@ def render_reports_operativo():
             if prod_ai:
                 with st.expander("Productividad (estimación base)", expanded=False):
                     st.write(
-                        f"Ingresos MO + asistencia: {format_currency(prod_ai.get('ingresos_mo_asistencia', 0))}."
+                        f"Ingresos servicio (total − repuestos): {format_currency(prod_ai.get('ingresos_mo_asistencia', 0))}."
                     )
                     st.write(
                         f"Horas vendidas: {prod_ai.get('horas_vendidas', 0):,.1f} h | "
@@ -1709,13 +1725,19 @@ def render_reports_ventas():
                 {"sucursal_norm": [], "Repuestos servicios": []}
             )
 
-        # Mano de obra, asistencia, terceros
+        # Servicio = total − repuestos (SE); columna persistida o calculada al vuelo
+        df_svc = df_sucursales.copy()
+        if "servicio" not in df_svc.columns:
+            df_svc["servicio"] = df_svc.apply(
+                lambda r: compute_servicio_venta(
+                    r.get("total"), r.get("repuestos"), r.get("tipo_re_se")
+                ),
+                axis=1,
+            )
         resumen_base = (
-            df_sucursales.groupby("sucursal_norm")
+            df_svc.groupby("sucursal_norm")
             .agg(
-                mano_obra=("mano_obra", "sum"),
-                asistencia=("asistencia", "sum"),
-                terceros=("terceros", "sum"),
+                servicio=("servicio", "sum"),
             )
             .reset_index()
         )
@@ -1729,9 +1751,8 @@ def render_reports_ventas():
         resumen["Total repuestos"] = (
             resumen["Repuestos mostrador"] + resumen["Repuestos servicios"]
         )
-        resumen["Total servicios"] = (
-            resumen["mano_obra"] + resumen["asistencia"] + resumen["terceros"]
-        )
+        resumen["Total servicios"] = resumen["servicio"]
+        resumen = resumen.drop(columns=["servicio"])
         resumen["Suma de los dos totales"] = (
             resumen["Total repuestos"] + resumen["Total servicios"]
         )
@@ -1739,9 +1760,6 @@ def render_reports_ventas():
         # Fila total general
         total_row = {
             "sucursal_norm": "TOTAL GENERAL",
-            "mano_obra": resumen["mano_obra"].sum(),
-            "asistencia": resumen["asistencia"].sum(),
-            "terceros": resumen["terceros"].sum(),
             "Repuestos mostrador": resumen["Repuestos mostrador"].sum(),
             "Repuestos servicios": resumen["Repuestos servicios"].sum(),
             "Total repuestos": resumen["Total repuestos"].sum(),
@@ -1753,15 +1771,12 @@ def render_reports_ventas():
         # Renombrar columna sucursal para mostrarla amigable
         resumen = resumen.rename(columns={"sucursal_norm": "Sucursal"})
 
-        # Orden y formato de columnas
+        # Orden y formato de columnas (Total servicios = total − repuestos en SE)
         columnas_orden = [
             "Sucursal",
             "Repuestos mostrador",
             "Repuestos servicios",
             "Total repuestos",
-            "mano_obra",
-            "asistencia",
-            "terceros",
             "Total servicios",
             "Suma de los dos totales",
         ]
@@ -2254,9 +2269,15 @@ def build_operativo_pdf(
             desglose_items = [
                 ("Repuestos por mostrador", ingresos_detalle.get("repuestos_mostrador", 0.0)),
                 ("Repuestos por servicios", ingresos_detalle.get("repuestos_servicios", 0.0)),
-                ("Mano de obra servicios", ingresos_detalle.get("mano_obra", 0.0)),
-                ("Gastos asistencia", ingresos_detalle.get("asistencia", 0.0)),
-                ("Trabajos terceros", ingresos_detalle.get("terceros", 0.0)),
+                (
+                    "Servicios (total comprobante − repuestos)",
+                    ingresos_detalle.get(
+                        "servicio",
+                        ingresos_detalle.get("mano_obra", 0.0)
+                        + ingresos_detalle.get("asistencia", 0.0)
+                        + ingresos_detalle.get("terceros", 0.0),
+                    ),
+                ),
             ]
             for label, value in desglose_items:
                 pdf.set_font("Arial", "B", 10)
@@ -2334,7 +2355,7 @@ def build_operativo_pdf(
             pdf.multi_cell(
                 0,
                 6,
-                f"B. Servicios: Mano de obra + asistencia {format_currency(serv['ventas'])} | "
+                f"B. Servicios (total − repuestos): {format_currency(serv['ventas'])} | "
                 f"Costo técnicos {format_currency(serv['costo'])} | Margen {format_currency(serv['margen'])} "
                 f"({serv['margen_pct']})",
             )
@@ -2342,7 +2363,7 @@ def build_operativo_pdf(
                 pdf.multi_cell(
                     0,
                     6,
-                    f"Cada hora vendida aporta {format_currency(serv['ingresos_por_hora'])} entre mano de obra y repuestos.",
+                    f"Cada hora vendida aporta {format_currency(serv['ingresos_por_hora'])} entre servicio (no repuestos) y repuestos.",
                 )
         pdf.ln(2)
 
@@ -2423,7 +2444,7 @@ def build_operativo_pdf(
         pdf.multi_cell(
             0,
             6,
-            f"Ingresos MO + asistencia: {format_currency(productividad_pdf.get('ingresos_mo_asistencia', 0))}.",
+            f"Ingresos servicio (total − repuestos): {format_currency(productividad_pdf.get('ingresos_mo_asistencia', 0))}.",
         )
         pdf.multi_cell(
             0,
@@ -2589,16 +2610,13 @@ def render_dashboard():
     df_servicios_fy26 = df_ventas_fy26[df_ventas_fy26["tipo_re_se"] == "SE"] if len(df_ventas_fy26) else pd.DataFrame()
 
     if len(df_servicios_fy26) > 0 and OBJETIVO_SERVICIOS_FY26 > 0:
-        total_mano_obra = df_servicios_fy26["mano_obra"].fillna(0).sum() if "mano_obra" in df_servicios_fy26.columns else 0
-        total_asistencia = df_servicios_fy26["asistencia"].fillna(0).sum() if "asistencia" in df_servicios_fy26.columns else 0
-        total_terceros = df_servicios_fy26["terceros"].fillna(0).sum() if "terceros" in df_servicios_fy26.columns else 0
-        total_servicios = total_mano_obra + total_asistencia + total_terceros
+        total_servicios = servicio_ingresos_se(df_servicios_fy26)
 
         porcentaje_servicios = (total_servicios / OBJETIVO_SERVICIOS_FY26) * 100
         restante_servicios = OBJETIVO_SERVICIOS_FY26 - total_servicios
 
         col_se1, col_se2, col_se3 = st.columns(3)
-        col_se1.metric("🛠️ Ingresos Servicios (MO+Asist+Terc)", format_currency(total_servicios))
+        col_se1.metric("🛠️ Ingresos servicio (total − repuestos)", format_currency(total_servicios))
         col_se2.metric("🎯 Objetivo Servicios FY26", format_currency(OBJETIVO_SERVICIOS_FY26),
                        delta=f"{porcentaje_servicios:.1f}% completado")
         col_se3.metric("📊 Restante Servicios", format_currency(abs(restante_servicios)),
@@ -2606,10 +2624,11 @@ def render_dashboard():
 
         st.progress(min(max(porcentaje_servicios / 100, 0), 1))
 
-        with st.expander("Detalle por componente", expanded=False):
-            st.write(f"🔧 Mano de Obra: {format_currency(total_mano_obra)}")
-            st.write(f"🧰 Asistencia: {format_currency(total_asistencia)}")
-            st.write(f"🤝 Terceros: {format_currency(total_terceros)}")
+        with st.expander("Detalle", expanded=False):
+            st.write(
+                "Servicio = total del comprobante menos repuestos (órdenes SE). "
+                "Más adelante se puede desagregar MO / asistencia / terceros con otro informe."
+            )
 
         col_se_info1, col_se_info2 = st.columns(2)
         col_se_info1.caption(
@@ -2626,6 +2645,77 @@ def render_dashboard():
 
 def render_sales_page():
     st.title("💰 Ventas")
+
+    with st.expander("📄 Importar PDF Autologica (ventas detalladas por comprobante)", expanded=False):
+        st.markdown(
+            """
+            Subí el PDF del informe **Autologica › Ventas › Ventas detalladas (por comprobante)**.
+
+            - Se importa **un registro por comprobante** (si el PDF repite el mismo número en otra página, se fusiona).
+            - **Total** en base: importe neto sin IVA 21 % (**÷ 1,21**) en facturas de usuario **ERASJIDO** y **sucursal 2 (Comodoro)**; el resto queda como en el PDF.
+            - **Repuestos** y **servicio** (MO + asistencia + terceros en SE) se calculan como en el parseo validado.
+            - Volvé a cargar el mismo PDF **duplica** filas: si reimportás un período, borrá antes los registros o usá fechas para no mezclar.
+            """
+        )
+        pdf_up = st.file_uploader("Archivo PDF", type=["pdf"], key="ventas_pdf_autologica")
+        if pdf_up is not None and st.button("Importar ventas desde este PDF", type="primary", key="btn_import_pdf_ventas"):
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                tmp.write(pdf_up.getvalue())
+                tmp_path = Path(tmp.name)
+            try:
+                with st.spinner("Leyendo PDF e insertando ventas…"):
+                    n_ok, errores, stats = import_ventas_from_oficio_pdf(tmp_path)
+                if n_ok:
+                    st.success(
+                        f"Se importaron **{n_ok}** ventas. "
+                        f"Comprobantes únicos: {stats.get('comprobantes', '—')}."
+                    )
+                if stats.get("fusionados"):
+                    st.info(
+                        f"En el PDF había segmentos extra por duplicados fusionados: **{stats['fusionados']}**."
+                    )
+                if errores:
+                    st.warning("Algunas filas no se importaron:")
+                    for e in errores[:25]:
+                        st.caption(e)
+                    if len(errores) > 25:
+                        st.caption(f"… y {len(errores) - 25} más.")
+                if n_ok == 0 and not errores:
+                    st.warning("No se encontraron comprobantes para importar.")
+                if n_ok:
+                    st.rerun()
+            except Exception as exc:
+                st.error(f"No se pudo importar el PDF: {exc}")
+            finally:
+                tmp_path.unlink(missing_ok=True)
+
+    with st.expander("🗑️ Borrar ventas por rango de fechas", expanded=False):
+        st.caption(
+            "Útil antes de **reimportar** un PDF del mismo período. La acción **no se puede deshacer**."
+        )
+        cbd, cbh, _ = st.columns([1, 1, 2])
+        with cbd:
+            borrar_desde = st.date_input("Desde", value=None, key="ventas_borrar_desde")
+        with cbh:
+            borrar_hasta = st.date_input("Hasta", value=None, key="ventas_borrar_hasta")
+        if borrar_desde and borrar_hasta and borrar_desde > borrar_hasta:
+            st.warning("«Desde» debe ser anterior o igual a «Hasta».")
+        elif st.button(
+            "Eliminar todas las ventas en este rango",
+            type="primary",
+            key="btn_borrar_ventas_rango",
+            disabled=not (borrar_desde and borrar_hasta) or (borrar_desde and borrar_hasta and borrar_desde > borrar_hasta),
+        ):
+            try:
+                n = delete_ventas_entre_fechas(
+                    str(borrar_desde),
+                    str(borrar_hasta),
+                )
+                st.success(f"Se eliminaron **{n}** ventas entre {borrar_desde} y {borrar_hasta}.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"No se pudo borrar: {exc}")
+
     st.subheader("Registrar nueva venta")
 
     sucursales_default = ["COMODORO", "RIO GRANDE", "RIO GALLEGOS", "COMPARTIDOS"]
@@ -2750,6 +2840,7 @@ def render_sales_page():
                     "detalles": detalles or None,
                     "archivo_comprobante": None,
                     "campo_taller": campo_taller if tipo_re_se_selector == "SE" else None,
+                    "servicio": compute_servicio_venta(total, repuestos, tipo_re_se_selector),
                 }
                 try:
                     insert_venta(venta_data)
@@ -2955,6 +3046,7 @@ def render_sales_page():
             "detalles": detalles_edit or None,
             "archivo_comprobante": registro.get("archivo_comprobante"),
             "campo_taller": campo_taller_edit if tipo_re_se_edit == "SE" else None,
+            "servicio": compute_servicio_venta(total_edit, repuestos_edit, tipo_re_se_edit),
         }
         try:
             update_venta(selected, venta_actualizada)

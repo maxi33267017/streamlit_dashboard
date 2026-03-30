@@ -96,6 +96,7 @@ VENTAS_TABLE_SQLITE = """
         asistencia REAL DEFAULT 0,
         repuestos REAL DEFAULT 0,
         terceros REAL DEFAULT 0,
+        servicio REAL DEFAULT 0,
         descuento REAL DEFAULT 0,
         total REAL NOT NULL,
         detalles TEXT,
@@ -122,6 +123,7 @@ VENTAS_TABLE_PG = """
         asistencia DOUBLE PRECISION DEFAULT 0,
         repuestos DOUBLE PRECISION DEFAULT 0,
         terceros DOUBLE PRECISION DEFAULT 0,
+        servicio DOUBLE PRECISION DEFAULT 0,
         descuento DOUBLE PRECISION DEFAULT 0,
         total DOUBLE PRECISION NOT NULL,
         detalles TEXT,
@@ -314,6 +316,55 @@ def _fetch_scalar(cursor, default=0):
     return row[0]
 
 
+def compute_servicio_venta(total, repuestos, tipo_re_se) -> float:
+    """Ingreso no-repuestos: total − repuestos (solo SE). En RE queda 0."""
+    try:
+        t = float(total or 0)
+        r = float(repuestos or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if str(tipo_re_se or "").upper() == "RE":
+        return 0.0
+    return t - r
+
+
+def es_nota_credito_no_jd(tipo_comprobante: str | None) -> bool:
+    u = (tipo_comprobante or "").upper()
+    return bool(u and "CREDITO" in u and "JD" not in u)
+
+
+def alinear_montos_nota_credito(
+    tipo_comprobante: str | None,
+    total: float,
+    repuestos: float,
+    *,
+    mano_obra: float = 0.0,
+    asistencia: float = 0.0,
+    terceros: float = 0.0,
+) -> tuple[float, float, float, float, float]:
+    """Para NC (no JD): el total suele volverse negativo; los componentes deben ir en el mismo sentido
+    para que total ≈ repuestos + servicio implícito y no se reste dos veces el repuesto."""
+    t = float(total or 0)
+    r = float(repuestos or 0)
+    mo = float(mano_obra or 0)
+    a = float(asistencia or 0)
+    ter = float(terceros or 0)
+    if not es_nota_credito_no_jd(tipo_comprobante):
+        return t, r, mo, a, ter
+    if t > 0:
+        t = -t
+    if t < 0:
+        if r > 0:
+            r = -r
+        if mo > 0:
+            mo = -mo
+        if a > 0:
+            a = -a
+        if ter > 0:
+            ter = -ter
+    return t, r, mo, a, ter
+
+
 def get_connection():
     """Obtiene una conexión a la base de datos"""
     if USE_POSTGRES:
@@ -357,6 +408,26 @@ def init_database():
                 _execute(cursor, "ALTER TABLE ventas ADD COLUMN campo_taller TEXT")
         except Exception:
             pass  # La columna ya existe o hay un error
+
+        try:
+            cursor.execute("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name='ventas' AND column_name='servicio'
+            """)
+            if cursor.fetchone() is None:
+                _execute(cursor, "ALTER TABLE ventas ADD COLUMN servicio DOUBLE PRECISION DEFAULT 0")
+                _execute(
+                    cursor,
+                    """
+                    UPDATE ventas SET servicio = CASE
+                        WHEN UPPER(COALESCE(tipo_re_se, '')) = 'RE' THEN 0
+                        ELSE COALESCE(total, 0) - COALESCE(repuestos, 0)
+                    END
+                    """,
+                )
+        except Exception:
+            pass
         
         _execute(cursor, GASTOS_TABLE_PG)
         _execute(cursor, PLANTILLAS_TABLE_PG)
@@ -372,6 +443,19 @@ def init_database():
             _execute(cursor, "ALTER TABLE ventas ADD COLUMN campo_taller TEXT")
         except sqlite3.OperationalError:
             pass  # La columna ya existe
+        try:
+            _execute(cursor, "ALTER TABLE ventas ADD COLUMN servicio REAL DEFAULT 0")
+            _execute(
+                cursor,
+                """
+                UPDATE ventas SET servicio = CASE
+                    WHEN UPPER(COALESCE(tipo_re_se, '')) = 'RE' THEN 0
+                    ELSE COALESCE(total, 0) - COALESCE(repuestos, 0)
+                END
+                """,
+            )
+        except sqlite3.OperationalError:
+            pass
         _execute(cursor, GASTOS_TABLE_SQLITE)
         _execute(cursor, PLANTILLAS_TABLE_SQLITE)
         _execute(cursor, HISTORIAL_TABLE_SQLITE)
@@ -400,7 +484,7 @@ def get_ventas(fecha_inicio=None, fecha_fin=None):
     if len(df):
         df = _sanitize_dataframe(
             df,
-            ["mano_obra", "asistencia", "repuestos", "terceros", "descuento", "total"],
+            ["mano_obra", "asistencia", "repuestos", "terceros", "servicio", "descuento", "total"],
         )
     conn.close()
     
@@ -442,13 +526,35 @@ def insert_venta(venta_data):
                 pass  # La columna ya existe
     except Exception:
         pass  # Si hay error, continuar (la columna puede ya existir)
-    
+
+    venta_data = dict(venta_data)
+    t, r, mo, a, ter = alinear_montos_nota_credito(
+        venta_data.get("tipo_comprobante"),
+        float(venta_data.get("total") or 0),
+        float(venta_data.get("repuestos") or 0),
+        mano_obra=float(venta_data.get("mano_obra") or 0),
+        asistencia=float(venta_data.get("asistencia") or 0),
+        terceros=float(venta_data.get("terceros") or 0),
+    )
+    venta_data["total"] = t
+    venta_data["repuestos"] = r
+    venta_data["mano_obra"] = mo
+    venta_data["asistencia"] = a
+    venta_data["terceros"] = ter
+
+    tipo_re = venta_data.get("tipo_re_se")
+    servicio_val = compute_servicio_venta(
+        venta_data.get("total"),
+        venta_data.get("repuestos"),
+        tipo_re,
+    )
+
     insert_sql = """
         INSERT INTO ventas (
             mes, fecha, sucursal, cliente, pin, comprobante, tipo_comprobante,
             trabajo, n_comprobante, tipo_re_se, mano_obra, asistencia,
-            repuestos, terceros, descuento, total, detalles, archivo_comprobante, campo_taller
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            repuestos, terceros, servicio, descuento, total, detalles, archivo_comprobante, campo_taller
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
     params = (
         venta_data.get('mes'),
@@ -465,6 +571,7 @@ def insert_venta(venta_data):
         venta_data.get('asistencia', 0),
         venta_data.get('repuestos', 0),
         venta_data.get('terceros', 0),
+        servicio_val,
         venta_data.get('descuento', 0),
         venta_data.get('total', 0),
         venta_data.get('detalles'),
@@ -508,13 +615,35 @@ def update_venta(venta_id, venta_data):
                 pass  # La columna ya existe
     except Exception:
         pass  # Si hay error, continuar (la columna puede ya existir)
-    
+
+    venta_data = dict(venta_data)
+    t, r, mo, a, ter = alinear_montos_nota_credito(
+        venta_data.get("tipo_comprobante"),
+        float(venta_data.get("total") or 0),
+        float(venta_data.get("repuestos") or 0),
+        mano_obra=float(venta_data.get("mano_obra") or 0),
+        asistencia=float(venta_data.get("asistencia") or 0),
+        terceros=float(venta_data.get("terceros") or 0),
+    )
+    venta_data["total"] = t
+    venta_data["repuestos"] = r
+    venta_data["mano_obra"] = mo
+    venta_data["asistencia"] = a
+    venta_data["terceros"] = ter
+
+    tipo_re_u = venta_data.get("tipo_re_se")
+    servicio_u = compute_servicio_venta(
+        venta_data.get("total"),
+        venta_data.get("repuestos"),
+        tipo_re_u,
+    )
+
     _execute(cursor, """
         UPDATE ventas SET
             mes = ?, fecha = ?, sucursal = ?, cliente = ?, pin = ?,
             comprobante = ?, tipo_comprobante = ?, trabajo = ?,
             n_comprobante = ?, tipo_re_se = ?, mano_obra = ?,
-            asistencia = ?, repuestos = ?, terceros = ?, descuento = ?,
+            asistencia = ?, repuestos = ?, terceros = ?, servicio = ?, descuento = ?,
             total = ?, detalles = ?, archivo_comprobante = ?, campo_taller = ?
         WHERE id = ?
     """, (
@@ -532,6 +661,7 @@ def update_venta(venta_id, venta_data):
         venta_data.get('asistencia', 0),
         venta_data.get('repuestos', 0),
         venta_data.get('terceros', 0),
+        servicio_u,
         venta_data.get('descuento', 0),
         venta_data.get('total', 0),
         venta_data.get('detalles'),
@@ -570,6 +700,25 @@ def delete_venta(venta_id):
     _execute(cursor, "DELETE FROM ventas WHERE id = ?", (venta_id,))
     conn.commit()
     conn.close()
+
+
+def delete_ventas_entre_fechas(fecha_desde: str, fecha_hasta: str) -> int:
+    """Elimina ventas con ``fecha`` entre ``fecha_desde`` y ``fecha_hasta`` (inclusive, formato YYYY-MM-DD).
+
+    Retorna la cantidad de filas eliminadas.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    _execute(
+        cursor,
+        "DELETE FROM ventas WHERE fecha >= ? AND fecha <= ?",
+        (fecha_desde, fecha_hasta),
+    )
+    n = cursor.rowcount if cursor.rowcount is not None else 0
+    conn.commit()
+    conn.close()
+    return int(n)
+
 
 def inferir_campo_taller_existentes():
     """Infiere campo_taller para registros SE existentes que no lo tengan"""
@@ -1227,11 +1376,6 @@ def import_ventas_from_excel(excel_path):
                     tipo_comprobante = str(row.get('tipo_comprobante', 'FACTURA VENTA')).strip() if pd.notna(row.get('tipo_comprobante')) else 'FACTURA VENTA'
                     total = float(row.get('total', 0)) if pd.notna(row.get('total')) else 0
                     
-                    # Si es nota de crédito (pero NO JD), convertir el total a negativo automáticamente
-                    es_nota_credito = tipo_comprobante and 'CREDITO' in tipo_comprobante.upper() and 'JD' not in tipo_comprobante.upper()
-                    if es_nota_credito and total > 0:
-                        total = -total
-                    
                     tipo_re_se = str(row.get('tipo_re_se', 'SE')).strip().upper() if pd.notna(row.get('tipo_re_se')) else 'SE'
                     # Validar que sea RE o SE
                     if tipo_re_se not in ['RE', 'SE']:
@@ -1260,11 +1404,6 @@ def import_ventas_from_excel(excel_path):
                     # Formato original: buscar columnas con nombres descriptivos
                     tipo_comprobante = str(get_col_value(df, row, ['Tipo Comprobante', 'TIPO COMPROBANTE'], 'FACTURA VENTA')).strip() or 'FACTURA VENTA'
                     total = _limpiar_valor_monetario(get_col_value(df, row, ['Total', 'TOTAL'], 0))
-                    
-                    # Si es nota de crédito (pero NO JD), convertir el total a negativo automáticamente
-                    es_nota_credito = tipo_comprobante and 'CREDITO' in tipo_comprobante.upper() and 'JD' not in tipo_comprobante.upper()
-                    if es_nota_credito and total > 0:
-                        total = -total
                     
                     tipo_re_se_val = get_col_value(df, row, ['Tipo (RE o SE)', 'TIPO (RE o SE)', 'Tipo RE o SE'], 'SE')
                     tipo_re_se = str(tipo_re_se_val).strip().upper() if tipo_re_se_val else 'SE'
@@ -1304,6 +1443,84 @@ def import_ventas_from_excel(excel_path):
         return count
     except Exception as e:
         raise Exception(f"Error al importar ventas: {str(e)}")
+
+
+def import_ventas_from_oficio_pdf(pdf_path: Path) -> tuple[int, list[str], dict]:
+    """Importa ventas desde el PDF «Ventas detalladas (por comprobante)» de Autologica.
+
+    - Un registro por comprobante (bloques duplicados en el PDF se fusionan).
+    - El **total** guardado usa ``total_con_impuestos_neto_iva21`` (÷ 1,21 en usuario ERASJIDO
+      y sucursal 2 Comodoro), alineado con el análisis validado.
+    - Notas de crédito se detectan por el texto del comprobante.
+    """
+    import importlib.util
+
+    root = Path(__file__).resolve().parent
+    spec = importlib.util.spec_from_file_location(
+        "parse_oficio_pdf_to_csv", root / "scripts" / "parse_oficio_pdf_to_csv.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    df_raw = mod.parse_pdf(Path(pdf_path))
+    df = mod.to_app_sales_csv(df_raw, use_total_neto_iva21=True)
+    if df.empty:
+        return 0, [], {}
+
+    stats = {
+        "comprobantes": len(df),
+        "segmentos_pdf": df_raw.attrs.get("segmentos_con_comprobante"),
+        "fusionados": df_raw.attrs.get("segmentos_fusionados"),
+    }
+
+    errores: list[str] = []
+    count = 0
+    for idx, row in df.iterrows():
+        try:
+            suc = row.get("sucursal")
+            if suc is None or (isinstance(suc, float) and pd.isna(suc)):
+                errores.append(f"Fila {idx + 1}: sin sucursal mapeada")
+                continue
+            if str(suc).strip() == "" or str(suc).lower() == "nan":
+                errores.append(f"Fila {idx + 1}: sin sucursal mapeada")
+                continue
+            fecha = pd.to_datetime(row["fecha"]).date()
+            tc = str(row.get("tipo_comprobante") or "FACTURA VENTA")
+            venta_data = {
+                "mes": fecha.strftime("%B"),
+                "fecha": fecha,
+                "sucursal": str(suc).strip(),
+                "cliente": None
+                if pd.isna(row.get("cliente"))
+                else str(row.get("cliente")).strip(),
+                "pin": None,
+                "comprobante": tc,
+                "tipo_comprobante": tc,
+                "trabajo": "EXTERNO",
+                "n_comprobante": None
+                if pd.isna(row.get("n_comprobante"))
+                else str(row.get("n_comprobante")).strip(),
+                "tipo_re_se": str(row.get("tipo_re_se") or "RE").strip().upper(),
+                "mano_obra": 0.0,
+                "asistencia": 0.0,
+                "repuestos": float(row.get("repuestos") or 0),
+                "terceros": 0.0,
+                "descuento": 0.0,
+                "total": float(row.get("total") or 0),
+                "detalles": None
+                if pd.isna(row.get("detalles"))
+                else str(row.get("detalles"))[:2000],
+                "archivo_comprobante": None,
+                "campo_taller": None,
+            }
+            insert_venta(venta_data)
+            count += 1
+        except Exception as e:
+            errores.append(f"Fila {idx + 1}: {str(e)}")
+            continue
+
+    return count, errores, stats
+
 
 def import_gastos_from_excel(excel_path):
     """Importa gastos desde un archivo Excel"""

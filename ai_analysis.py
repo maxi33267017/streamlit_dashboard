@@ -422,9 +422,18 @@ def get_ai_summary(
         except Exception:
             horas_habiles, dias_habiles = 0.0, 0
         ventas_se_local = df_ventas[df_ventas['tipo_re_se'] == 'SE'] if len(df_ventas) else pd.DataFrame()
-        mano_obra_total = ventas_se_local['mano_obra'].fillna(0).sum() if len(ventas_se_local) else 0.0
-        asistencia_total = ventas_se_local['asistencia'].fillna(0).sum() if len(ventas_se_local) else 0.0
-        ingresos_mo_asistencia = mano_obra_total + asistencia_total
+        if len(ventas_se_local) and "servicio" in ventas_se_local.columns:
+            ingresos_mo_asistencia = float(ventas_se_local["servicio"].fillna(0).sum())
+        elif len(ventas_se_local):
+            t = ventas_se_local["total"].fillna(0).astype(float)
+            r = (
+                ventas_se_local["repuestos"].fillna(0).astype(float)
+                if "repuestos" in ventas_se_local.columns
+                else 0.0
+            )
+            ingresos_mo_asistencia = float((t - r).sum())
+        else:
+            ingresos_mo_asistencia = 0.0
         tarifa_hora = 60.0
         tecnicos_default = 7
         horas_disponibles = horas_habiles * tecnicos_default if horas_habiles and tecnicos_default else 0.0
