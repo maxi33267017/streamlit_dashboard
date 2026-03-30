@@ -1459,7 +1459,7 @@ def import_ventas_from_oficio_pdf(pdf_path: Path) -> tuple[int, list[str], dict]
 
     - Un registro por comprobante (bloques duplicados en el PDF se fusionan).
     - El **total** guardado usa ``total_con_impuestos_neto_iva21`` (÷ 1,21 en usuario ERASJIDO
-      y sucursal 2 Comodoro), alineado con el análisis validado.
+      y sucursal 2 Comodoro). La línea **repuestos** usa la misma regla para no mezclar bases.
     - **costo_repuestos** = costo FIFO / mercadería del PDF (columna ``costo_fifo`` del parseo).
     - Notas de crédito se detectan por el texto del comprobante.
     """

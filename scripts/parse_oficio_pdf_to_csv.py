@@ -13,7 +13,9 @@ Metodología alineada con control manual:
   ``total_sin_impuestos − venta_precio_lista`` incluye mano de obra + otros + segunda columna
   de repuestos del renglón; solo coincide con **Otros (\*)** cuando no hay más conceptos.
 - IVA: para usuario **ERASJIDO** y sucursal **2** (Comodoro), ``total_con_impuestos_neto_iva21``
-  = ``total_con_impuestos / 1,21`` (neto sin IVA; no es ``total × 0,79``).
+  = ``total_con_impuestos / 1,21`` (neto sin IVA; no es ``total × 0,79``). La línea **Total repuestos**
+  debe usar la **misma** regla al importar con neto IVA; si no, ``total`` y ``repuestos`` quedarían
+  en bases distintas (efecto tipo “IVA atrapado” en el desglose).
 
 Uso:
     python scripts/parse_oficio_pdf_to_csv.py \
@@ -102,11 +104,14 @@ def parse_total_comprobante_fields(
 def total_comprobante_neto_sin_iva21(
     total_con_imp: float | None, usuario: str | None, sucursal_codigo: str | None
 ) -> float | None:
-    """Total del comprobante llevado a neto sin IVA 21 % (total / 1,21).
+    """Importe llevado a neto sin IVA 21 % (÷ 1,21) donde aplica.
+
+    Usado para el **total del comprobante** y, al importar en neto, para la línea **Total repuestos**,
+    para que ambos queden en la misma base.
 
     Regla de negocio: facturas de usuario **ERASJIDO** (Río Gallegos) y **sucursal 2**
-    (Comodoro) vienen con IVA en el importe total del PDF; para comparar con factura física
-    en neto se divide por 1,21. **No** es ``total * 0,79`` (eso no revierte el IVA 21 %).
+    (Comodoro) vienen con IVA en el importe del PDF; en neto se divide por 1,21.
+    **No** es ``total * 0,79`` (eso no revierte el IVA 21 %).
     """
     if total_con_imp is None:
         return None
@@ -364,7 +369,8 @@ def to_app_sales_csv(df: pd.DataFrame, *, use_total_neto_iva21: bool = False) ->
     """Genera CSV de apoyo para importación a tabla ventas.
 
     Si ``use_total_neto_iva21`` es True y existe la columna en el parseo, ``total`` pasa a ser
-    el total neto sin IVA (÷ 1,21 en ERASJIDO y sucursal 2) y se recalcula ``servicio`` en SE.
+    el total neto sin IVA (÷ 1,21 en ERASJIDO y sucursal 2). La columna ``repuestos`` recibe
+    la **misma** conversión para no mezclar neto en total y bruto en repuestos.
     """
     if df.empty:
         return pd.DataFrame()
@@ -386,6 +392,19 @@ def to_app_sales_csv(df: pd.DataFrame, *, use_total_neto_iva21: bool = False) ->
         out["total_neto_iva21"] = df["total_con_impuestos_neto_iva21"]
     if use_total_neto_iva21 and "total_neto_iva21" in out.columns:
         out["total"] = out["total_neto_iva21"].where(out["total_neto_iva21"].notna(), out["total"])
+        out["repuestos"] = df.apply(
+            lambda r: (
+                total_comprobante_neto_sin_iva21(
+                    float(r["total_repuestos_neto"])
+                    if r.get("total_repuestos_neto") is not None
+                    and not pd.isna(r["total_repuestos_neto"])
+                    else None,
+                    r.get("usuario"),
+                    r.get("sucursal_codigo"),
+                )
+            ),
+            axis=1,
+        )
     out["tipo_comprobante"] = df["comprobante_texto"].apply(_tipo_comprobante_desde_texto)
     out["comprobante"] = df["comprobante_texto"]
     out["detalles"] = (

@@ -2710,7 +2710,8 @@ def render_sales_page():
 
             - Se importa **un registro por comprobante** (si el PDF repite el mismo número en otra página, se fusiona).
             - **Total** en base: importe neto sin IVA 21 % (**÷ 1,21**) en facturas de usuario **ERASJIDO** y **sucursal 2 (Comodoro)**; el resto queda como en el PDF.
-            - **Repuestos** y **servicio** (MO + asistencia + terceros en SE) se calculan como en el parseo validado.
+            - **Repuestos** (línea del comprobante) usa la **misma** regla ÷ 1,21 cuando aplica, para que total y repuestos no mezclen neto y bruto.
+            - **Servicio** en SE = total − repuestos con esos valores ya alineados.
             - Volvé a cargar el mismo PDF **duplica** filas: si reimportás un período, borrá antes los registros o usá fechas para no mezclar.
             """
         )
