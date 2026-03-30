@@ -1649,7 +1649,9 @@ def render_reports_operativo():
 def _desglose_lineas_comprobante(df: pd.DataFrame) -> pd.DataFrame:
     """
     Por cada comprobante: total = línea repuestos + (total − repuestos).
-    Si no hay desglose de repuestos, se asume que todo el total es repuestos (servicios = 0).
+
+    El **resto** en RE (mostrador) no es “servicio” operativo; solo en **SE** el resto aproxima
+    MO + asistencia + terceros. Ver columnas separadas en reportes.
     """
     out = df.copy()
     t = pd.to_numeric(out["total"], errors="coerce").fillna(0.0)
@@ -1695,22 +1697,25 @@ def render_reports_ventas():
     total_ventas = float(df_v["_t"].sum())
     rep_mostrador_total = float(df_v.loc[df_v["tipo_re_se"] == "RE", "_rp"].sum())
     rep_taller_total = float(df_v.loc[df_v["tipo_re_se"] == "SE", "_rp"].sum())
-    servicios_total = float(df_v["_rem"].sum())
-    # Identidad: repuestos RE + repuestos SE + (total − repuestos) = total
-    suma_desglose = rep_mostrador_total + rep_taller_total + servicios_total
+    resto_re_total = float(df_v.loc[df_v["tipo_re_se"] == "RE", "_rem"].sum())
+    servicios_se_total = float(df_v.loc[df_v["tipo_re_se"] == "SE", "_rem"].sum())
+    suma_desglose = (
+        rep_mostrador_total + rep_taller_total + resto_re_total + servicios_se_total
+    )
 
     ventas_re = df_ventas[df_ventas["tipo_re_se"] == "RE"]
     ventas_se = df_ventas[df_ventas["tipo_re_se"] == "SE"]
 
-    col_top1, col_top2, col_top3, col_top4 = st.columns(4)
+    col_top1, col_top2, col_top3, col_top4, col_top5 = st.columns(5)
     col_top1.metric("Ventas totales", format_currency(total_ventas))
     col_top2.metric("Repuestos mostrador (RE)", format_currency(rep_mostrador_total))
-    col_top3.metric("Repuestos taller / SE", format_currency(rep_taller_total))
-    col_top4.metric("Servicios (total − repuestos)", format_currency(servicios_total))
+    col_top3.metric("Repuestos taller (SE)", format_currency(rep_taller_total))
+    col_top4.metric("Otro no repuestos (RE)", format_currency(resto_re_total))
+    col_top5.metric("Servicios (SE)", format_currency(servicios_se_total))
     st.caption(
-        "Cada comprobante se descompone en **línea repuestos** y **resto** (mano de obra, asistencia, "
-        "terceros, etc.). La suma de las tres columnas centrales coincide con **Ventas totales** "
-        f"({format_currency(suma_desglose)})."
+        "**Servicios (SE)** = total − línea repuestos **solo en órdenes SE** (MO, asistencia, terceros). "
+        "**Otro no repuestos (RE)** = mismo cálculo en tickets de mostrador; no se mezcla con servicios. "
+        f"Suma de las cuatro piezas = {format_currency(suma_desglose)} (debe coincidir con ventas totales)."
     )
 
     # Cantidad de tickets por tipo
@@ -1782,9 +1787,10 @@ def render_reports_ventas():
         anchor="detalle_sucursales_clave",
     )
     st.caption(
-        "Por sucursal: suma de **línea repuestos** en tickets RE (mostrador), "
-        "suma de **línea repuestos** en tickets SE (taller), y **servicios** = total − repuestos en cada comprobante. "
-        "Las tres columnas monetarias suman **Ventas totales** de esa fila."
+        "**Servicios (SE)** solo suma (total − repuestos) de tickets **SE**. "
+        "**Otro no repuestos (RE)** es el resto en tickets **RE** (no es mano de obra de taller). "
+        "Los importes son los **ya guardados** en la base (neto sin IVA 21 % solo donde aplicó al importar el PDF). "
+        "Las cinco columnas monetarias cierran con **Ventas totales**."
     )
 
     rep_mostrador = (
@@ -1799,13 +1805,25 @@ def render_reports_ventas():
         .sum()
         .rename("Repuestos taller (SE)")
     )
-    servicios_suc = df_tab.groupby("sucursal_norm")["_rem"].sum().rename(
-        "Servicios (total − repuestos)"
+    resto_re_suc = (
+        df_tab.loc[df_tab["tipo_re_se"] == "RE"]
+        .groupby("sucursal_norm")["_rem"]
+        .sum()
+        .rename("Otro no repuestos (RE)")
+    )
+    servicios_se_suc = (
+        df_tab.loc[df_tab["tipo_re_se"] == "SE"]
+        .groupby("sucursal_norm")["_rem"]
+        .sum()
+        .rename("Servicios (SE)")
     )
     ventas_suc = df_tab.groupby("sucursal_norm")["_t"].sum().rename("Ventas totales")
 
     resumen = (
-        pd.concat([rep_mostrador, rep_taller, servicios_suc, ventas_suc], axis=1)
+        pd.concat(
+            [rep_mostrador, rep_taller, resto_re_suc, servicios_se_suc, ventas_suc],
+            axis=1,
+        )
         .fillna(0)
         .reset_index()
     )
@@ -1815,7 +1833,8 @@ def render_reports_ventas():
         "Sucursal": "TOTAL GENERAL",
         "Repuestos mostrador (RE)": resumen["Repuestos mostrador (RE)"].sum(),
         "Repuestos taller (SE)": resumen["Repuestos taller (SE)"].sum(),
-        "Servicios (total − repuestos)": resumen["Servicios (total − repuestos)"].sum(),
+        "Otro no repuestos (RE)": resumen["Otro no repuestos (RE)"].sum(),
+        "Servicios (SE)": resumen["Servicios (SE)"].sum(),
         "Ventas totales": resumen["Ventas totales"].sum(),
     }
     resumen = pd.concat([resumen, pd.DataFrame([total_row])], ignore_index=True)
@@ -1824,7 +1843,8 @@ def render_reports_ventas():
         "Sucursal",
         "Repuestos mostrador (RE)",
         "Repuestos taller (SE)",
-        "Servicios (total − repuestos)",
+        "Otro no repuestos (RE)",
+        "Servicios (SE)",
         "Ventas totales",
     ]
     resumen = resumen[columnas_orden]
@@ -1969,8 +1989,19 @@ def render_reports_ventas():
         .sum()
         .rename("Repuestos taller (SE)")
     )
-    sv = df_chart.groupby("sucursal_plot")["_rem"].sum().rename("Servicios")
-    df_rep = pd.concat([rm, rt, sv], axis=1).fillna(0).reset_index()
+    rr = (
+        df_chart.loc[df_chart["tipo_re_se"] == "RE"]
+        .groupby("sucursal_plot")["_rem"]
+        .sum()
+        .rename("Otro no repuestos (RE)")
+    )
+    sv = (
+        df_chart.loc[df_chart["tipo_re_se"] == "SE"]
+        .groupby("sucursal_plot")["_rem"]
+        .sum()
+        .rename("Servicios (SE)")
+    )
+    df_rep = pd.concat([rm, rt, rr, sv], axis=1).fillna(0).reset_index()
     df_rep = df_rep.rename(columns={"sucursal_plot": "sucursal"})
 
     fig_repuestos = px.bar(
@@ -1979,13 +2010,14 @@ def render_reports_ventas():
             value_vars=[
                 "Repuestos mostrador (RE)",
                 "Repuestos taller (SE)",
-                "Servicios",
+                "Otro no repuestos (RE)",
+                "Servicios (SE)",
             ],
         ),
         x="sucursal",
         y="value",
         color="variable",
-        title="Repuestos mostrador, repuestos SE y servicios (total − repuestos)",
+        title="Desglose: repuestos RE/SE, resto RE y servicios SE",
         labels={"sucursal": "Sucursal", "value": "USD", "variable": "Concepto"},
     )
     fig_repuestos.update_layout(barmode="stack")
