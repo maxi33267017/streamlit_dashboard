@@ -53,3 +53,9 @@ backups/
 comprobantes/
 *.png
 
+oficio.pdf
+.gitignore
+.gitignore
+imports/oficio32_ventas_import.csv
+imports/oficio32_normalizado.csv
+oficio32.pdf

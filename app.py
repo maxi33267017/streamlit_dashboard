@@ -70,6 +70,27 @@ def servicio_ingresos_se(df_se: pd.DataFrame) -> float:
     return float((t - r).where(mask_se, 0.0).sum())
 
 
+def costo_mercaderia_repuestos_desde_ventas(df_ventas: pd.DataFrame) -> float:
+    """Suma el costo de mercadería vendida (repuestos) por comprobante.
+
+    Si existe ``costo_repuestos`` (FIFO / PDF Autologica), se usa; si la fila no lo tiene,
+    se aplica **65 %** del repuesto de esa línea (mismo criterio histórico, por fila).
+    """
+    if df_ventas is None or len(df_ventas) == 0 or "repuestos" not in df_ventas.columns:
+        return 0.0
+    total = 0.0
+    has_c = "costo_repuestos" in df_ventas.columns
+    for _, row in df_ventas.iterrows():
+        r = float(row.get("repuestos") or 0)
+        if has_c:
+            c = row.get("costo_repuestos")
+            if pd.notna(c):
+                total += float(c)
+                continue
+        total += r * 0.65
+    return total
+
+
 NAVIGATION = {
     "📊 Dashboard": "overview",
     "💰 Ventas": "sales",
@@ -1135,13 +1156,30 @@ def render_reports_operativo():
     ingresos_servicios_totales = servicio_ingresos_se(ventas_se)
     ventas_repuestos_total = repuestos_mostrador + repuestos_servicios
 
+    tiene_costo_en_ventas = (
+        "costo_repuestos" in df_ventas.columns
+        and len(df_ventas) > 0
+        and df_ventas["costo_repuestos"].notna().any()
+    )
     costo_repuestos_auto = 0.0
-    if len(df_gastos_calc) and "clasificacion" in df_gastos_calc.columns:
+    if tiene_costo_en_ventas:
+        costo_repuestos_auto = costo_mercaderia_repuestos_desde_ventas(df_ventas)
+    elif len(df_gastos_calc) and "clasificacion" in df_gastos_calc.columns:
         mask_costo = df_gastos_calc["clasificacion"].str.contains("COSTO DE REPUESTOS", case=False, na=False)
         costo_repuestos_auto = df_gastos_calc.loc[mask_costo, "total_usd"].fillna(0).sum()
     if costo_repuestos_auto == 0 and ventas_repuestos_total > 0:
         costo_repuestos_auto = ventas_repuestos_total * 0.65
     margen_repuestos_val = ventas_repuestos_total - costo_repuestos_auto
+
+    if ventas_repuestos_total > 0:
+        st.caption(
+            "**CMV repuestos:** "
+            + (
+                "costo FIFO por comprobante (columna en ventas desde PDF) donde hay dato; en líneas sin costo, 65 % del repuesto de esa línea."
+                if tiene_costo_en_ventas
+                else "sin costo por línea en el período: se usa el gasto «COSTO DE REPUESTOS» si existe; si no, 65 % sobre el total de ventas de repuestos."
+            )
+        )
 
     if len(df_gastos_reg) == 0:
         df_gastos_reg = pd.DataFrame(columns=df_gastos_todos.columns)
@@ -1344,7 +1382,11 @@ def render_reports_operativo():
                 "margen_pct": pct_str(margen_repuestos_val, ventas_repuestos_total)
                 if ventas_repuestos_total
                 else "N/A",
-                "comentario": "El mix taller/mostrador permite atar repuestos a mano de obra.",
+                "comentario": (
+                    "CMV: costo FIFO por comprobante (importe PDF) donde hay dato; 65 % del repuesto solo en líneas sin costo."
+                    if tiene_costo_en_ventas
+                    else "CMV: gastos «COSTO DE REPUESTOS» si existen; si no, 65 % sobre ventas de repuestos."
+                ),
             },
             "servicios": {
                 "ventas": ingresos_servicios_totales,

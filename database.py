@@ -341,16 +341,19 @@ def alinear_montos_nota_credito(
     mano_obra: float = 0.0,
     asistencia: float = 0.0,
     terceros: float = 0.0,
-) -> tuple[float, float, float, float, float]:
+    costo_repuestos: float = 0.0,
+) -> tuple[float, float, float, float, float, float]:
     """Para NC (no JD): el total suele volverse negativo; los componentes deben ir en el mismo sentido
-    para que total ≈ repuestos + servicio implícito y no se reste dos veces el repuesto."""
+    para que total ≈ repuestos + servicio implícito y no se reste dos veces el repuesto.
+    ``costo_repuestos`` (FIFO / costo mercadería) sigue el mismo criterio de signo que repuestos."""
     t = float(total or 0)
     r = float(repuestos or 0)
     mo = float(mano_obra or 0)
     a = float(asistencia or 0)
     ter = float(terceros or 0)
+    cr = float(costo_repuestos or 0)
     if not es_nota_credito_no_jd(tipo_comprobante):
-        return t, r, mo, a, ter
+        return t, r, mo, a, ter, cr
     if t > 0:
         t = -t
     if t < 0:
@@ -362,7 +365,31 @@ def alinear_montos_nota_credito(
             a = -a
         if ter > 0:
             ter = -ter
-    return t, r, mo, a, ter
+        if cr > 0:
+            cr = -cr
+    return t, r, mo, a, ter, cr
+
+
+def _ensure_ventas_column_costo_repuestos(cursor, conn) -> None:
+    """Asegura columna ``costo_repuestos`` en ``ventas`` (bases creadas antes de esta migración)."""
+    try:
+        if USE_POSTGRES:
+            cursor.execute("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name='ventas' AND column_name='costo_repuestos'
+            """)
+            if cursor.fetchone() is None:
+                _execute(cursor, "ALTER TABLE ventas ADD COLUMN costo_repuestos DOUBLE PRECISION")
+                conn.commit()
+        else:
+            try:
+                _execute(cursor, "ALTER TABLE ventas ADD COLUMN costo_repuestos REAL")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass
+    except Exception:
+        pass
 
 
 def get_connection():
@@ -428,6 +455,17 @@ def init_database():
                 )
         except Exception:
             pass
+
+        try:
+            cursor.execute("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name='ventas' AND column_name='costo_repuestos'
+            """)
+            if cursor.fetchone() is None:
+                _execute(cursor, "ALTER TABLE ventas ADD COLUMN costo_repuestos DOUBLE PRECISION")
+        except Exception:
+            pass
         
         _execute(cursor, GASTOS_TABLE_PG)
         _execute(cursor, PLANTILLAS_TABLE_PG)
@@ -454,6 +492,10 @@ def init_database():
                 END
                 """,
             )
+        except sqlite3.OperationalError:
+            pass
+        try:
+            _execute(cursor, "ALTER TABLE ventas ADD COLUMN costo_repuestos REAL")
         except sqlite3.OperationalError:
             pass
         _execute(cursor, GASTOS_TABLE_SQLITE)
@@ -484,7 +526,7 @@ def get_ventas(fecha_inicio=None, fecha_fin=None):
     if len(df):
         df = _sanitize_dataframe(
             df,
-            ["mano_obra", "asistencia", "repuestos", "terceros", "servicio", "descuento", "total"],
+            ["mano_obra", "asistencia", "repuestos", "terceros", "servicio", "descuento", "total", "costo_repuestos"],
         )
     conn.close()
     
@@ -528,19 +570,24 @@ def insert_venta(venta_data):
         pass  # Si hay error, continuar (la columna puede ya existir)
 
     venta_data = dict(venta_data)
-    t, r, mo, a, ter = alinear_montos_nota_credito(
+    _ensure_ventas_column_costo_repuestos(cursor, conn)
+    raw_costo = venta_data.get("costo_repuestos")
+    costo_in = float(raw_costo) if raw_costo is not None and raw_costo != "" else 0.0
+    t, r, mo, a, ter, cr = alinear_montos_nota_credito(
         venta_data.get("tipo_comprobante"),
         float(venta_data.get("total") or 0),
         float(venta_data.get("repuestos") or 0),
         mano_obra=float(venta_data.get("mano_obra") or 0),
         asistencia=float(venta_data.get("asistencia") or 0),
         terceros=float(venta_data.get("terceros") or 0),
+        costo_repuestos=costo_in,
     )
     venta_data["total"] = t
     venta_data["repuestos"] = r
     venta_data["mano_obra"] = mo
     venta_data["asistencia"] = a
     venta_data["terceros"] = ter
+    costo_para_db = cr if raw_costo is not None and raw_costo != "" else None
 
     tipo_re = venta_data.get("tipo_re_se")
     servicio_val = compute_servicio_venta(
@@ -553,8 +600,9 @@ def insert_venta(venta_data):
         INSERT INTO ventas (
             mes, fecha, sucursal, cliente, pin, comprobante, tipo_comprobante,
             trabajo, n_comprobante, tipo_re_se, mano_obra, asistencia,
-            repuestos, terceros, servicio, descuento, total, detalles, archivo_comprobante, campo_taller
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            repuestos, terceros, servicio, descuento, total, detalles, archivo_comprobante, campo_taller,
+            costo_repuestos
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
     params = (
         venta_data.get('mes'),
@@ -576,7 +624,8 @@ def insert_venta(venta_data):
         venta_data.get('total', 0),
         venta_data.get('detalles'),
         venta_data.get('archivo_comprobante'),
-        venta_data.get('campo_taller')
+        venta_data.get('campo_taller'),
+        costo_para_db,
     )
 
     if USE_POSTGRES:
@@ -617,19 +666,24 @@ def update_venta(venta_id, venta_data):
         pass  # Si hay error, continuar (la columna puede ya existir)
 
     venta_data = dict(venta_data)
-    t, r, mo, a, ter = alinear_montos_nota_credito(
+    _ensure_ventas_column_costo_repuestos(cursor, conn)
+    raw_costo = venta_data.get("costo_repuestos")
+    costo_in = float(raw_costo) if raw_costo is not None and raw_costo != "" else 0.0
+    t, r, mo, a, ter, cr = alinear_montos_nota_credito(
         venta_data.get("tipo_comprobante"),
         float(venta_data.get("total") or 0),
         float(venta_data.get("repuestos") or 0),
         mano_obra=float(venta_data.get("mano_obra") or 0),
         asistencia=float(venta_data.get("asistencia") or 0),
         terceros=float(venta_data.get("terceros") or 0),
+        costo_repuestos=costo_in,
     )
     venta_data["total"] = t
     venta_data["repuestos"] = r
     venta_data["mano_obra"] = mo
     venta_data["asistencia"] = a
     venta_data["terceros"] = ter
+    costo_para_db = cr if raw_costo is not None and raw_costo != "" else None
 
     tipo_re_u = venta_data.get("tipo_re_se")
     servicio_u = compute_servicio_venta(
@@ -644,7 +698,8 @@ def update_venta(venta_id, venta_data):
             comprobante = ?, tipo_comprobante = ?, trabajo = ?,
             n_comprobante = ?, tipo_re_se = ?, mano_obra = ?,
             asistencia = ?, repuestos = ?, terceros = ?, servicio = ?, descuento = ?,
-            total = ?, detalles = ?, archivo_comprobante = ?, campo_taller = ?
+            total = ?, detalles = ?, archivo_comprobante = ?, campo_taller = ?,
+            costo_repuestos = ?
         WHERE id = ?
     """, (
         venta_data.get('mes'),
@@ -667,6 +722,7 @@ def update_venta(venta_id, venta_data):
         venta_data.get('detalles'),
         venta_data.get('archivo_comprobante'),
         venta_data.get('campo_taller'),
+        costo_para_db,
         venta_id
     ))
     
@@ -1398,8 +1454,10 @@ def import_ventas_from_excel(excel_path):
                         'terceros': float(row.get('terceros', 0)) if pd.notna(row.get('terceros')) else 0,
                         'descuento': float(row.get('descuento', 0)) if pd.notna(row.get('descuento')) else 0,
                         'total': total,
-                        'detalles': str(row.get('detalles', '')).strip() if pd.notna(row.get('detalles')) else None
+                        'detalles': str(row.get('detalles', '')).strip() if pd.notna(row.get('detalles')) else None,
                     }
+                    if "costo_repuestos" in df.columns and pd.notna(row.get("costo_repuestos")):
+                        venta_data["costo_repuestos"] = float(row.get("costo_repuestos"))
                 else:
                     # Formato original: buscar columnas con nombres descriptivos
                     tipo_comprobante = str(get_col_value(df, row, ['Tipo Comprobante', 'TIPO COMPROBANTE'], 'FACTURA VENTA')).strip() or 'FACTURA VENTA'
@@ -1451,6 +1509,7 @@ def import_ventas_from_oficio_pdf(pdf_path: Path) -> tuple[int, list[str], dict]
     - Un registro por comprobante (bloques duplicados en el PDF se fusionan).
     - El **total** guardado usa ``total_con_impuestos_neto_iva21`` (÷ 1,21 en usuario ERASJIDO
       y sucursal 2 Comodoro), alineado con el análisis validado.
+    - **costo_repuestos** = costo FIFO / mercadería del PDF (columna ``costo_fifo`` del parseo).
     - Notas de crédito se detectan por el texto del comprobante.
     """
     import importlib.util
@@ -1486,6 +1545,7 @@ def import_ventas_from_oficio_pdf(pdf_path: Path) -> tuple[int, list[str], dict]
                 continue
             fecha = pd.to_datetime(row["fecha"]).date()
             tc = str(row.get("tipo_comprobante") or "FACTURA VENTA")
+            cr_pdf = row.get("costo_repuestos")
             venta_data = {
                 "mes": fecha.strftime("%B"),
                 "fecha": fecha,
@@ -1512,6 +1572,9 @@ def import_ventas_from_oficio_pdf(pdf_path: Path) -> tuple[int, list[str], dict]
                 else str(row.get("detalles"))[:2000],
                 "archivo_comprobante": None,
                 "campo_taller": None,
+                "costo_repuestos": float(cr_pdf)
+                if cr_pdf is not None and not (isinstance(cr_pdf, float) and pd.isna(cr_pdf))
+                else None,
             }
             insert_venta(venta_data)
             count += 1

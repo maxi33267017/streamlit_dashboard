@@ -376,6 +376,8 @@ def to_app_sales_csv(df: pd.DataFrame, *, use_total_neto_iva21: bool = False) ->
     out["n_comprobante"] = df["comprobante_texto"].astype(str).str.extract(r"(\d{4}\s*-\s*\d{8})", expand=False)
     out["tipo_re_se"] = df["tipo_cuenta"]
     out["repuestos"] = df["total_repuestos_neto"]
+    # Costo FIFO (3.er número Total repuestos) o derivado por % utilidad sobre ventas en el parseo
+    out["costo_repuestos"] = df["costo_fifo"]
     # Total facturación del comprobante (último valor en Total comprobante; suma = pie TOTAL del PDF)
     out["total"] = df["total_con_impuestos_estimado"].where(
         df["total_con_impuestos_estimado"].notna(), df["total_repuestos_neto"]
