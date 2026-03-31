@@ -204,21 +204,25 @@ def parse_segment(segment: str, page: int) -> Row | None:
     suc_code = m_suc.group(1).strip() if m_suc else None
     suc_nombre = map_sucursal(suc_code, usuario)
 
-    # Totales repuestos (si el PDF repite el comprobante, suele haber más de una línea: usar la última)
+    # Totales repuestos (puede haber varias líneas por comprobante en segmentos fusionados)
     tr_matches = list(re.finditer(r"Total repuestos\s*([^\n]+)", seg, flags=re.IGNORECASE))
-    m_total_rep = tr_matches[-1] if tr_matches else None
     total_rep = None
     costo_fifo = None
     venta_precio_lista = None
-    if m_total_rep:
-        nums_rep = [parse_number(x) for x in re.findall(r"-?\d[\d,]*(?:\.\d+)?", m_total_rep.group(1))]
+    rep_candidates: list[float] = []
+    fifo_candidates: list[float] = []
+    seen_rep_lines: set[str] = set()
+    for m_rep in tr_matches:
+        line = normalize_ws(m_rep.group(1))
+        if not line or line in seen_rep_lines:
+            continue
+        seen_rep_lines.add(line)
+        nums_rep = [parse_number(x) for x in re.findall(r"-?\d[\d,]*(?:\.\d+)?", line)]
         nums_rep = [n for n in nums_rep if n is not None]
         if nums_rep:
-            # Primera cifra del total = venta a precio de lista (informe detallado por comprobante)
-            total_rep = nums_rep[0]
-            venta_precio_lista = nums_rep[0]
+            rep_candidates.append(float(nums_rep[0]))
         if len(nums_rep) >= 3:
-            costo_fifo = nums_rep[2]
+            fifo_candidates.append(float(nums_rep[2]))
 
     # Bloque utilidades
     m_util = re.search(
@@ -239,6 +243,33 @@ def parse_segment(segment: str, page: int) -> Row | None:
     m_total_comp = tc_matches[-1] if tc_matches else None
     total_comp_raw = normalize_ws(m_total_comp.group(1)) if m_total_comp else None
     total_sin_imp, impuestos, total_con_imp, otros_col = parse_total_comprobante_fields(total_comp_raw or "")
+
+    # Consolidar repuestos/fifo cuando hay varias líneas "Total repuestos".
+    if rep_candidates:
+        rep_uniques = list(dict.fromkeys(rep_candidates))
+        if len(rep_uniques) == 1:
+            total_rep = rep_uniques[0]
+        else:
+            candidate_sum = float(sum(rep_uniques))
+            # Si la suma de líneas distintas entra en el neto del comprobante, usar suma.
+            # Esto cubre casos donde el comprobante trae repuestos desdoblados en 2 líneas.
+            if total_sin_imp is not None and candidate_sum <= float(total_sin_imp) + 1.0:
+                total_rep = candidate_sum
+            else:
+                # Si no cierra, evitar sobrecontar por duplicaciones y tomar la mayor línea.
+                total_rep = max(rep_uniques)
+        venta_precio_lista = total_rep
+
+    if fifo_candidates:
+        fifo_uniques = list(dict.fromkeys(fifo_candidates))
+        if len(fifo_uniques) == 1:
+            costo_fifo = fifo_uniques[0]
+        else:
+            candidate_fifo_sum = float(sum(fifo_uniques))
+            if total_rep is not None and candidate_fifo_sum <= float(total_rep) + 1.0:
+                costo_fifo = candidate_fifo_sum
+            else:
+                costo_fifo = max(fifo_uniques)
 
     # Fallback: cuando no viene "Total repuestos", usar total sin impuestos estimado.
     if total_rep is None and total_sin_imp is not None:
