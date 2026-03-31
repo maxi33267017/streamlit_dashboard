@@ -59,3 +59,6 @@ oficio.pdf
 imports/oficio32_ventas_import.csv
 imports/oficio32_normalizado.csv
 oficio32.pdf
+ventasmarzocompleto.pdf
+.gitignore
+imports/oficio32_auditoria.csv
