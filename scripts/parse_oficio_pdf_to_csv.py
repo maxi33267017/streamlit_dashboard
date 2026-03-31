@@ -380,8 +380,8 @@ def to_app_sales_csv(df: pd.DataFrame, *, use_total_neto_iva21: bool = False) ->
     """Genera CSV de apoyo para importación a tabla ventas.
 
     Si ``use_total_neto_iva21`` es True y existe la columna en el parseo, ``total`` pasa a ser
-    el total neto sin IVA (÷ 1,21 en ERASJIDO y sucursal 2). La columna ``repuestos`` recibe
-    la **misma** conversión para no mezclar neto en total y bruto en repuestos.
+    el total neto sin IVA (÷ 1,21 en ERASJIDO y sucursal 2). ``repuestos`` se conserva como viene
+    del bloque ``Total repuestos`` del PDF (valor ya neto según criterio operativo validado).
     """
     if df.empty:
         return pd.DataFrame()
@@ -403,19 +403,6 @@ def to_app_sales_csv(df: pd.DataFrame, *, use_total_neto_iva21: bool = False) ->
         out["total_neto_iva21"] = df["total_con_impuestos_neto_iva21"]
     if use_total_neto_iva21 and "total_neto_iva21" in out.columns:
         out["total"] = out["total_neto_iva21"].where(out["total_neto_iva21"].notna(), out["total"])
-        out["repuestos"] = df.apply(
-            lambda r: (
-                total_comprobante_neto_sin_iva21(
-                    float(r["total_repuestos_neto"])
-                    if r.get("total_repuestos_neto") is not None
-                    and not pd.isna(r["total_repuestos_neto"])
-                    else None,
-                    r.get("usuario"),
-                    r.get("sucursal_codigo"),
-                )
-            ),
-            axis=1,
-        )
     out["tipo_comprobante"] = df["comprobante_texto"].apply(_tipo_comprobante_desde_texto)
     out["comprobante"] = df["comprobante_texto"]
     out["usuario_autologica"] = (
@@ -438,9 +425,8 @@ def to_app_sales_csv(df: pd.DataFrame, *, use_total_neto_iva21: bool = False) ->
     # Solo OR en texto libre; usuario / FIFO / utilidades van en columnas propias o costo_repuestos
     _or = df["or_relacionada"].fillna("").astype(str).str.strip()
     out["detalles"] = _or.apply(lambda s: f"OR: {s}" if s else None)
-    # Regla pedida: RE es 100% repuestos; SE calcula servicio = total - repuestos
+    # Servicio en SE = total - repuestos (repuestos se toma de la línea del comprobante).
     tre = out["tipo_re_se"].astype(str).str.upper()
-    out["repuestos"] = out["repuestos"].where(tre != "RE", out["total"])
     out["servicio"] = (out["total"] - out["repuestos"].fillna(0)).where(tre == "SE", 0.0)
     return out
 
