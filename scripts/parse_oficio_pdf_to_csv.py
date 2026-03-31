@@ -271,6 +271,14 @@ def parse_segment(segment: str, page: int) -> Row | None:
             else:
                 costo_fifo = max(fifo_uniques)
 
+    # Guardrail contable: la línea "Total repuestos" no puede exceder el neto del comprobante.
+    # (Sucede en algunos segmentos fusionados de internas donde una línea parcial quedó sobrecontada.)
+    if total_rep is not None and total_sin_imp is not None:
+        if total_sin_imp >= 0 and total_rep > total_sin_imp:
+            total_rep = float(total_sin_imp)
+        elif total_sin_imp < 0 and total_rep < total_sin_imp:
+            total_rep = float(total_sin_imp)
+
     # Fallback: cuando no viene "Total repuestos", usar total sin impuestos estimado.
     if total_rep is None and total_sin_imp is not None:
         total_rep = total_sin_imp
