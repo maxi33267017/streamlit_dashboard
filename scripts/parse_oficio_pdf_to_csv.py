@@ -438,8 +438,9 @@ def to_app_sales_csv(df: pd.DataFrame, *, use_total_neto_iva21: bool = False) ->
     # Solo OR en texto libre; usuario / FIFO / utilidades van en columnas propias o costo_repuestos
     _or = df["or_relacionada"].fillna("").astype(str).str.strip()
     out["detalles"] = _or.apply(lambda s: f"OR: {s}" if s else None)
-    # Servicio (no repuestos) para importar a ventas.servicio; RE = 0
+    # Regla pedida: RE es 100% repuestos; SE calcula servicio = total - repuestos
     tre = out["tipo_re_se"].astype(str).str.upper()
+    out["repuestos"] = out["repuestos"].where(tre != "RE", out["total"])
     out["servicio"] = (out["total"] - out["repuestos"].fillna(0)).where(tre == "SE", 0.0)
     return out
 

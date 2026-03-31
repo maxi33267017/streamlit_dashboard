@@ -1650,8 +1650,9 @@ def _desglose_lineas_comprobante(df: pd.DataFrame) -> pd.DataFrame:
     """
     Por cada comprobante: total = línea repuestos + (total − repuestos).
 
-    El **resto** en RE (mostrador) no es “servicio” operativo; solo en **SE** el resto aproxima
-    MO + asistencia + terceros. Ver columnas separadas en reportes.
+    Regla operativa pedida:
+    - RE: 100% del comprobante a repuestos (resto RE = 0).
+    - SE: servicios = total − repuestos.
     """
     out = df.copy()
     t = pd.to_numeric(out["total"], errors="coerce").fillna(0.0)
@@ -1661,6 +1662,10 @@ def _desglose_lineas_comprobante(df: pd.DataFrame) -> pd.DataFrame:
         rp = pd.Series(np.nan, index=out.index, dtype=float)
     rp = rp.where(rp.notna(), t)
     rp = np.minimum(rp, t)
+
+    tre = out.get("tipo_re_se", pd.Series("SE", index=out.index)).astype(str).str.upper()
+    rp = rp.where(tre != "RE", t)
+
     out["_t"] = t
     out["_rp"] = rp
     out["_rem"] = t - rp
