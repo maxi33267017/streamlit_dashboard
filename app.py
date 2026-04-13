@@ -3,6 +3,7 @@
 import os
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 st.set_page_config(
     page_title="Postventa FY",
@@ -35,16 +36,25 @@ def _layout_css() -> None:
         div[data-testid="stDecoration"] { display: none !important; }
 
         /*
-         * En Streamlit 1.5x el scroll real está en stMainBlockContainer (no basta con stMain).
-         * stHeader / stAppToolbar quedan fixed encima; reservamos alto similar a la toolbar.
+         * stHeader es fixed: el flujo del main empieza debajo en el viewport.
+         * stMainBlockContainer (1.5x) + .stMain por si Cloud usa otra build.
          */
         [data-testid="stMainBlockContainer"] {
-            padding-top: 7.5rem !important;
+            padding-top: 4rem !important;
             max-width: 100% !important;
         }
         </style>
         """,
         unsafe_allow_html=True,
+    )
+
+
+def _chrome_spacer() -> None:
+    """Reserva alto real en el layout (iframe); no depende solo del CSS inyectado."""
+    components.html(
+        "<style>html,body{margin:0;background:transparent}</style>",
+        height=104,
+        scrolling=False,
     )
 
 
@@ -54,6 +64,7 @@ if "vista" not in st.session_state:
     st.session_state.vista = "inicio"
 
 _layout_css()
+_chrome_spacer()
 
 # Navbar: marca a la izquierda, acciones a la derecha.
 brand_col, actions_col = st.columns([2, 3])
