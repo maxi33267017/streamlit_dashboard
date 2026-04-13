@@ -25,14 +25,23 @@ def _app_password() -> str:
     return "Patagonia2815$"
 
 
-def _hide_sidebar() -> None:
+def _layout_css() -> None:
+    """Oculta sidebar y deja margen bajo la barra fija de Streamlit (local y Cloud)."""
     st.markdown(
         """
         <style>
         [data-testid="stSidebar"] { display: none !important; }
         [data-testid="collapsedControl"] { display: none !important; }
         div[data-testid="stDecoration"] { display: none !important; }
-        .block-container { padding-top: 1rem !important; max-width: 100% !important; }
+
+        /* La cabecera de Streamlit es fixed; sin esto la navbar queda tapada. */
+        [data-testid="stMain"] {
+            padding-top: 5.5rem !important;
+        }
+        [data-testid="stMain"] .block-container {
+            padding-top: 0.5rem !important;
+            max-width: 100% !important;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -44,7 +53,7 @@ if "is_authed" not in st.session_state:
 if "vista" not in st.session_state:
     st.session_state.vista = "inicio"
 
-_hide_sidebar()
+_layout_css()
 
 # Navbar: marca a la izquierda, acciones a la derecha.
 brand_col, actions_col = st.columns([2, 3])
