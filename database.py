@@ -243,6 +243,27 @@ HISTORIAL_TABLE_PG = """
     )
 """
 
+# Tablas nuevas para el esqueleto actual (Registro / futuras vistas); no alteran ventas ni gastos.
+APP_REGISTROS_TABLE_SQLITE = """
+    CREATE TABLE IF NOT EXISTS app_registros (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        titulo TEXT,
+        detalle TEXT,
+        extra_json TEXT
+    )
+"""
+
+APP_REGISTROS_TABLE_PG = """
+    CREATE TABLE IF NOT EXISTS app_registros (
+        id SERIAL PRIMARY KEY,
+        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        titulo TEXT,
+        detalle TEXT,
+        extra_json TEXT
+    )
+"""
+
 
 def _prepare_query(query: str) -> str:
     if USE_POSTGRES:
@@ -505,6 +526,7 @@ def init_database():
         _execute(cursor, GASTOS_TABLE_PG)
         _execute(cursor, PLANTILLAS_TABLE_PG)
         _execute(cursor, HISTORIAL_TABLE_PG)
+        _execute(cursor, APP_REGISTROS_TABLE_PG)
     else:
         _execute(cursor, VENTAS_TABLE_SQLITE)
         try:
@@ -514,9 +536,57 @@ def init_database():
         _execute(cursor, GASTOS_TABLE_SQLITE)
         _execute(cursor, PLANTILLAS_TABLE_SQLITE)
         _execute(cursor, HISTORIAL_TABLE_SQLITE)
-    
+        _execute(cursor, APP_REGISTROS_TABLE_SQLITE)
+
     conn.commit()
     conn.close()
+
+
+def insert_app_registro(
+    titulo: str | None = None,
+    detalle: str | None = None,
+    extra_json: str | None = None,
+) -> int:
+    """Inserta una fila en ``app_registros`` (JSON adicional como texto)."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    if USE_POSTGRES:
+        _execute(
+            cursor,
+            """
+            INSERT INTO app_registros (titulo, detalle, extra_json)
+            VALUES (?, ?, ?)
+            RETURNING id
+            """,
+            (titulo, detalle, extra_json),
+        )
+        row = cursor.fetchone()
+        new_id = row["id"] if isinstance(row, dict) else row[0]
+    else:
+        _execute(
+            cursor,
+            "INSERT INTO app_registros (titulo, detalle, extra_json) VALUES (?, ?, ?)",
+            (titulo, detalle, extra_json),
+        )
+        new_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return int(new_id)
+
+
+def list_app_registros(limit: int = 100) -> pd.DataFrame:
+    """Últimas filas de ``app_registros`` (para pantalla Registro o depuración)."""
+    conn = get_connection()
+    try:
+        df = _read_sql(
+            "SELECT * FROM app_registros ORDER BY id DESC LIMIT ?",
+            conn,
+            (limit,),
+        )
+        return df if df is not None else pd.DataFrame()
+    finally:
+        conn.close()
+
 
 def get_ventas(fecha_inicio=None, fecha_fin=None):
     """Obtiene todas las ventas, opcionalmente filtradas por fecha"""

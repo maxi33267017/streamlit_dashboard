@@ -5,6 +5,8 @@ import os
 import streamlit as st
 import streamlit.components.v1 as components
 
+import database
+
 st.set_page_config(
     page_title="Postventa FY",
     page_icon="📊",
@@ -51,9 +53,17 @@ def _chrome_spacer() -> None:
     )
 
 
+@st.cache_resource(show_spinner=False)
+def _bootstrap_database():
+    """Crea tablas si no existen (ventas/gastos históricos + ``app_registros`` nuevas)."""
+    database.init_database()
+    return True
+
+
 if "is_authed" not in st.session_state:
     st.session_state.is_authed = False
 
+_bootstrap_database()
 _layout_css()
 _chrome_spacer()
 
