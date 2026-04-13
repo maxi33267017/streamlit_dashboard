@@ -264,6 +264,90 @@ APP_REGISTROS_TABLE_PG = """
     )
 """
 
+# Cierres mensuales de ventas (Registro → Ventas). Concesionario se calcula en UI sumando sucursales.
+CIERRE_VENTAS_MES_SQLITE = """
+    CREATE TABLE IF NOT EXISTS cierre_ventas_mes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        anio INTEGER NOT NULL,
+        mes INTEGER NOT NULL,
+        tipo_cambio_ars_usd REAL NOT NULL DEFAULT 1.0,
+        notas TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE (anio, mes)
+    )
+"""
+
+CIERRE_VENTAS_MES_PG = """
+    CREATE TABLE IF NOT EXISTS cierre_ventas_mes (
+        id SERIAL PRIMARY KEY,
+        anio INTEGER NOT NULL,
+        mes INTEGER NOT NULL,
+        tipo_cambio_ars_usd DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+        notas TEXT,
+        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE (anio, mes)
+    )
+"""
+
+CIERRE_VENTAS_LINEA_SQLITE = """
+    CREATE TABLE IF NOT EXISTS cierre_ventas_linea (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cierre_id INTEGER NOT NULL,
+        sucursal TEXT NOT NULL,
+        fact_rep_mostrador REAL NOT NULL DEFAULT 0,
+        fact_rep_taller REAL NOT NULL DEFAULT 0,
+        desc_mostrador REAL NOT NULL DEFAULT 0,
+        desc_taller REAL NOT NULL DEFAULT 0,
+        util_pct_mostrador REAL,
+        util_pct_taller REAL,
+        fact_servicios REAL NOT NULL DEFAULT 0,
+        gastos_fijos REAL NOT NULL DEFAULT 0,
+        gastos_var_s REAL NOT NULL DEFAULT 0,
+        gastos_var_r REAL NOT NULL DEFAULT 0,
+        total_repuestos REAL,
+        util_prom_pct REAL,
+        total_bruto REAL,
+        gastos_variables_tot REAL,
+        gastos_total REAL,
+        margen_contrib REAL,
+        margen_contrib_pct REAL,
+        resultado REAL,
+        factor_absorcion REAL,
+        FOREIGN KEY (cierre_id) REFERENCES cierre_ventas_mes (id) ON DELETE CASCADE,
+        UNIQUE (cierre_id, sucursal)
+    )
+"""
+
+CIERRE_VENTAS_LINEA_PG = """
+    CREATE TABLE IF NOT EXISTS cierre_ventas_linea (
+        id SERIAL PRIMARY KEY,
+        cierre_id INTEGER NOT NULL REFERENCES cierre_ventas_mes (id) ON DELETE CASCADE,
+        sucursal TEXT NOT NULL,
+        fact_rep_mostrador DOUBLE PRECISION NOT NULL DEFAULT 0,
+        fact_rep_taller DOUBLE PRECISION NOT NULL DEFAULT 0,
+        desc_mostrador DOUBLE PRECISION NOT NULL DEFAULT 0,
+        desc_taller DOUBLE PRECISION NOT NULL DEFAULT 0,
+        util_pct_mostrador DOUBLE PRECISION,
+        util_pct_taller DOUBLE PRECISION,
+        fact_servicios DOUBLE PRECISION NOT NULL DEFAULT 0,
+        gastos_fijos DOUBLE PRECISION NOT NULL DEFAULT 0,
+        gastos_var_s DOUBLE PRECISION NOT NULL DEFAULT 0,
+        gastos_var_r DOUBLE PRECISION NOT NULL DEFAULT 0,
+        total_repuestos DOUBLE PRECISION,
+        util_prom_pct DOUBLE PRECISION,
+        total_bruto DOUBLE PRECISION,
+        gastos_variables_tot DOUBLE PRECISION,
+        gastos_total DOUBLE PRECISION,
+        margen_contrib DOUBLE PRECISION,
+        margen_contrib_pct DOUBLE PRECISION,
+        resultado DOUBLE PRECISION,
+        factor_absorcion DOUBLE PRECISION,
+        UNIQUE (cierre_id, sucursal)
+    )
+"""
+
 
 def _prepare_query(query: str) -> str:
     if USE_POSTGRES:
@@ -510,6 +594,7 @@ def get_connection():
         return conn
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
 def init_database():
@@ -527,6 +612,8 @@ def init_database():
         _execute(cursor, PLANTILLAS_TABLE_PG)
         _execute(cursor, HISTORIAL_TABLE_PG)
         _execute(cursor, APP_REGISTROS_TABLE_PG)
+        _execute(cursor, CIERRE_VENTAS_MES_PG)
+        _execute(cursor, CIERRE_VENTAS_LINEA_PG)
     else:
         _execute(cursor, VENTAS_TABLE_SQLITE)
         try:
@@ -537,6 +624,8 @@ def init_database():
         _execute(cursor, PLANTILLAS_TABLE_SQLITE)
         _execute(cursor, HISTORIAL_TABLE_SQLITE)
         _execute(cursor, APP_REGISTROS_TABLE_SQLITE)
+        _execute(cursor, CIERRE_VENTAS_MES_SQLITE)
+        _execute(cursor, CIERRE_VENTAS_LINEA_SQLITE)
 
     conn.commit()
     conn.close()
@@ -584,6 +673,224 @@ def list_app_registros(limit: int = 100) -> pd.DataFrame:
             (limit,),
         )
         return df if df is not None else pd.DataFrame()
+    finally:
+        conn.close()
+
+
+SUCURSALES_VENTAS_REAL = ("RIO GRANDE", "RIO GALLEGOS", "COMODORO")
+
+
+def compute_cierre_venta_linea(
+    fact_rep_mostrador: float,
+    fact_rep_taller: float,
+    desc_mostrador: float,
+    desc_taller: float,
+    util_pct_mostrador: float | None,
+    util_pct_taller: float | None,
+    fact_servicios: float,
+    gastos_fijos: float,
+    gastos_var_s: float,
+    gastos_var_r: float,
+) -> dict:
+    """
+    Campos calculados a partir de cargas en ARS.
+    ``util_pct_*`` en fracción (0.3346 = 33,46 %).
+    """
+    fm = float(fact_rep_mostrador or 0)
+    ft = float(fact_rep_taller or 0)
+    dm = float(desc_mostrador or 0)
+    dt = float(desc_taller or 0)
+    um = float(util_pct_mostrador) if util_pct_mostrador is not None else 0.0
+    ut = float(util_pct_taller) if util_pct_taller is not None else 0.0
+    fs = float(fact_servicios or 0)
+    gf = float(gastos_fijos or 0)
+    gvs = float(gastos_var_s or 0)
+    gvr = float(gastos_var_r or 0)
+
+    neto_rep = fm + ft - dm - dt
+    wm = max(fm - dm, 0.0)
+    wt = max(ft - dt, 0.0)
+    if wm + wt > 0:
+        util_prom = (um * wm + ut * wt) / (wm + wt)
+    else:
+        util_prom = None
+
+    total_bruto = neto_rep + fs
+    gv_tot = gvs + gvr
+    gastos_tot = gf + gv_tot
+    margen = total_bruto - gastos_tot
+    margen_pct = (margen / total_bruto) if total_bruto else None
+    factor_abs = (gf / total_bruto) if total_bruto else None
+
+    return {
+        "total_repuestos": neto_rep,
+        "util_prom_pct": util_prom,
+        "total_bruto": total_bruto,
+        "gastos_variables_tot": gv_tot,
+        "gastos_total": gastos_tot,
+        "margen_contrib": margen,
+        "margen_contrib_pct": margen_pct,
+        "resultado": margen,
+        "factor_absorcion": factor_abs,
+    }
+
+
+def get_cierre_ventas_mes(anio: int, mes: int) -> dict | None:
+    conn = get_connection()
+    try:
+        df = _read_sql(
+            "SELECT * FROM cierre_ventas_mes WHERE anio = ? AND mes = ?",
+            conn,
+            (anio, mes),
+        )
+        if df is None or len(df) == 0:
+            return None
+        return df.iloc[0].to_dict()
+    finally:
+        conn.close()
+
+
+def list_cierres_ventas_mes(limit: int = 36) -> pd.DataFrame:
+    conn = get_connection()
+    try:
+        df = _read_sql(
+            """
+            SELECT id, anio, mes, tipo_cambio_ars_usd, updated_at
+            FROM cierre_ventas_mes
+            ORDER BY anio DESC, mes DESC
+            LIMIT ?
+            """,
+            conn,
+            (limit,),
+        )
+        return df if df is not None else pd.DataFrame()
+    finally:
+        conn.close()
+
+
+def upsert_cierre_ventas_mes_header(
+    anio: int, mes: int, tipo_cambio_ars_usd: float, notas: str | None = None
+) -> int:
+    if tipo_cambio_ars_usd <= 0:
+        raise ValueError("tipo_cambio_ars_usd debe ser > 0 (ARS por 1 USD).")
+    exist = get_cierre_ventas_mes(anio, mes)
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        if exist is not None:
+            cid = int(exist["id"])
+            _execute(
+                cursor,
+                """
+                UPDATE cierre_ventas_mes
+                SET tipo_cambio_ars_usd = ?, notas = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (tipo_cambio_ars_usd, notas, cid),
+            )
+        else:
+            if USE_POSTGRES:
+                _execute(
+                    cursor,
+                    """
+                    INSERT INTO cierre_ventas_mes (anio, mes, tipo_cambio_ars_usd, notas)
+                    VALUES (?, ?, ?, ?)
+                    RETURNING id
+                    """,
+                    (anio, mes, tipo_cambio_ars_usd, notas),
+                )
+                row = cursor.fetchone()
+                cid = int(row["id"] if isinstance(row, dict) else row[0])
+            else:
+                _execute(
+                    cursor,
+                    """
+                    INSERT INTO cierre_ventas_mes (anio, mes, tipo_cambio_ars_usd, notas)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (anio, mes, tipo_cambio_ars_usd, notas),
+                )
+                cid = int(cursor.lastrowid)
+        conn.commit()
+        return cid
+    finally:
+        conn.close()
+
+
+def get_lineas_cierre_ventas(cierre_id: int) -> pd.DataFrame:
+    conn = get_connection()
+    try:
+        df = _read_sql(
+            """
+            SELECT * FROM cierre_ventas_linea
+            WHERE cierre_id = ?
+            ORDER BY sucursal
+            """,
+            conn,
+            (cierre_id,),
+        )
+        return df if df is not None else pd.DataFrame()
+    finally:
+        conn.close()
+
+
+def replace_lineas_cierre_ventas(cierre_id: int, filas: list[dict]) -> None:
+    """Reemplaza todas las líneas del cierre por las sucursales dadas (típicamente 3)."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        _execute(cursor, "DELETE FROM cierre_ventas_linea WHERE cierre_id = ?", (cierre_id,))
+        for row in filas:
+            calc = compute_cierre_venta_linea(
+                row["fact_rep_mostrador"],
+                row["fact_rep_taller"],
+                row["desc_mostrador"],
+                row["desc_taller"],
+                row.get("util_pct_mostrador"),
+                row.get("util_pct_taller"),
+                row["fact_servicios"],
+                row.get("gastos_fijos", 0),
+                row.get("gastos_var_s", 0),
+                row.get("gastos_var_r", 0),
+            )
+            _execute(
+                cursor,
+                """
+                INSERT INTO cierre_ventas_linea (
+                    cierre_id, sucursal,
+                    fact_rep_mostrador, fact_rep_taller, desc_mostrador, desc_taller,
+                    util_pct_mostrador, util_pct_taller, fact_servicios,
+                    gastos_fijos, gastos_var_s, gastos_var_r,
+                    total_repuestos, util_prom_pct, total_bruto,
+                    gastos_variables_tot, gastos_total, margen_contrib, margen_contrib_pct,
+                    resultado, factor_absorcion
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    cierre_id,
+                    row["sucursal"],
+                    row["fact_rep_mostrador"],
+                    row["fact_rep_taller"],
+                    row["desc_mostrador"],
+                    row["desc_taller"],
+                    row.get("util_pct_mostrador"),
+                    row.get("util_pct_taller"),
+                    row["fact_servicios"],
+                    row.get("gastos_fijos", 0),
+                    row.get("gastos_var_s", 0),
+                    row.get("gastos_var_r", 0),
+                    calc["total_repuestos"],
+                    calc["util_prom_pct"],
+                    calc["total_bruto"],
+                    calc["gastos_variables_tot"],
+                    calc["gastos_total"],
+                    calc["margen_contrib"],
+                    calc["margen_contrib_pct"],
+                    calc["resultado"],
+                    calc["factor_absorcion"],
+                ),
+            )
+        conn.commit()
     finally:
         conn.close()
 
