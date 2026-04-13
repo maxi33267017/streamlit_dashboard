@@ -34,12 +34,12 @@ def _layout_css() -> None:
         [data-testid="collapsedControl"] { display: none !important; }
         div[data-testid="stDecoration"] { display: none !important; }
 
-        /* La cabecera de Streamlit es fixed; sin esto la navbar queda tapada. */
-        [data-testid="stMain"] {
-            padding-top: 5.5rem !important;
-        }
-        [data-testid="stMain"] .block-container {
-            padding-top: 0.5rem !important;
+        /*
+         * En Streamlit 1.5x el scroll real está en stMainBlockContainer (no basta con stMain).
+         * stHeader / stAppToolbar quedan fixed encima; reservamos alto similar a la toolbar.
+         */
+        [data-testid="stMainBlockContainer"] {
+            padding-top: 7.5rem !important;
             max-width: 100% !important;
         }
         </style>
