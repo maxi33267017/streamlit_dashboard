@@ -476,9 +476,18 @@ def _build_inicio_report_pdf_bytes(
                     # Histórico facturación
                     hist_df = trend_df.copy().reset_index(drop=True)
                     plt.figure(figsize=(11, 4))
-                    plt.bar(hist_df["periodo"], hist_df["fact_total_usd"], color=_COL_YELLOW)
+                    bars = plt.bar(hist_df["periodo"], hist_df["fact_total_usd"], color=_COL_YELLOW)
                     plt.xticks(rotation=45, ha="right")
                     plt.title("Facturación total - todos los meses")
+                    for b, v in zip(bars, hist_df["fact_total_usd"]):
+                        plt.text(
+                            b.get_x() + b.get_width() / 2.0,
+                            b.get_height(),
+                            f"US$ {float(v):,.0f}",
+                            ha="center",
+                            va="bottom",
+                            fontsize=8,
+                        )
                     plt.tight_layout()
                     plt.savefig(p_hist, dpi=180)
                     plt.close()
