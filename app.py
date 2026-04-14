@@ -293,6 +293,13 @@ def _util_promedio_simple(df: pd.DataFrame, col: str) -> float | None:
     return float(vals.mean()) / 100.0
 
 
+def _avg_non_zero_pair(a: float | None, b: float | None) -> float:
+    vals = [float(v) for v in (a, b) if v is not None and float(v) > 0]
+    if not vals:
+        return 0.0
+    return float(sum(vals) / len(vals))
+
+
 def _fila_concesionario(df_edit: pd.DataFrame) -> dict:
     sfm = float(df_edit["fact_rep_mostrador"].sum())
     sft = float(df_edit["fact_rep_taller"].sum())
@@ -399,18 +406,9 @@ def _build_cierre_dashboard_metrics(cierre: dict, lineas: pd.DataFrame) -> dict 
     dt = float(df["desc_taller"].sum())
     fs = float(df["fact_servicios"].sum())
 
-    wm = (df["fact_rep_mostrador"] - df["desc_mostrador"]).clip(lower=0.0)
-    wt = (df["fact_rep_taller"] - df["desc_taller"]).clip(lower=0.0)
-    um_num = 0.0
-    ut_num = 0.0
-    if "util_pct_mostrador" in df.columns:
-        um_num = float((pd.to_numeric(df["util_pct_mostrador"], errors="coerce").fillna(0.0) * wm).sum())
-    if "util_pct_taller" in df.columns:
-        ut_num = float((pd.to_numeric(df["util_pct_taller"], errors="coerce").fillna(0.0) * wt).sum())
-    um_den = float(wm.sum())
-    ut_den = float(wt.sum())
-    um = (um_num / um_den) if um_den > 0 else 0.0
-    ut = (ut_num / ut_den) if ut_den > 0 else 0.0
+    um = _util_promedio_simple(df, "util_pct_mostrador") or 0.0
+    ut = _util_promedio_simple(df, "util_pct_taller") or 0.0
+    util_prom_total = _avg_non_zero_pair(um, ut)
 
     gv = database.compute_gastos_variables_globales(
         fact_rep_mos_conc=fm,
@@ -434,7 +432,6 @@ def _build_cierre_dashboard_metrics(cierre: dict, lineas: pd.DataFrame) -> dict 
     margen_ratio = _safe_ratio(margen_usd, fact_total_usd)
     resultado_usd = margen_usd - gastos_fijos_usd
     factor_abs_ratio = _safe_ratio(margen_usd, gastos_fijos_usd)
-    util_prom_total = _safe_ratio(um_num + ut_num, um_den + ut_den)
 
     df["participacion_facturacion"] = df["fact_total_ars"] / fact_total_ars if fact_total_ars > 0 else 0.0
     branches = pd.DataFrame(
@@ -461,7 +458,7 @@ def _build_cierre_dashboard_metrics(cierre: dict, lineas: pd.DataFrame) -> dict 
         "margen_pct": (margen_ratio * 100.0) if margen_ratio is not None else None,
         "resultado_usd": resultado_usd,
         "factor_abs_pct": (factor_abs_ratio * 100.0) if factor_abs_ratio is not None else None,
-        "util_prom_total_pct": (util_prom_total * 100.0) if util_prom_total is not None else None,
+        "util_prom_total_pct": util_prom_total * 100.0,
         "branches": branches,
     }
 
@@ -695,8 +692,8 @@ def _render_registro_ventas() -> None:
         )
     rubro_db = _rubro_otros_a_db(rubro_sel) if rubro_sel != "— Ninguno —" else None
 
-    um_c = _util_ponderado(edited, "mos")
-    ut_c = _util_ponderado(edited, "tal")
+    um_c = _util_promedio_simple(edited, "util_pct_mostrador")
+    ut_c = _util_promedio_simple(edited, "util_pct_taller")
     otros_ars = float(gastos_otros_usd) * tc_val
     # Sin % utilidad de servicios en la grilla: CMV de servicios = 0 salvo «otros» con rubro Servicios.
     gv = database.compute_gastos_variables_globales(

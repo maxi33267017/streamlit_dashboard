@@ -780,13 +780,11 @@ def compute_cierre_venta_linea(
 
     total_bruto = neto_rep + fs
 
-    net_mos = max(fm - dm, 0.0)
-    net_tal = max(ft - dt, 0.0)
-    us = 1.0  # alineado con gastos variables globales (sin CMV servicios por %)
-    gv_mos = net_mos * (1.0 - um)
-    gv_tal = net_tal * (1.0 - ut)
+    # Regla solicitada: variables repuestos desde utilidad promedio de repuestos.
+    us = 1.0  # sin % utilidad servicios en grilla => CMV servicios 0
+    gv_rep = max(neto_rep, 0.0) * (1.0 - util_prom)
     gv_serv = fs * (1.0 - us)
-    gastos_variables_tot = gv_mos + gv_tal + gv_serv
+    gastos_variables_tot = gv_rep + gv_serv
     margen_contrib = total_bruto - gastos_variables_tot
 
     if total_bruto > 0:
@@ -843,8 +841,10 @@ def compute_gastos_variables_globales(
     net_tal = max(float(fact_rep_tal_conc or 0) - float(desc_rep_tal_conc or 0), 0.0)
     fs = max(float(fact_serv_conc or 0), 0.0)
 
-    gv_rep_mos = net_mos * (1.0 - um)
-    gv_rep_tal = net_tal * (1.0 - ut)
+    utils_no_cero = [u for u in (um, ut) if u > 0]
+    util_rep_prom = (sum(utils_no_cero) / len(utils_no_cero)) if utils_no_cero else 0.0
+    gv_rep_mos = net_mos * (1.0 - util_rep_prom)
+    gv_rep_tal = net_tal * (1.0 - util_rep_prom)
     gv_rep_total = gv_rep_mos + gv_rep_tal
     gv_serv = fs * (1.0 - us)
 
