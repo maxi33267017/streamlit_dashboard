@@ -1097,6 +1097,82 @@ def replace_lineas_cierre_ventas(cierre_id: int, filas: list[dict]) -> None:
         conn.close()
 
 
+def recalculate_cierres_ventas_derivados() -> int:
+    """
+    Recalcula columnas derivadas de ``cierre_ventas_linea`` para todos los meses guardados
+    usando la lógica vigente de ``compute_cierre_venta_linea``.
+
+    Retorna cantidad de filas actualizadas.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    updated = 0
+    try:
+        df = _read_sql(
+            """
+            SELECT
+                id,
+                fact_rep_mostrador,
+                fact_rep_taller,
+                desc_mostrador,
+                desc_taller,
+                util_pct_mostrador,
+                util_pct_taller,
+                fact_servicios
+            FROM cierre_ventas_linea
+            """,
+            conn,
+        )
+        if df is None or len(df) == 0:
+            return 0
+
+        for _, row in df.iterrows():
+            calc = compute_cierre_venta_linea(
+                float(row.get("fact_rep_mostrador") or 0),
+                float(row.get("fact_rep_taller") or 0),
+                float(row.get("desc_mostrador") or 0),
+                float(row.get("desc_taller") or 0),
+                row.get("util_pct_mostrador"),
+                row.get("util_pct_taller"),
+                float(row.get("fact_servicios") or 0),
+            )
+            _execute(
+                cursor,
+                """
+                UPDATE cierre_ventas_linea
+                SET
+                    total_repuestos = ?,
+                    util_prom_pct = ?,
+                    total_bruto = ?,
+                    gastos_variables_tot = ?,
+                    gastos_total = ?,
+                    margen_contrib = ?,
+                    margen_contrib_pct = ?,
+                    resultado = ?,
+                    factor_absorcion = ?
+                WHERE id = ?
+                """,
+                (
+                    calc["total_repuestos"],
+                    calc["util_prom_pct"],
+                    calc["total_bruto"],
+                    calc["gastos_variables_tot"],
+                    calc["gastos_total"],
+                    calc["margen_contrib"],
+                    calc["margen_contrib_pct"],
+                    calc["resultado"],
+                    calc["factor_absorcion"],
+                    int(row["id"]),
+                ),
+            )
+            updated += 1
+
+        conn.commit()
+        return updated
+    finally:
+        conn.close()
+
+
 def get_ventas(fecha_inicio=None, fecha_fin=None):
     """Obtiene todas las ventas, opcionalmente filtradas por fecha"""
     conn = get_connection()

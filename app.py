@@ -834,6 +834,13 @@ def _render_registro_ventas() -> None:
             except Exception as exc:
                 st.error(f"No se pudo guardar: {exc}")
     with b2:
+        if st.button("Recalcular meses guardados", use_container_width=True):
+            try:
+                n = database.recalculate_cierres_ventas_derivados()
+                st.success(f"Recalculado OK. Filas actualizadas: {n}")
+            except Exception as exc:
+                st.error(f"No se pudo recalcular: {exc}")
+
         hist = database.list_cierres_ventas_mes(12)
         if len(hist):
             st.caption("Últimos cierres guardados")
