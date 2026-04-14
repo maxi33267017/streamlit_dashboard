@@ -908,6 +908,33 @@ def list_cierres_ventas_mes(limit: int = 36) -> pd.DataFrame:
         conn.close()
 
 
+def list_cierres_ventas_dashboard(limit: int = 60) -> pd.DataFrame:
+    """Cierres para dashboard de Inicio con campos de cabecera relevantes."""
+    conn = get_connection()
+    try:
+        df = _read_sql(
+            """
+            SELECT
+                id,
+                anio,
+                mes,
+                tipo_cambio_ars_usd,
+                gastos_fijos_global,
+                gastos_var_otros,
+                gastos_var_otros_rubro,
+                updated_at
+            FROM cierre_ventas_mes
+            ORDER BY anio DESC, mes DESC
+            LIMIT ?
+            """,
+            conn,
+            (limit,),
+        )
+        return df if df is not None else pd.DataFrame()
+    finally:
+        conn.close()
+
+
 def upsert_cierre_ventas_mes_header(
     anio: int,
     mes: int,

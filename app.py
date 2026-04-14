@@ -3,6 +3,7 @@
 import os
 
 import pandas as pd
+import plotly.express as px
 import streamlit as st
 import streamlit.components.v1 as components
 
@@ -347,6 +348,274 @@ def _rubro_db_a_select(rubro: str | None) -> str:
     return "— Ninguno —"
 
 
+def _mes_corto(mes: int) -> str:
+    return MES_NOMBRES[int(mes) - 1][:3]
+
+
+def _safe_ratio(num: float, den: float) -> float | None:
+    if den <= 0:
+        return None
+    return float(num) / float(den)
+
+
+def _build_cierre_dashboard_metrics(cierre: dict, lineas: pd.DataFrame) -> dict | None:
+    if cierre is None or lineas is None or len(lineas) == 0:
+        return None
+
+    df = lineas.copy()
+    money_cols = [
+        "fact_rep_mostrador",
+        "fact_rep_taller",
+        "desc_mostrador",
+        "desc_taller",
+        "fact_servicios",
+    ]
+    for c in money_cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+        else:
+            df[c] = 0.0
+
+    df["fact_total_ars"] = (
+        df["fact_rep_mostrador"] + df["fact_rep_taller"] - df["desc_mostrador"] - df["desc_taller"] + df["fact_servicios"]
+    )
+
+    tc = max(float(cierre.get("tipo_cambio_ars_usd") or 1.0), 1e-9)
+    gastos_fijos_usd = float(cierre.get("gastos_fijos_global") or 0.0)
+    gastos_otros_usd = float(cierre.get("gastos_var_otros") or 0.0)
+    rubro_otros = cierre.get("gastos_var_otros_rubro")
+
+    fm = float(df["fact_rep_mostrador"].sum())
+    ft = float(df["fact_rep_taller"].sum())
+    dm = float(df["desc_mostrador"].sum())
+    dt = float(df["desc_taller"].sum())
+    fs = float(df["fact_servicios"].sum())
+
+    wm = (df["fact_rep_mostrador"] - df["desc_mostrador"]).clip(lower=0.0)
+    wt = (df["fact_rep_taller"] - df["desc_taller"]).clip(lower=0.0)
+    um_num = 0.0
+    ut_num = 0.0
+    if "util_pct_mostrador" in df.columns:
+        um_num = float((pd.to_numeric(df["util_pct_mostrador"], errors="coerce").fillna(0.0) * wm).sum())
+    if "util_pct_taller" in df.columns:
+        ut_num = float((pd.to_numeric(df["util_pct_taller"], errors="coerce").fillna(0.0) * wt).sum())
+    um_den = float(wm.sum())
+    ut_den = float(wt.sum())
+    um = (um_num / um_den) if um_den > 0 else 0.0
+    ut = (ut_num / ut_den) if ut_den > 0 else 0.0
+
+    gv = database.compute_gastos_variables_globales(
+        fact_rep_mos_conc=fm,
+        desc_rep_mos_conc=dm,
+        fact_rep_tal_conc=ft,
+        desc_rep_tal_conc=dt,
+        fact_serv_conc=fs,
+        util_mos_conc=um,
+        util_tal_conc=ut,
+        util_serv_conc=1.0,
+        gastos_fijos_global=0.0,
+        gastos_var_otros=gastos_otros_usd * tc,
+        gastos_var_otros_rubro=rubro_otros,
+    )
+
+    fact_total_ars = float(df["fact_total_ars"].sum())
+    fact_total_usd = fact_total_ars / tc
+    gastos_var_usd = (float(gv["gv_servicios_ajustado"]) + float(gv["gv_repuestos_ajustado"])) / tc
+    total_gastos_usd = gastos_fijos_usd + gastos_var_usd
+    margen_usd = fact_total_usd - gastos_var_usd
+    margen_ratio = _safe_ratio(margen_usd, fact_total_usd)
+    resultado_usd = margen_usd - gastos_fijos_usd
+    factor_abs_ratio = _safe_ratio(margen_usd, gastos_fijos_usd)
+    util_prom_total = _safe_ratio(um_num + ut_num, um_den + ut_den)
+
+    df["participacion_facturacion"] = df["fact_total_ars"] / fact_total_ars if fact_total_ars > 0 else 0.0
+    branches = pd.DataFrame(
+        {
+            "sucursal": df["sucursal"],
+            "fact_total_usd": df["fact_total_ars"] / tc,
+            "fact_mostrador_usd": (df["fact_rep_mostrador"] - df["desc_mostrador"]).clip(lower=0.0) / tc,
+            "fact_taller_usd": (df["fact_rep_taller"] - df["desc_taller"]).clip(lower=0.0) / tc,
+            "fact_servicios_usd": df["fact_servicios"] / tc,
+            "participacion_pct": df["participacion_facturacion"] * 100.0,
+        }
+    ).sort_values("fact_total_usd", ascending=False)
+
+    return {
+        "cierre_id": int(cierre["id"]),
+        "anio": int(cierre["anio"]),
+        "mes": int(cierre["mes"]),
+        "periodo": f"{_mes_corto(int(cierre['mes']))} {int(cierre['anio'])}",
+        "fact_total_usd": fact_total_usd,
+        "gastos_fijos_usd": gastos_fijos_usd,
+        "gastos_variables_usd": gastos_var_usd,
+        "total_gastos_usd": total_gastos_usd,
+        "margen_usd": margen_usd,
+        "margen_pct": (margen_ratio * 100.0) if margen_ratio is not None else None,
+        "resultado_usd": resultado_usd,
+        "factor_abs_pct": (factor_abs_ratio * 100.0) if factor_abs_ratio is not None else None,
+        "util_prom_total_pct": (util_prom_total * 100.0) if util_prom_total is not None else None,
+        "branches": branches,
+    }
+
+
+def _load_inicio_dashboard_data(limit: int = 36) -> list[dict]:
+    cierres = database.list_cierres_ventas_dashboard(limit)
+    if cierres is None or len(cierres) == 0:
+        return []
+
+    items: list[dict] = []
+    for _, r in cierres.iterrows():
+        cierre = r.to_dict()
+        lineas = database.get_lineas_cierre_ventas(int(cierre["id"]))
+        item = _build_cierre_dashboard_metrics(cierre, lineas)
+        if item is not None:
+            items.append(item)
+
+    items.sort(key=lambda x: (x["anio"], x["mes"]), reverse=True)
+    return items
+
+
+def _render_inicio_dashboard() -> None:
+    st.subheader("Inicio")
+    st.markdown("### Dashboard mensual")
+
+    data = _load_inicio_dashboard_data(limit=60)
+    if not data:
+        st.info("Todavía no hay cierres guardados. Cargá y guardá meses en Registro para ver el dashboard.")
+        return
+
+    trend_df = pd.DataFrame(
+        [
+            {
+                "periodo": d["periodo"],
+                "anio": d["anio"],
+                "mes": d["mes"],
+                "fact_total_usd": d["fact_total_usd"],
+                "gastos_fijos_usd": d["gastos_fijos_usd"],
+                "gastos_variables_usd": d["gastos_variables_usd"],
+                "total_gastos_usd": d["total_gastos_usd"],
+                "margen_usd": d["margen_usd"],
+                "margen_pct": d["margen_pct"],
+                "resultado_usd": d["resultado_usd"],
+                "factor_abs_pct": d["factor_abs_pct"],
+            }
+            for d in data
+        ]
+    )
+    trend_df = trend_df.sort_values(["anio", "mes"], ascending=[False, False])
+    trend_12 = trend_df.head(12).sort_values(["anio", "mes"], ascending=[True, True]).reset_index(drop=True)
+
+    metric_map = {
+        "Facturación total": ("fact_total_usd", _FMT_USD),
+        "Gastos fijos": ("gastos_fijos_usd", _FMT_USD),
+        "Gastos variables": ("gastos_variables_usd", _FMT_USD),
+        "Total gastos": ("total_gastos_usd", _FMT_USD),
+        "Margen de contribución ($)": ("margen_usd", _FMT_USD),
+        "Margen de contribución (%)": ("margen_pct", _FMT_PCT),
+        "Resultado": ("resultado_usd", _FMT_USD),
+        "Factor de absorción": ("factor_abs_pct", _FMT_PCT),
+    }
+
+    sel_metric = st.selectbox("Métrica (últimos 12 meses)", options=list(metric_map.keys()), index=0)
+    metric_col, _ = metric_map[sel_metric]
+    chart_df = trend_12[["periodo", metric_col]].copy()
+    chart_df[metric_col] = pd.to_numeric(chart_df[metric_col], errors="coerce")
+
+    fig_trend = px.bar(
+        chart_df,
+        x="periodo",
+        y=metric_col,
+        text_auto=".2f",
+        title=f"Tendencia 12 meses — {sel_metric}",
+    )
+    fig_trend.update_layout(xaxis_title="", yaxis_title="")
+    st.plotly_chart(fig_trend, use_container_width=True)
+
+    st.markdown("### Detalle por mes")
+    years = sorted({int(d["anio"]) for d in data}, reverse=True)
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        anio_sel = st.selectbox("Año", options=years, key="inicio_anio")
+    meses_disponibles = sorted({int(d["mes"]) for d in data if int(d["anio"]) == int(anio_sel)}, reverse=True)
+    with c2:
+        mes_sel = st.selectbox(
+            "Mes",
+            options=meses_disponibles,
+            format_func=lambda m: MES_NOMBRES[m - 1],
+            key="inicio_mes",
+        )
+
+    sel = next((d for d in data if int(d["anio"]) == int(anio_sel) and int(d["mes"]) == int(mes_sel)), None)
+    if sel is None:
+        st.warning("No hay datos para el período seleccionado.")
+        return
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Utilidad promedio total", f"{float(sel['util_prom_total_pct'] or 0.0):,.2f} %")
+    k2.metric("Total gastos fijos", f"US$ {float(sel['gastos_fijos_usd']):,.2f}")
+    k3.metric("Total gastos variables", f"US$ {float(sel['gastos_variables_usd']):,.2f}")
+    k4.metric("Total gastos", f"US$ {float(sel['total_gastos_usd']):,.2f}")
+    k5, k6, k7, k8 = st.columns(4)
+    k5.metric("Margen de contribución", f"US$ {float(sel['margen_usd']):,.2f}")
+    k6.metric("Margen de contribución %", f"{float(sel['margen_pct'] or 0.0):,.2f} %")
+    k7.metric("Resultado", f"US$ {float(sel['resultado_usd']):,.2f}")
+    k8.metric("Factor de absorción", f"{float(sel['factor_abs_pct'] or 0.0):,.2f} %")
+
+    df_suc = sel["branches"].copy()
+    color_map = {
+        "RIO GRANDE": "#1f77b4",
+        "RIO GALLEGOS": "#ff7f0e",
+        "COMODORO": "#2ca02c",
+    }
+
+    c3, c4 = st.columns([1, 1])
+    with c3:
+        fig_pie = px.pie(
+            df_suc,
+            names="sucursal",
+            values="fact_total_usd",
+            title="Participación de facturación por sucursal",
+            color="sucursal",
+            color_discrete_map=color_map,
+        )
+        st.plotly_chart(fig_pie, use_container_width=True)
+    with c4:
+        fig_bar = px.bar(
+            df_suc,
+            x="sucursal",
+            y="fact_total_usd",
+            color="sucursal",
+            text=df_suc["participacion_pct"].map(lambda v: f"{v:,.2f}%"),
+            title="Comparación de facturación por sucursal",
+            color_discrete_map=color_map,
+        )
+        fig_bar.update_layout(showlegend=False, xaxis_title="", yaxis_title="")
+        st.plotly_chart(fig_bar, use_container_width=True)
+
+    stack_df = df_suc.melt(
+        id_vars=["sucursal"],
+        value_vars=["fact_mostrador_usd", "fact_taller_usd", "fact_servicios_usd"],
+        var_name="canal",
+        value_name="importe_usd",
+    )
+    stack_labels = {
+        "fact_mostrador_usd": "Mostrador",
+        "fact_taller_usd": "Taller",
+        "fact_servicios_usd": "Servicios",
+    }
+    stack_df["canal"] = stack_df["canal"].map(stack_labels)
+    fig_stack = px.bar(
+        stack_df,
+        x="sucursal",
+        y="importe_usd",
+        color="canal",
+        barmode="stack",
+        title="Facturación por sucursal desagregada (Mostrador + Taller + Servicios)",
+    )
+    fig_stack.update_layout(xaxis_title="", yaxis_title="")
+    st.plotly_chart(fig_stack, use_container_width=True)
+
+
 def _render_registro_ventas() -> None:
     st.subheader("Registro")
     c1, c2, c3 = st.columns([1, 1, 1])
@@ -620,3 +889,5 @@ if not st.session_state.is_authed:
         st.stop()
 elif st.session_state.ui_pantalla == "registro":
     _render_registro()
+else:
+    _render_inicio_dashboard()
