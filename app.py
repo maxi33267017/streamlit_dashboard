@@ -443,8 +443,28 @@ def _excel_registro_bytes(
     return buf.getvalue()
 
 
+def _df_cierres_ventas_en_rango(anio_d: int, mes_d: int, anio_h: int, mes_h: int) -> pd.DataFrame:
+    """Cabeceras de cierre en un rango (misma consulta que database.list_cierres_ventas_en_rango)."""
+    conn = database.get_connection()
+    try:
+        df = database._read_sql(
+            """
+            SELECT *
+            FROM cierre_ventas_mes
+            WHERE (anio > ? OR (anio = ? AND mes >= ?))
+              AND (anio < ? OR (anio = ? AND mes <= ?))
+            ORDER BY anio ASC, mes ASC
+            """,
+            conn,
+            (anio_d, anio_d, mes_d, anio_h, anio_h, mes_h),
+        )
+        return df if df is not None else pd.DataFrame()
+    finally:
+        conn.close()
+
+
 def _excel_registro_rango_bytes(anio_d: int, mes_d: int, anio_h: int, mes_h: int) -> bytes | None:
-    hdrs = database.list_cierres_ventas_en_rango(anio_d, mes_d, anio_h, mes_h)
+    hdrs = _df_cierres_ventas_en_rango(anio_d, mes_d, anio_h, mes_h)
     if hdrs is None or len(hdrs) == 0:
         return None
     resumen_rows = []
