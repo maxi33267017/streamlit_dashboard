@@ -1,11 +1,14 @@
 """GOPV — login, registro y navbar."""
 
 import os
+import tempfile
+from datetime import datetime
 
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 import streamlit.components.v1 as components
+from fpdf import FPDF
 
 import database
 
@@ -383,6 +386,154 @@ def _safe_ratio(num: float, den: float) -> float | None:
     return float(num) / float(den)
 
 
+def _fmt_usd(v: float | None) -> str:
+    if v is None or pd.isna(v):
+        return "—"
+    return f"US$ {float(v):,.2f}"
+
+
+def _fmt_pct(v: float | None) -> str:
+    if v is None or pd.isna(v):
+        return "—"
+    return f"{float(v):,.2f}%"
+
+
+def _build_comparison_last3(data: list[dict], sel: dict) -> pd.DataFrame:
+    ordered = sorted(data, key=lambda x: (x["anio"], x["mes"]))
+    idx = next(
+        (i for i, d in enumerate(ordered) if int(d["anio"]) == int(sel["anio"]) and int(d["mes"]) == int(sel["mes"])),
+        None,
+    )
+    if idx is None:
+        return pd.DataFrame()
+    prev = ordered[max(0, idx - 3) : idx]
+    if not prev:
+        return pd.DataFrame()
+    prev_df = pd.DataFrame(prev)
+    base_fact = float(prev_df["fact_total_usd"].mean())
+    base_margen = float(prev_df["margen_usd"].mean())
+    base_res = float(prev_df["resultado_usd"].mean())
+
+    rows = [
+        {
+            "Métrica": "Facturación total",
+            "Mes seleccionado": float(sel["fact_total_usd"]),
+            "Promedio 3 meses previos": base_fact,
+            "Dif. %": (_safe_ratio(float(sel["fact_total_usd"]) - base_fact, base_fact) or 0.0) * 100.0,
+        },
+        {
+            "Métrica": "Margen contribución",
+            "Mes seleccionado": float(sel["margen_usd"]),
+            "Promedio 3 meses previos": base_margen,
+            "Dif. %": (_safe_ratio(float(sel["margen_usd"]) - base_margen, base_margen) or 0.0) * 100.0,
+        },
+        {
+            "Métrica": "Resultado",
+            "Mes seleccionado": float(sel["resultado_usd"]),
+            "Promedio 3 meses previos": base_res,
+            "Dif. %": (_safe_ratio(float(sel["resultado_usd"]) - base_res, base_res) or 0.0) * 100.0,
+        },
+    ]
+    return pd.DataFrame(rows)
+
+
+def _build_inicio_report_pdf_bytes(
+    trend_fact_fig,
+    detail_pie_fig,
+    detail_bar_fig,
+    detail_stack_fig,
+    *,
+    trend_df: pd.DataFrame,
+    sel: dict,
+    compare_df: pd.DataFrame,
+) -> bytes:
+    with tempfile.TemporaryDirectory() as td:
+        p_hist = os.path.join(td, "hist.png")
+        p_pie = os.path.join(td, "pie.png")
+        p_bar = os.path.join(td, "bar.png")
+        p_stack = os.path.join(td, "stack.png")
+        trend_fact_fig.write_image(p_hist, width=1400, height=700, scale=2)
+        detail_pie_fig.write_image(p_pie, width=1200, height=700, scale=2)
+        detail_bar_fig.write_image(p_bar, width=1200, height=700, scale=2)
+        detail_stack_fig.write_image(p_stack, width=1400, height=700, scale=2)
+
+        pdf = FPDF(orientation="P", unit="mm", format="A4")
+        pdf.set_auto_page_break(auto=True, margin=12)
+        pdf.add_page()
+        pdf.set_font("Arial", "B", 16)
+        pdf.cell(0, 8, "GOPV - Informe mensual", ln=True)
+        pdf.set_font("Arial", "", 10)
+        pdf.cell(0, 6, f"Generado: {datetime.now().strftime('%Y-%m-%d %H:%M')}", ln=True)
+        pdf.cell(0, 6, f"Mes analizado: {MES_NOMBRES[int(sel['mes'])-1]} {int(sel['anio'])}", ln=True)
+        pdf.ln(2)
+        pdf.set_font("Arial", "B", 12)
+        pdf.cell(0, 7, "Resumen agregado de todos los meses", ln=True)
+        pdf.set_font("Arial", "", 10)
+        pdf.cell(0, 6, f"Facturacion acumulada: {_fmt_usd(float(trend_df['fact_total_usd'].sum()))}", ln=True)
+        pdf.cell(0, 6, f"Promedio mensual facturacion: {_fmt_usd(float(trend_df['fact_total_usd'].mean()))}", ln=True)
+        pdf.ln(2)
+        pdf.image(p_hist, x=10, w=190)
+
+        pdf.add_page()
+        pdf.set_font("Arial", "B", 12)
+        pdf.cell(0, 7, "Detalle del mes seleccionado", ln=True)
+        pdf.set_font("Arial", "", 10)
+        lines = [
+            f"Facturacion total: {_fmt_usd(sel['fact_total_usd'])}",
+            f"Gastos variables: {_fmt_usd(sel['gastos_variables_usd'])}",
+            f"Gastos fijos: {_fmt_usd(sel['gastos_fijos_usd'])}",
+            f"Margen contribucion: {_fmt_usd(sel['margen_usd'])} ({_fmt_pct(sel['margen_pct'])})",
+            f"Resultado: {_fmt_usd(sel['resultado_usd'])}",
+            f"Factor absorcion: {_fmt_pct(sel['factor_abs_pct'])}",
+            f"Punto de equilibrio: {_fmt_usd(sel['punto_equilibrio_usd'])}",
+        ]
+        for line in lines:
+            pdf.cell(0, 6, line, ln=True)
+        pdf.ln(2)
+        pdf.image(p_pie, x=10, w=190)
+        pdf.ln(2)
+        pdf.image(p_bar, x=10, w=190)
+        pdf.ln(2)
+        pdf.image(p_stack, x=10, w=190)
+
+        pdf.add_page()
+        pdf.set_font("Arial", "B", 12)
+        pdf.cell(0, 7, "Comparacion contra ultimos 3 meses", ln=True)
+        pdf.set_font("Arial", "", 10)
+        if compare_df is None or len(compare_df) == 0:
+            pdf.cell(0, 6, "No hay suficientes meses previos para comparar.", ln=True)
+        else:
+            for _, r in compare_df.iterrows():
+                pdf.cell(
+                    0,
+                    6,
+                    f"{r['Métrica']}: mes {_fmt_usd(r['Mes seleccionado'])} vs prom 3m {_fmt_usd(r['Promedio 3 meses previos'])} (dif {_fmt_pct(r['Dif. %'])})",
+                    ln=True,
+                )
+
+            # Insight simple de mix por sucursal/canal
+            branches = sel["branches"].copy()
+            top = branches.sort_values("fact_total_usd", ascending=False).iloc[0]
+            most_mos = branches.sort_values("fact_mostrador_usd", ascending=False).iloc[0]
+            most_ts = branches.assign(ts=branches["fact_taller_usd"] + branches["fact_servicios_usd"]).sort_values(
+                "ts", ascending=False
+            ).iloc[0]
+            pdf.ln(3)
+            pdf.cell(0, 6, f"Sucursal con mayor facturacion: {top['sucursal']} ({_fmt_usd(top['fact_total_usd'])})", ln=True)
+            pdf.cell(0, 6, f"Mayor mostrador: {most_mos['sucursal']} ({_fmt_usd(most_mos['fact_mostrador_usd'])})", ln=True)
+            pdf.cell(
+                0,
+                6,
+                f"Mayor taller+servicios: {most_ts['sucursal']} ({_fmt_usd(float(most_ts['ts']))})",
+                ln=True,
+            )
+
+        out = pdf.output(dest="S")
+        if isinstance(out, str):
+            return out.encode("latin-1", errors="replace")
+        return bytes(out)
+
+
 def _build_cierre_dashboard_metrics(cierre: dict, lineas: pd.DataFrame) -> dict | None:
     if cierre is None or lineas is None or len(lineas) == 0:
         return None
@@ -522,6 +673,17 @@ def _render_inicio_dashboard() -> None:
     )
     trend_df = trend_df.sort_values(["anio", "mes"], ascending=[False, False])
     trend_12 = trend_df.head(12).sort_values(["anio", "mes"], ascending=[True, True]).reset_index(drop=True)
+    trend_all = trend_df.sort_values(["anio", "mes"], ascending=[True, True]).reset_index(drop=True)
+
+    fig_trend_fact = px.bar(
+        trend_all[["periodo", "fact_total_usd"]],
+        x="periodo",
+        y="fact_total_usd",
+        text_auto=".2f",
+        title="Facturación total - todos los meses",
+    )
+    fig_trend_fact.update_traces(marker_color=_COL_YELLOW)
+    fig_trend_fact.update_layout(xaxis_title="", yaxis_title="")
 
     metric_map = {
         "Facturación total": ("fact_total_usd", _FMT_USD),
@@ -690,6 +852,38 @@ def _render_inicio_dashboard() -> None:
     )
     fig_stack.update_layout(xaxis_title="", yaxis_title="")
     st.plotly_chart(fig_stack, use_container_width=True)
+
+    st.markdown("### Exportar informe")
+    compare_df = _build_comparison_last3(data, sel)
+    cexp1, cexp2 = st.columns([1, 2])
+    with cexp1:
+        if st.button("Generar informe PDF", use_container_width=True):
+            try:
+                pdf_bytes = _build_inicio_report_pdf_bytes(
+                    fig_trend_fact,
+                    fig_pie,
+                    fig_bar,
+                    fig_stack,
+                    trend_df=trend_all,
+                    sel=sel,
+                    compare_df=compare_df,
+                )
+                st.session_state["inicio_pdf_bytes"] = pdf_bytes
+                st.success("Informe generado.")
+            except Exception as exc:
+                st.error(
+                    f"No se pudo generar el PDF: {exc}. Verificá tener instalada la dependencia kaleido."
+                )
+    with cexp2:
+        pdf_bytes = st.session_state.get("inicio_pdf_bytes")
+        st.download_button(
+            "Descargar informe PDF",
+            data=pdf_bytes if pdf_bytes else b"",
+            file_name=f"informe_gopv_{int(sel['anio'])}_{int(sel['mes']):02d}.pdf",
+            mime="application/pdf",
+            disabled=not bool(pdf_bytes),
+            use_container_width=True,
+        )
 
 
 def _render_registro_ventas() -> None:
