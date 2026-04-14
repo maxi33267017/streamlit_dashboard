@@ -15,4 +15,5 @@ prophet>=1.1.4
 fpdf==1.7.2
 psycopg2-binary>=2.9.9
 kaleido
+reportlab
 
