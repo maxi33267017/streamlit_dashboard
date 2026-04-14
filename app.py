@@ -285,14 +285,21 @@ def _util_ponderado(df: pd.DataFrame, canal: str) -> float | None:
     return (num / den) if den > 0 else None
 
 
+def _util_promedio_simple(df: pd.DataFrame, col: str) -> float | None:
+    vals = pd.to_numeric(df.get(col), errors="coerce").dropna()
+    if len(vals) == 0:
+        return None
+    return float(vals.mean()) / 100.0
+
+
 def _fila_concesionario(df_edit: pd.DataFrame) -> dict:
     sfm = float(df_edit["fact_rep_mostrador"].sum())
     sft = float(df_edit["fact_rep_taller"].sum())
     sdm = float(df_edit["desc_mostrador"].sum())
     sdt = float(df_edit["desc_taller"].sum())
     sfs = float(df_edit["fact_servicios"].sum())
-    um = _util_ponderado(df_edit, "mos")
-    ut = _util_ponderado(df_edit, "tal")
+    um = _util_promedio_simple(df_edit, "util_pct_mostrador")
+    ut = _util_promedio_simple(df_edit, "util_pct_taller")
     if um is None:
         um = 0.0
     if ut is None:
