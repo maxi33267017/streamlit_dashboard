@@ -616,17 +616,18 @@ def _render_inicio_dashboard() -> None:
         return
 
     k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Utilidad promedio total", f"{float(sel['util_prom_total_pct'] or 0.0):,.2f} %")
-    k2.metric("Total gastos fijos", f"US$ {float(sel['gastos_fijos_usd']):,.2f}")
-    k3.metric("Total gastos variables", f"US$ {float(sel['gastos_variables_usd']):,.2f}")
-    k4.metric("Total gastos", f"US$ {float(sel['total_gastos_usd']):,.2f}")
+    k1.metric("Facturación total", f"US$ {float(sel['fact_total_usd']):,.2f}")
+    k2.metric("Utilidad promedio total", f"{float(sel['util_prom_total_pct'] or 0.0):,.2f} %")
+    k3.metric("Total gastos fijos", f"US$ {float(sel['gastos_fijos_usd']):,.2f}")
+    k4.metric("Total gastos variables", f"US$ {float(sel['gastos_variables_usd']):,.2f}")
     k5, k6, k7, k8 = st.columns(4)
-    k5.metric("Margen de contribución", f"US$ {float(sel['margen_usd']):,.2f}")
-    k6.metric("Margen de contribución %", f"{float(sel['margen_pct'] or 0.0):,.2f} %")
-    k7.metric("Resultado", f"US$ {float(sel['resultado_usd']):,.2f}")
-    k8.metric("Factor de absorción", f"{float(sel['factor_abs_pct'] or 0.0):,.2f} %")
-    k9, _, _, _ = st.columns(4)
-    k9.metric(
+    k5.metric("Total gastos", f"US$ {float(sel['total_gastos_usd']):,.2f}")
+    k6.metric("Margen de contribución", f"US$ {float(sel['margen_usd']):,.2f}")
+    k7.metric("Margen de contribución %", f"{float(sel['margen_pct'] or 0.0):,.2f} %")
+    k8.metric("Resultado", f"US$ {float(sel['resultado_usd']):,.2f}")
+    k9, k10, _, _ = st.columns(4)
+    k9.metric("Factor de absorción", f"{float(sel['factor_abs_pct'] or 0.0):,.2f} %")
+    k10.metric(
         "Punto de equilibrio",
         f"US$ {float(sel['punto_equilibrio_usd']):,.2f}" if sel["punto_equilibrio_usd"] is not None else "—",
     )
