@@ -329,17 +329,38 @@ def _render_registro_ventas() -> None:
     gv_tal_usd = float(gv["gv_rep_taller"]) / tc_val
     gastos_total_usd = float(gastos_fijos_usd) + gv_serv_usd + gv_rep_usd
 
-    st.markdown("**Cálculo (Concesionario → USD con el TC)**")
-    c2a, c2b, c2c, c2d, c2e = st.columns(5)
-    c2a.metric("2. Var. servicios (USD)", f"US$ {gv_serv_usd:,.2f}")
-    c2b.metric("3. Var. repuestos (USD)", f"US$ {gv_rep_usd:,.2f}")
-    c2c.metric("… rep. mostrador (CMV)", f"US$ {gv_mos_usd:,.2f}")
-    c2d.metric("… rep. taller (CMV)", f"US$ {gv_tal_usd:,.2f}")
-    c2e.metric("5. Gasto total (USD)", f"US$ {gastos_total_usd:,.2f}")
+    st.markdown("**Gastos calculados (Concesionario → USD, con el TC de arriba)**")
+    df_gastos_calc = pd.DataFrame(
+        {
+            "Concepto": [
+                "Ítem 2 — Variables servicios",
+                "Ítem 3 — Variables repuestos (total)",
+                "Desglose — CMV repuestos mostrador",
+                "Desglose — CMV repuestos taller",
+                "Ítem 5 — Total gastos (fijos + ítems 2 y 3)",
+            ],
+            "Importe (USD)": [
+                f"US$ {gv_serv_usd:,.2f}",
+                f"US$ {gv_rep_usd:,.2f}",
+                f"US$ {gv_mos_usd:,.2f}",
+                f"US$ {gv_tal_usd:,.2f}",
+                f"US$ {gastos_total_usd:,.2f}",
+            ],
+        }
+    )
+    st.dataframe(
+        df_gastos_calc,
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "Concepto": st.column_config.TextColumn("Concepto", width="large"),
+            "Importe (USD)": st.column_config.TextColumn("Importe (USD)", width="medium"),
+        },
+    )
     st.caption(
-        "En ARS: CMV mostrador/taller y variables servicios; luego ÷ TC. "
-        "Fijos y «otros» los cargás en USD (los «otros» se convierten a ARS solo para sumar al bucket correcto). "
-        "Total USD = fijos + variables servicios + variables repuestos (incluye otros según rubro)."
+        "Cálculo en ARS sobre la grilla; acá se muestra en USD (÷ TC). "
+        "Fijos y «otros» los cargás en USD; «otros» pasa a ARS solo para sumar al bucket. "
+        "El total incluye fijos + variables servicios + variables repuestos (con otros según rubro)."
     )
 
     ver_usd = st.checkbox("Vista previa en USD (usa el TC de arriba)", value=False)
