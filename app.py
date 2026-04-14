@@ -1,5 +1,6 @@
 """GOPV — login, registro y navbar."""
 
+import io
 import os
 import subprocess
 import tempfile
@@ -283,6 +284,252 @@ def _row_to_db_dict(s: pd.Series) -> dict:
         "util_pct_servicios": 0.0,
         "fact_servicios": float(s["fact_servicios"] or 0),
     }
+
+
+def _cierre_hdr_float(c: dict | None, key: str, default: float | None = None) -> float | None:
+    if not c:
+        return default
+    v = c.get(key)
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return default
+    return float(v)
+
+
+def _registro_financiero_totales(
+    edited: pd.DataFrame,
+    tc_val: float,
+    gastos_fijos_usd: float,
+    gastos_otros_usd: float,
+    rubro_db: str | None,
+) -> dict:
+    tc_val = max(float(tc_val), 1e-9)
+    um_c = _util_promedio_simple(edited, "util_pct_mostrador")
+    ut_c = _util_promedio_simple(edited, "util_pct_taller")
+    otros_ars = float(gastos_otros_usd) * tc_val
+    gv = database.compute_gastos_variables_globales(
+        fact_rep_mos_conc=float(edited["fact_rep_mostrador"].sum()),
+        desc_rep_mos_conc=float(edited["desc_mostrador"].sum()),
+        fact_rep_tal_conc=float(edited["fact_rep_taller"].sum()),
+        desc_rep_tal_conc=float(edited["desc_taller"].sum()),
+        fact_serv_conc=float(edited["fact_servicios"].sum()),
+        util_mos_conc=um_c,
+        util_tal_conc=ut_c,
+        util_serv_conc=1.0,
+        gastos_fijos_global=0.0,
+        gastos_var_otros=otros_ars,
+        gastos_var_otros_rubro=rubro_db,
+    )
+    gv_serv_usd = float(gv["gv_servicios_ajustado"]) / tc_val
+    gv_rep_usd = float(gv["gv_repuestos_ajustado"]) / tc_val
+    gv_mos_usd = float(gv["gv_rep_mostrador"]) / tc_val
+    gv_tal_usd = float(gv["gv_rep_taller"]) / tc_val
+    gastos_var_total_usd = gv_serv_usd + gv_rep_usd
+    gastos_total_usd = float(gastos_fijos_usd) + gastos_var_total_usd
+    fact_total_ars = (
+        float(edited["fact_rep_mostrador"].sum())
+        + float(edited["fact_rep_taller"].sum())
+        - float(edited["desc_mostrador"].sum())
+        - float(edited["desc_taller"].sum())
+        + float(edited["fact_servicios"].sum())
+    )
+    fact_total_usd = fact_total_ars / tc_val
+    margen_global_usd = fact_total_usd - gastos_var_total_usd
+    margen_global_ratio = _safe_ratio(margen_global_usd, fact_total_usd)
+    resultado_global_usd = margen_global_usd - float(gastos_fijos_usd)
+    factor_abs_global_pct = (
+        (margen_global_usd / float(gastos_fijos_usd)) * 100.0 if float(gastos_fijos_usd) > 0 else None
+    )
+    punto_equilibrio_usd = (
+        float(gastos_fijos_usd) / float(margen_global_ratio)
+        if margen_global_ratio is not None and margen_global_ratio > 0
+        else None
+    )
+    return {
+        "tc_val": tc_val,
+        "gv_mos_usd": gv_mos_usd,
+        "gv_tal_usd": gv_tal_usd,
+        "gv_serv_usd": gv_serv_usd,
+        "gv_rep_usd": gv_rep_usd,
+        "gastos_var_total_usd": gastos_var_total_usd,
+        "gastos_total_usd": gastos_total_usd,
+        "fact_total_ars": fact_total_ars,
+        "fact_total_usd": fact_total_usd,
+        "margen_global_usd": margen_global_usd,
+        "margen_global_ratio": margen_global_ratio,
+        "resultado_global_usd": resultado_global_usd,
+        "factor_abs_global_pct": factor_abs_global_pct,
+        "punto_equilibrio_usd": punto_equilibrio_usd,
+    }
+
+
+def _df_lineas_cierre_usd(edited: pd.DataFrame, tc_val: float) -> pd.DataFrame:
+    tc_val = max(float(tc_val), 1e-9)
+    out = edited.copy()
+    for col in ("fact_rep_mostrador", "fact_rep_taller", "desc_mostrador", "desc_taller", "fact_servicios"):
+        out[f"{col}_usd"] = pd.to_numeric(out[col], errors="coerce").fillna(0.0) / tc_val
+    keep = ["sucursal"] + [f"{c}_usd" for c in (
+        "fact_rep_mostrador",
+        "fact_rep_taller",
+        "desc_mostrador",
+        "desc_taller",
+        "fact_servicios",
+    )] + ["util_pct_mostrador", "util_pct_taller"]
+    return out[keep].round(4)
+
+
+def _excel_registro_bytes(
+    *,
+    anio: int,
+    mes: int,
+    edited: pd.DataFrame,
+    tot: dict,
+    gastos_fijos_usd: float,
+    gastos_otros_usd: float,
+    inventario_usd: float,
+    resultado_cero_ventas_usd: float,
+    fill_rate_pct: float | None,
+    rotacion_inventario: float | None,
+) -> bytes:
+    periodo = f"{int(anio)}-{int(mes):02d}"
+    resumen = pd.DataFrame(
+        [
+            {
+                "periodo": periodo,
+                "anio": int(anio),
+                "mes": int(mes),
+                "tipo_cambio_ars_usd": tot["tc_val"],
+                "facturacion_total_usd": round(tot["fact_total_usd"], 4),
+                "margen_contribucion_usd": round(tot["margen_global_usd"], 4),
+                "resultado_usd": round(tot["resultado_global_usd"], 4),
+                "gastos_fijos_usd": round(float(gastos_fijos_usd), 4),
+                "gastos_variables_total_usd": round(tot["gastos_var_total_usd"], 4),
+                "gastos_total_usd": round(tot["gastos_total_usd"], 4),
+                "inventario_usd": round(float(inventario_usd), 4),
+                "resultado_cero_ventas_usd": round(float(resultado_cero_ventas_usd), 4),
+                "fill_rate_pct": fill_rate_pct,
+                "rotacion_inventario": rotacion_inventario,
+            }
+        ]
+    )
+    df_gastos = pd.DataFrame(
+        {
+            "Concepto": [
+                "Gastos variables repuestos mostrador",
+                "Gastos variables repuestos taller",
+                "Otros gastos variables (USD cargados)",
+                "Total gastos variables",
+                "Gastos fijos",
+                "Total gastos",
+            ],
+            "Importe_USD": [
+                round(tot["gv_mos_usd"], 4),
+                round(tot["gv_tal_usd"], 4),
+                round(float(gastos_otros_usd), 4),
+                round(tot["gastos_var_total_usd"], 4),
+                round(float(gastos_fijos_usd), 4),
+                round(tot["gastos_total_usd"], 4),
+            ],
+        }
+    )
+    lineas = _df_lineas_cierre_usd(edited, tot["tc_val"])
+    lineas.insert(0, "mes", int(mes))
+    lineas.insert(0, "anio", int(anio))
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        resumen.to_excel(writer, sheet_name="Resumen", index=False)
+        lineas.to_excel(writer, sheet_name="Lineas_USD", index=False)
+        df_gastos.to_excel(writer, sheet_name="Gastos_variables", index=False)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def _excel_registro_rango_bytes(anio_d: int, mes_d: int, anio_h: int, mes_h: int) -> bytes | None:
+    hdrs = database.list_cierres_ventas_en_rango(anio_d, mes_d, anio_h, mes_h)
+    if hdrs is None or len(hdrs) == 0:
+        return None
+    resumen_rows = []
+    lineas_parts = []
+    gastos_parts = []
+    for _, c in hdrs.iterrows():
+        a, m = int(c["anio"]), int(c["mes"])
+        edited = _df_editor_cierre_ventas(a, m)
+        tc = float(c["tipo_cambio_ars_usd"])
+        rub = c.get("gastos_var_otros_rubro")
+        if rub is not None and isinstance(rub, float) and pd.isna(rub):
+            rub = None
+        rub = str(rub).strip() if rub else None
+        if rub == "" or rub.lower() == "nan":
+            rub = None
+        gf = float(c.get("gastos_fijos_global") or 0)
+        go = float(c.get("gastos_var_otros") or 0)
+        tot = _registro_financiero_totales(edited, tc, gf, go, rub)
+        inv = float(c.get("inventario_usd") or 0)
+        cv = float(c.get("resultado_cero_ventas_usd") or 0)
+        fr = c.get("fill_rate_pct")
+        if fr is not None and not (isinstance(fr, float) and pd.isna(fr)):
+            fr = float(fr)
+        else:
+            fr = None
+        rot = c.get("rotacion_inventario")
+        if rot is not None and not (isinstance(rot, float) and pd.isna(rot)):
+            rot = float(rot)
+        else:
+            rot = None
+        resumen_rows.append(
+            {
+                "periodo": f"{a}-{m:02d}",
+                "anio": a,
+                "mes": m,
+                "tipo_cambio_ars_usd": tot["tc_val"],
+                "facturacion_total_usd": round(tot["fact_total_usd"], 4),
+                "margen_contribucion_usd": round(tot["margen_global_usd"], 4),
+                "resultado_usd": round(tot["resultado_global_usd"], 4),
+                "gastos_fijos_usd": round(gf, 4),
+                "gastos_variables_total_usd": round(tot["gastos_var_total_usd"], 4),
+                "gastos_total_usd": round(tot["gastos_total_usd"], 4),
+                "inventario_usd": round(inv, 4),
+                "resultado_cero_ventas_usd": round(cv, 4),
+                "fill_rate_pct": fr,
+                "rotacion_inventario": rot,
+            }
+        )
+        ln = _df_lineas_cierre_usd(edited, tot["tc_val"])
+        ln.insert(0, "mes", m)
+        ln.insert(0, "anio", a)
+        lineas_parts.append(ln)
+        df_g = pd.DataFrame(
+            {
+                "anio": [a] * 6,
+                "mes": [m] * 6,
+                "Concepto": [
+                    "Gastos variables repuestos mostrador",
+                    "Gastos variables repuestos taller",
+                    "Otros gastos variables (USD cargados)",
+                    "Total gastos variables",
+                    "Gastos fijos",
+                    "Total gastos",
+                ],
+                "Importe_USD": [
+                    round(tot["gv_mos_usd"], 4),
+                    round(tot["gv_tal_usd"], 4),
+                    round(go, 4),
+                    round(tot["gastos_var_total_usd"], 4),
+                    round(gf, 4),
+                    round(tot["gastos_total_usd"], 4),
+                ],
+            }
+        )
+        gastos_parts.append(df_g)
+    resumen_df = pd.DataFrame(resumen_rows)
+    lineas_df = pd.concat(lineas_parts, ignore_index=True)
+    gastos_df = pd.concat(gastos_parts, ignore_index=True)
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        resumen_df.to_excel(writer, sheet_name="Resumen", index=False)
+        lineas_df.to_excel(writer, sheet_name="Lineas_USD", index=False)
+        gastos_df.to_excel(writer, sheet_name="Gastos_variables", index=False)
+    buf.seek(0)
+    return buf.getvalue()
 
 
 def _util_ponderado(df: pd.DataFrame, canal: str) -> float | None:
@@ -1097,7 +1344,7 @@ def _render_registro_ventas() -> None:
             key="cv_mes",
         )
     with c2:
-        anio = st.number_input("Año", min_value=2020, max_value=2035, value=2025, key="cv_anio")
+        anio = st.number_input("Año", min_value=2020, max_value=2035, value=2026, key="cv_anio")
     cierre = database.get_cierre_ventas_mes(int(anio), int(mes))
     default_tc = float(cierre["tipo_cambio_ars_usd"]) if cierre else 1200.0
     with c3:
@@ -1127,7 +1374,12 @@ def _render_registro_ventas() -> None:
     go_def = float(cierre.get("gastos_var_otros") or 0) if cierre else 0.0
     rub_def = _rubro_db_a_select(cierre.get("gastos_var_otros_rubro") if cierre else None)
 
-    tc_val = max(float(tc), 1e-9)
+    inv_def = float(cierre.get("inventario_usd") or 0) if cierre else 0.0
+    cv_def = float(cierre.get("resultado_cero_ventas_usd") or 0) if cierre else 0.0
+    fr_v = _cierre_hdr_float(cierre, "fill_rate_pct")
+    fr_def = float(fr_v) if fr_v is not None else 0.0
+    rot_v = _cierre_hdr_float(cierre, "rotacion_inventario")
+    rot_def = float(rot_v) if rot_v is not None else 0.0
 
     g1, g2, g3 = st.columns(3)
     with g1:
@@ -1157,47 +1409,56 @@ def _render_registro_ventas() -> None:
         )
     rubro_db = _rubro_otros_a_db(rubro_sel) if rubro_sel != "— Ninguno —" else None
 
-    um_c = _util_promedio_simple(edited, "util_pct_mostrador")
-    ut_c = _util_promedio_simple(edited, "util_pct_taller")
-    otros_ars = float(gastos_otros_usd) * tc_val
-    # Sin % utilidad de servicios en la grilla: CMV de servicios = 0 salvo «otros» con rubro Servicios.
-    gv = database.compute_gastos_variables_globales(
-        fact_rep_mos_conc=float(edited["fact_rep_mostrador"].sum()),
-        desc_rep_mos_conc=float(edited["desc_mostrador"].sum()),
-        fact_rep_tal_conc=float(edited["fact_rep_taller"].sum()),
-        desc_rep_tal_conc=float(edited["desc_taller"].sum()),
-        fact_serv_conc=float(edited["fact_servicios"].sum()),
-        util_mos_conc=um_c,
-        util_tal_conc=ut_c,
-        util_serv_conc=1.0,
-        gastos_fijos_global=0.0,
-        gastos_var_otros=otros_ars,
-        gastos_var_otros_rubro=rubro_db,
+    st.markdown("### Inventario y abastecimiento")
+    st.caption(
+        "Valores e indicadores del mes en **USD** (excepto Fill rate, en %). "
+        "Se persisten al guardar el cierre. Rotación: cargá el índice que uses (ej. ventas / stock medio)."
     )
+    k1, k2, k3, k4 = st.columns(4)
+    with k1:
+        val_inventario_usd = st.number_input(
+            "Inventario (valor USD)",
+            min_value=0.0,
+            value=float(inv_def),
+            format="%.2f",
+            key=f"cv_inv_{int(anio)}_{int(mes)}",
+        )
+    with k2:
+        val_cero_ventas_usd = st.number_input(
+            "Resultado Cero Ventas (USD)",
+            min_value=-1e12,
+            value=float(cv_def),
+            format="%.2f",
+            key=f"cv_cv0_{int(anio)}_{int(mes)}",
+        )
+    with k3:
+        val_fill_rate = st.number_input(
+            "Fill rate (%)",
+            min_value=0.0,
+            max_value=100.0,
+            value=float(fr_def),
+            format="%.2f",
+            key=f"cv_fr_{int(anio)}_{int(mes)}",
+        )
+    with k4:
+        val_rotacion = st.number_input(
+            "Rotación inventario",
+            min_value=0.0,
+            value=float(rot_def),
+            format="%.4f",
+            key=f"cv_rot_{int(anio)}_{int(mes)}",
+        )
 
-    gv_serv_usd = float(gv["gv_servicios_ajustado"]) / tc_val
-    gv_rep_usd = float(gv["gv_repuestos_ajustado"]) / tc_val
-    gv_mos_usd = float(gv["gv_rep_mostrador"]) / tc_val
-    gv_tal_usd = float(gv["gv_rep_taller"]) / tc_val
-    gastos_var_total_usd = gv_serv_usd + gv_rep_usd
-    gastos_total_usd = float(gastos_fijos_usd) + gastos_var_total_usd
-    fact_total_ars = (
-        float(edited["fact_rep_mostrador"].sum())
-        + float(edited["fact_rep_taller"].sum())
-        - float(edited["desc_mostrador"].sum())
-        - float(edited["desc_taller"].sum())
-        + float(edited["fact_servicios"].sum())
-    )
-    fact_total_usd = fact_total_ars / tc_val
-    margen_global_usd = fact_total_usd - gastos_var_total_usd
-    margen_global_ratio = _safe_ratio(margen_global_usd, fact_total_usd)
-    resultado_global_usd = margen_global_usd - float(gastos_fijos_usd)
-    factor_abs_global_pct = (
-        (margen_global_usd / float(gastos_fijos_usd)) * 100.0 if float(gastos_fijos_usd) > 0 else None
-    )
-    punto_equilibrio_usd = (
-        float(gastos_fijos_usd) / float(margen_global_ratio) if margen_global_ratio is not None and margen_global_ratio > 0 else None
-    )
+    tot = _registro_financiero_totales(edited, float(tc), gastos_fijos_usd, gastos_otros_usd, rubro_db)
+    fact_total_usd = tot["fact_total_usd"]
+    margen_global_usd = tot["margen_global_usd"]
+    resultado_global_usd = tot["resultado_global_usd"]
+    factor_abs_global_pct = tot["factor_abs_global_pct"]
+    punto_equilibrio_usd = tot["punto_equilibrio_usd"]
+    gastos_var_total_usd = tot["gastos_var_total_usd"]
+    gastos_total_usd = tot["gastos_total_usd"]
+    gv_mos_usd = tot["gv_mos_usd"]
+    gv_tal_usd = tot["gv_tal_usd"]
 
     st.markdown("**Gastos calculados (Concesionario → USD, con el TC de arriba)**")
     df_gastos_calc = pd.DataFrame(
@@ -1270,6 +1531,98 @@ def _render_registro_ventas() -> None:
         "Resultado = margen − gastos fijos."
     )
 
+    st.markdown("**Inventario y logística (referencia del mes)**")
+    df_inv = pd.DataFrame(
+        {
+            "Indicador": [
+                "Inventario (USD)",
+                "Resultado Cero Ventas (USD)",
+                "Fill rate",
+                "Rotación inventario",
+            ],
+            "Valor": [
+                _fmt_usd(val_inventario_usd),
+                _fmt_usd(val_cero_ventas_usd),
+                f"{val_fill_rate:,.2f} %",
+                f"{val_rotacion:,.4f}",
+            ],
+        }
+    )
+    st.dataframe(
+        df_inv,
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "Indicador": st.column_config.TextColumn("Indicador", width="large"),
+            "Valor": st.column_config.TextColumn("Valor", width="medium"),
+        },
+    )
+
+    st.markdown("### Exportar datos en USD (Excel)")
+    ex_a, ex_b = st.columns(2)
+    with ex_a:
+        xls_mes = _excel_registro_bytes(
+            anio=int(anio),
+            mes=int(mes),
+            edited=edited,
+            tot=tot,
+            gastos_fijos_usd=float(gastos_fijos_usd),
+            gastos_otros_usd=float(gastos_otros_usd),
+            inventario_usd=float(val_inventario_usd),
+            resultado_cero_ventas_usd=float(val_cero_ventas_usd),
+            fill_rate_pct=float(val_fill_rate),
+            rotacion_inventario=float(val_rotacion),
+        )
+        st.download_button(
+            "Descargar Excel — mes en pantalla",
+            data=xls_mes,
+            file_name=f"gopv_registro_{int(anio)}_{int(mes):02d}_usd.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            key=f"dl_xls_mes_{anio}_{mes}",
+        )
+        st.caption("Incluye resumen, líneas por sucursal en USD y desglose de gastos variables.")
+    with ex_b:
+        st.markdown("**Varios meses** (solo cierres ya guardados)")
+        r1, r2, r3, r4 = st.columns(4)
+        with r1:
+            mes_d = st.selectbox(
+                "Mes desde",
+                options=list(range(1, 13)),
+                format_func=lambda m: MES_NOMBRES[m - 1],
+                key="cv_xls_md",
+            )
+        with r2:
+            anio_d = st.number_input("Año desde", min_value=2020, max_value=2035, value=int(anio), key="cv_xls_ad")
+        with r3:
+            mes_h = st.selectbox(
+                "Mes hasta",
+                options=list(range(1, 13)),
+                index=int(mes) - 1,
+                format_func=lambda m: MES_NOMBRES[m - 1],
+                key="cv_xls_mh",
+            )
+        with r4:
+            anio_h = st.number_input("Año hasta", min_value=2020, max_value=2035, value=int(anio), key="cv_xls_ah")
+        p_desde = int(anio_d) * 12 + int(mes_d)
+        p_hasta = int(anio_h) * 12 + int(mes_h)
+        xls_rango = None
+        if p_desde <= p_hasta:
+            xls_rango = _excel_registro_rango_bytes(int(anio_d), int(mes_d), int(anio_h), int(mes_h))
+        st.download_button(
+            "Descargar Excel — rango",
+            data=xls_rango if xls_rango else b"",
+            file_name=f"gopv_registro_{int(anio_d)}_{int(mes_d):02d}_a_{int(anio_h)}_{int(mes_h):02d}_usd.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            disabled=xls_rango is None,
+            key=f"dl_xls_rg_{anio_d}_{mes_d}_{anio_h}_{mes_h}",
+        )
+        if p_desde > p_hasta:
+            st.warning("El período «desde» debe ser anterior o igual al «hasta».")
+        elif xls_rango is None:
+            st.caption("No hay cierres guardados en ese rango.")
+
     ver_usd = st.checkbox("Vista previa en USD (usa el TC de arriba)", value=False)
     prev = _preview_tabla(edited)
     drop_show = [c for c in prev.columns if c in _PREVIEW_DROP_COLS]
@@ -1295,6 +1648,10 @@ def _render_registro_ventas() -> None:
                     gastos_fijos_global=float(gastos_fijos_usd),
                     gastos_var_otros=float(gastos_otros_usd),
                     gastos_var_otros_rubro=rubro_db,
+                    inventario_usd=float(val_inventario_usd),
+                    resultado_cero_ventas_usd=float(val_cero_ventas_usd),
+                    fill_rate_pct=float(val_fill_rate),
+                    rotacion_inventario=float(val_rotacion),
                 )
                 filas = [_row_to_db_dict(edited.loc[i]) for i in range(len(edited))]
                 database.replace_lineas_cierre_ventas(cid, filas)

@@ -275,6 +275,10 @@ CIERRE_VENTAS_MES_SQLITE = """
         gastos_fijos_global REAL NOT NULL DEFAULT 0,
         gastos_var_otros REAL NOT NULL DEFAULT 0,
         gastos_var_otros_rubro TEXT,
+        inventario_usd REAL NOT NULL DEFAULT 0,
+        resultado_cero_ventas_usd REAL NOT NULL DEFAULT 0,
+        fill_rate_pct REAL,
+        rotacion_inventario REAL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         UNIQUE (anio, mes)
@@ -291,6 +295,10 @@ CIERRE_VENTAS_MES_PG = """
         gastos_fijos_global DOUBLE PRECISION NOT NULL DEFAULT 0,
         gastos_var_otros DOUBLE PRECISION NOT NULL DEFAULT 0,
         gastos_var_otros_rubro TEXT,
+        inventario_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
+        resultado_cero_ventas_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
+        fill_rate_pct DOUBLE PRECISION,
+        rotacion_inventario DOUBLE PRECISION,
         created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
         UNIQUE (anio, mes)
@@ -623,6 +631,10 @@ def _ensure_cierre_ventas_schema_pg(cursor, conn) -> None:
         ("cierre_ventas_mes", "gastos_fijos_global", "DOUBLE PRECISION NOT NULL DEFAULT 0"),
         ("cierre_ventas_mes", "gastos_var_otros", "DOUBLE PRECISION NOT NULL DEFAULT 0"),
         ("cierre_ventas_mes", "gastos_var_otros_rubro", "TEXT"),
+        ("cierre_ventas_mes", "inventario_usd", "DOUBLE PRECISION NOT NULL DEFAULT 0"),
+        ("cierre_ventas_mes", "resultado_cero_ventas_usd", "DOUBLE PRECISION NOT NULL DEFAULT 0"),
+        ("cierre_ventas_mes", "fill_rate_pct", "DOUBLE PRECISION"),
+        ("cierre_ventas_mes", "rotacion_inventario", "DOUBLE PRECISION"),
         ("cierre_ventas_linea", "util_pct_servicios", "DOUBLE PRECISION"),
     ):
         if not _pg_cierre_has_column(cursor, table, col):
@@ -635,6 +647,10 @@ def _ensure_cierre_ventas_schema_sqlite(cursor, conn) -> None:
         "ALTER TABLE cierre_ventas_mes ADD COLUMN gastos_fijos_global REAL NOT NULL DEFAULT 0",
         "ALTER TABLE cierre_ventas_mes ADD COLUMN gastos_var_otros REAL NOT NULL DEFAULT 0",
         "ALTER TABLE cierre_ventas_mes ADD COLUMN gastos_var_otros_rubro TEXT",
+        "ALTER TABLE cierre_ventas_mes ADD COLUMN inventario_usd REAL NOT NULL DEFAULT 0",
+        "ALTER TABLE cierre_ventas_mes ADD COLUMN resultado_cero_ventas_usd REAL NOT NULL DEFAULT 0",
+        "ALTER TABLE cierre_ventas_mes ADD COLUMN fill_rate_pct REAL",
+        "ALTER TABLE cierre_ventas_mes ADD COLUMN rotacion_inventario REAL",
         "ALTER TABLE cierre_ventas_linea ADD COLUMN util_pct_servicios REAL",
     ):
         try:
@@ -907,6 +923,26 @@ def list_cierres_ventas_mes(limit: int = 36) -> pd.DataFrame:
         conn.close()
 
 
+def list_cierres_ventas_en_rango(anio_desde: int, mes_desde: int, anio_hasta: int, mes_hasta: int) -> pd.DataFrame:
+    """Cierres guardados entre dos períodos (inclusive), orden cronológico."""
+    conn = get_connection()
+    try:
+        df = _read_sql(
+            """
+            SELECT *
+            FROM cierre_ventas_mes
+            WHERE (anio > ? OR (anio = ? AND mes >= ?))
+              AND (anio < ? OR (anio = ? AND mes <= ?))
+            ORDER BY anio ASC, mes ASC
+            """,
+            conn,
+            (anio_desde, anio_desde, mes_desde, anio_hasta, anio_hasta, mes_hasta),
+        )
+        return df if df is not None else pd.DataFrame()
+    finally:
+        conn.close()
+
+
 def list_cierres_ventas_dashboard(limit: int = 60) -> pd.DataFrame:
     """Cierres para dashboard de Inicio con campos de cabecera relevantes."""
     conn = get_connection()
@@ -943,6 +979,10 @@ def upsert_cierre_ventas_mes_header(
     gastos_fijos_global: float = 0.0,
     gastos_var_otros: float = 0.0,
     gastos_var_otros_rubro: str | None = None,
+    inventario_usd: float = 0.0,
+    resultado_cero_ventas_usd: float = 0.0,
+    fill_rate_pct: float | None = None,
+    rotacion_inventario: float | None = None,
 ) -> int:
     if tipo_cambio_ars_usd <= 0:
         raise ValueError("tipo_cambio_ars_usd debe ser > 0 (ARS por 1 USD).")
@@ -958,6 +998,8 @@ def upsert_cierre_ventas_mes_header(
                 UPDATE cierre_ventas_mes
                 SET tipo_cambio_ars_usd = ?, notas = ?,
                     gastos_fijos_global = ?, gastos_var_otros = ?, gastos_var_otros_rubro = ?,
+                    inventario_usd = ?, resultado_cero_ventas_usd = ?,
+                    fill_rate_pct = ?, rotacion_inventario = ?,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
                 """,
@@ -967,6 +1009,10 @@ def upsert_cierre_ventas_mes_header(
                     gastos_fijos_global,
                     gastos_var_otros,
                     gastos_var_otros_rubro,
+                    inventario_usd,
+                    resultado_cero_ventas_usd,
+                    fill_rate_pct,
+                    rotacion_inventario,
                     cid,
                 ),
             )
@@ -977,9 +1023,10 @@ def upsert_cierre_ventas_mes_header(
                     """
                     INSERT INTO cierre_ventas_mes (
                         anio, mes, tipo_cambio_ars_usd, notas,
-                        gastos_fijos_global, gastos_var_otros, gastos_var_otros_rubro
+                        gastos_fijos_global, gastos_var_otros, gastos_var_otros_rubro,
+                        inventario_usd, resultado_cero_ventas_usd, fill_rate_pct, rotacion_inventario
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     RETURNING id
                     """,
                     (
@@ -990,6 +1037,10 @@ def upsert_cierre_ventas_mes_header(
                         gastos_fijos_global,
                         gastos_var_otros,
                         gastos_var_otros_rubro,
+                        inventario_usd,
+                        resultado_cero_ventas_usd,
+                        fill_rate_pct,
+                        rotacion_inventario,
                     ),
                 )
                 row = cursor.fetchone()
@@ -1000,9 +1051,10 @@ def upsert_cierre_ventas_mes_header(
                     """
                     INSERT INTO cierre_ventas_mes (
                         anio, mes, tipo_cambio_ars_usd, notas,
-                        gastos_fijos_global, gastos_var_otros, gastos_var_otros_rubro
+                        gastos_fijos_global, gastos_var_otros, gastos_var_otros_rubro,
+                        inventario_usd, resultado_cero_ventas_usd, fill_rate_pct, rotacion_inventario
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         anio,
@@ -1012,6 +1064,10 @@ def upsert_cierre_ventas_mes_header(
                         gastos_fijos_global,
                         gastos_var_otros,
                         gastos_var_otros_rubro,
+                        inventario_usd,
+                        resultado_cero_ventas_usd,
+                        fill_rate_pct,
+                        rotacion_inventario,
                     ),
                 )
                 cid = int(cursor.lastrowid)
