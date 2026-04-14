@@ -478,7 +478,7 @@ def _excel_registro_rango_bytes(anio_d: int, mes_d: int, anio_h: int, mes_h: int
         if rub is not None and isinstance(rub, float) and pd.isna(rub):
             rub = None
         rub = str(rub).strip() if rub else None
-        if rub == "" or rub.lower() == "nan":
+        if rub is not None and (rub == "" or rub.lower() == "nan"):
             rub = None
         gf = float(c.get("gastos_fijos_global") or 0)
         go = float(c.get("gastos_var_otros") or 0)
