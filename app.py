@@ -53,10 +53,23 @@ _PREVIEW_MONEY_COLS = (
     "fact_servicios",
     "total_repuestos",
     "total_bruto",
-    "margen_contrib",
-    "resultado",
+    "gastos_variables_tot",
+    "gastos_total",
 )
-_PREVIEW_UTIL_FRAC_COLS = ("util_pct_mostrador", "util_pct_taller", "util_prom_pct")
+_PREVIEW_FRAC_PCT_COLS = (
+    "util_pct_mostrador",
+    "util_pct_taller",
+    "util_prom_pct",
+)
+
+# Vista previa por sucursal: sin margen/resultado/factor (no se discriminan por sucursal).
+_PREVIEW_DROP_COLS = (
+    "margen_contrib",
+    "margen_contrib_pct",
+    "resultado",
+    "factor_absorcion",
+    "util_pct_servicios",
+)
 
 _PREVIEW_LABELS: dict[str, str] = {
     "fact_rep_mostrador": "Fact. rep. mostrador",
@@ -65,12 +78,12 @@ _PREVIEW_LABELS: dict[str, str] = {
     "desc_taller": "Desc. taller",
     "fact_servicios": "Fact. servicios",
     "total_repuestos": "Total repuestos",
-    "total_bruto": "Total bruto",
-    "margen_contrib": "Margen contribución",
-    "resultado": "Resultado",
+    "total_bruto": "Facturación total",
+    "gastos_variables_tot": "Gastos variables",
+    "gastos_total": "Gastos total (línea)",
 }
 
-_PREVIEW_UTIL_LABELS: dict[str, str] = {
+_PREVIEW_FRAC_PCT_LABELS: dict[str, str] = {
     "util_pct_mostrador": "Util. % rep. mostrador",
     "util_pct_taller": "Util. % rep. taller",
     "util_prom_pct": "Util. % rep. promedio",
@@ -126,7 +139,7 @@ def _prepare_preview_display(show: pd.DataFrame, *, ver_usd: bool, tc: float) ->
         if use_usd_display:
             disp[c] = disp[c] / float(tc)
 
-    for c in _PREVIEW_UTIL_FRAC_COLS:
+    for c in _PREVIEW_FRAC_PCT_COLS:
         if c not in disp.columns:
             continue
         disp[c] = pd.to_numeric(disp[c], errors="coerce") * 100.0
@@ -139,8 +152,8 @@ def _prepare_preview_display(show: pd.DataFrame, *, ver_usd: bool, tc: float) ->
             unit = "USD" if use_usd_display else "ARS"
             lab = _PREVIEW_LABELS.get(c, c)
             cfg[c] = st.column_config.NumberColumn(f"{lab} ({unit})", format=money_fmt, step=0.01)
-        elif c in _PREVIEW_UTIL_FRAC_COLS:
-            lab = _PREVIEW_UTIL_LABELS.get(c, c)
+        elif c in _PREVIEW_FRAC_PCT_COLS:
+            lab = _PREVIEW_FRAC_PCT_LABELS.get(c, c)
             cfg[c] = st.column_config.NumberColumn(lab, format=_FMT_PCT, step=0.01)
         elif pd.api.types.is_numeric_dtype(disp[c]):
             cfg[c] = st.column_config.NumberColumn(c, format="%.2f", step=0.01)
@@ -467,9 +480,8 @@ def _render_registro_ventas() -> None:
 
     ver_usd = st.checkbox("Vista previa en USD (usa el TC de arriba)", value=False)
     prev = _preview_tabla(edited)
-    drop_show = [c for c in prev.columns if c in ("gastos_variables_tot", "gastos_total", "factor_absorcion")]
+    drop_show = [c for c in prev.columns if c in _PREVIEW_DROP_COLS]
     prev_show = prev.drop(columns=drop_show, errors="ignore")
-    prev_show = prev_show.drop(columns=["util_pct_servicios"], errors="ignore")
     st.markdown("**Vista previa — ventas por sucursal y Concesionario**")
     show_disp, prev_cfg = _prepare_preview_display(prev_show, ver_usd=ver_usd, tc=float(tc))
     st.dataframe(

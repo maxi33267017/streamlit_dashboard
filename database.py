@@ -751,8 +751,14 @@ def compute_cierre_venta_linea(
     fact_servicios: float,
 ) -> dict:
     """
-    Por sucursal: solo ventas (ARS). ``util_pct_*`` en fracción (0.3346 = 33,46 %).
-    Los gastos van en cabecera mensual, no por fila.
+    Por sucursal: ventas en ARS y CMV (gastos variables) por línea.
+    ``util_pct_*`` en fracción (0.3346 = 33,46 %).
+
+    Facturación total = neto repuestos + fact. servicios.
+    Gastos variables = CMV mostrador + CMV taller + CMV servicios (sin % utilidad
+    servicios en grilla → utilidad servicios 100 % ⇒ CMV servicios = 0).
+    Margen contribución = facturación total − gastos variables.
+    Margen % = margen / facturación total (fracción 0–1; None si total ≤ 0).
     """
     fm = float(fact_rep_mostrador or 0)
     ft = float(fact_rep_taller or 0)
@@ -761,6 +767,9 @@ def compute_cierre_venta_linea(
     um = float(util_pct_mostrador) if util_pct_mostrador is not None else 0.0
     ut = float(util_pct_taller) if util_pct_taller is not None else 0.0
     fs = float(fact_servicios or 0)
+
+    um = min(max(um, 0.0), 1.0)
+    ut = min(max(ut, 0.0), 1.0)
 
     neto_rep = fm + ft - dm - dt
     wm = max(fm - dm, 0.0)
@@ -771,15 +780,33 @@ def compute_cierre_venta_linea(
         util_prom = None
 
     total_bruto = neto_rep + fs
+
+    net_mos = max(fm - dm, 0.0)
+    net_tal = max(ft - dt, 0.0)
+    us = 1.0  # alineado con gastos variables globales (sin CMV servicios por %)
+    gv_mos = net_mos * (1.0 - um)
+    gv_tal = net_tal * (1.0 - ut)
+    gv_serv = fs * (1.0 - us)
+    gastos_variables_tot = gv_mos + gv_tal + gv_serv
+    margen_contrib = total_bruto - gastos_variables_tot
+
+    if total_bruto > 0:
+        margen_contrib_pct = margen_contrib / total_bruto
+    else:
+        margen_contrib_pct = None
+
+    gastos_total = gastos_variables_tot
+    resultado = margen_contrib
+
     return {
         "total_repuestos": neto_rep,
         "util_prom_pct": util_prom,
         "total_bruto": total_bruto,
-        "gastos_variables_tot": 0.0,
-        "gastos_total": 0.0,
-        "margen_contrib": total_bruto,
-        "margen_contrib_pct": None,
-        "resultado": total_bruto,
+        "gastos_variables_tot": gastos_variables_tot,
+        "gastos_total": gastos_total,
+        "margen_contrib": margen_contrib,
+        "margen_contrib_pct": margen_contrib_pct,
+        "resultado": resultado,
         "factor_absorcion": None,
     }
 
