@@ -436,6 +436,7 @@ def _build_cierre_dashboard_metrics(cierre: dict, lineas: pd.DataFrame) -> dict 
     margen_ratio = _safe_ratio(margen_usd, fact_total_usd)
     resultado_usd = margen_usd - gastos_fijos_usd
     factor_abs_ratio = _safe_ratio(margen_usd, gastos_fijos_usd)
+    punto_equilibrio_usd = (gastos_fijos_usd / margen_ratio) if margen_ratio is not None and margen_ratio > 0 else None
 
     df["participacion_facturacion"] = df["fact_total_ars"] / fact_total_ars if fact_total_ars > 0 else 0.0
     branches = pd.DataFrame(
@@ -462,6 +463,7 @@ def _build_cierre_dashboard_metrics(cierre: dict, lineas: pd.DataFrame) -> dict 
         "margen_pct": (margen_ratio * 100.0) if margen_ratio is not None else None,
         "resultado_usd": resultado_usd,
         "factor_abs_pct": (factor_abs_ratio * 100.0) if factor_abs_ratio is not None else None,
+        "punto_equilibrio_usd": punto_equilibrio_usd,
         "util_prom_total_pct": util_prom_total * 100.0,
         "branches": branches,
     }
@@ -507,6 +509,7 @@ def _render_inicio_dashboard() -> None:
                 "margen_pct": d["margen_pct"],
                 "resultado_usd": d["resultado_usd"],
                 "factor_abs_pct": d["factor_abs_pct"],
+                "punto_equilibrio_usd": d["punto_equilibrio_usd"],
             }
             for d in data
         ]
@@ -523,22 +526,64 @@ def _render_inicio_dashboard() -> None:
         "Margen de contribución (%)": ("margen_pct", _FMT_PCT),
         "Resultado": ("resultado_usd", _FMT_USD),
         "Factor de absorción": ("factor_abs_pct", _FMT_PCT),
+        "Punto de equilibrio": ("punto_equilibrio_usd", _FMT_USD),
     }
 
     sel_metric = st.selectbox("Métrica (últimos 12 meses)", options=list(metric_map.keys()), index=0)
     metric_col, _ = metric_map[sel_metric]
-    chart_df = trend_12[["periodo", metric_col]].copy()
-    chart_df[metric_col] = pd.to_numeric(chart_df[metric_col], errors="coerce")
+    if sel_metric == "Punto de equilibrio":
+        chart_df = trend_12[["periodo", "fact_total_usd", "punto_equilibrio_usd"]].copy()
+        chart_df["fact_total_usd"] = pd.to_numeric(chart_df["fact_total_usd"], errors="coerce")
+        chart_df["punto_equilibrio_usd"] = pd.to_numeric(chart_df["punto_equilibrio_usd"], errors="coerce")
+        chart_df["dif_pct"] = (
+            (chart_df["fact_total_usd"] - chart_df["punto_equilibrio_usd"]) / chart_df["punto_equilibrio_usd"] * 100.0
+        )
+        long_df = chart_df.melt(
+            id_vars=["periodo", "dif_pct"],
+            value_vars=["fact_total_usd", "punto_equilibrio_usd"],
+            var_name="serie",
+            value_name="valor",
+        )
+        labels = {"fact_total_usd": "Facturación total", "punto_equilibrio_usd": "Punto de equilibrio"}
+        long_df["serie"] = long_df["serie"].map(labels)
+        fig_trend = px.bar(
+            long_df,
+            x="periodo",
+            y="valor",
+            color="serie",
+            barmode="group",
+            text_auto=".2f",
+            title="Tendencia 12 meses — Punto de equilibrio vs Facturación",
+        )
+        fig_trend.update_layout(xaxis_title="", yaxis_title="")
+        st.plotly_chart(fig_trend, use_container_width=True)
 
-    fig_trend = px.bar(
-        chart_df,
-        x="periodo",
-        y=metric_col,
-        text_auto=".2f",
-        title=f"Tendencia 12 meses — {sel_metric}",
-    )
-    fig_trend.update_layout(xaxis_title="", yaxis_title="")
-    st.plotly_chart(fig_trend, use_container_width=True)
+        dif_df = chart_df[["periodo", "dif_pct"]].copy()
+        dif_df["Dif. % (Facturación vs P.E.)"] = dif_df["dif_pct"].map(
+            lambda v: "—" if pd.isna(v) else f"{v:,.2f} %"
+        )
+        st.dataframe(
+            dif_df.drop(columns=["dif_pct"]),
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "periodo": st.column_config.TextColumn("Período", width="small"),
+                "Dif. % (Facturación vs P.E.)": st.column_config.TextColumn("Dif. % (Facturación vs P.E.)", width="medium"),
+            },
+        )
+    else:
+        chart_df = trend_12[["periodo", metric_col]].copy()
+        chart_df[metric_col] = pd.to_numeric(chart_df[metric_col], errors="coerce")
+
+        fig_trend = px.bar(
+            chart_df,
+            x="periodo",
+            y=metric_col,
+            text_auto=".2f",
+            title=f"Tendencia 12 meses — {sel_metric}",
+        )
+        fig_trend.update_layout(xaxis_title="", yaxis_title="")
+        st.plotly_chart(fig_trend, use_container_width=True)
 
     st.markdown("### Detalle por mes")
     years = sorted({int(d["anio"]) for d in data}, reverse=True)
@@ -569,6 +614,11 @@ def _render_inicio_dashboard() -> None:
     k6.metric("Margen de contribución %", f"{float(sel['margen_pct'] or 0.0):,.2f} %")
     k7.metric("Resultado", f"US$ {float(sel['resultado_usd']):,.2f}")
     k8.metric("Factor de absorción", f"{float(sel['factor_abs_pct'] or 0.0):,.2f} %")
+    k9, _, _, _ = st.columns(4)
+    k9.metric(
+        "Punto de equilibrio",
+        f"US$ {float(sel['punto_equilibrio_usd']):,.2f}" if sel["punto_equilibrio_usd"] is not None else "—",
+    )
 
     df_suc = sel["branches"].copy()
     color_map = {
@@ -729,9 +779,13 @@ def _render_registro_ventas() -> None:
     )
     fact_total_usd = fact_total_ars / tc_val
     margen_global_usd = fact_total_usd - gastos_var_total_usd
+    margen_global_ratio = _safe_ratio(margen_global_usd, fact_total_usd)
     resultado_global_usd = margen_global_usd - float(gastos_fijos_usd)
     factor_abs_global_pct = (
         (margen_global_usd / float(gastos_fijos_usd)) * 100.0 if float(gastos_fijos_usd) > 0 else None
+    )
+    punto_equilibrio_usd = (
+        float(gastos_fijos_usd) / float(margen_global_ratio) if margen_global_ratio is not None and margen_global_ratio > 0 else None
     )
 
     st.markdown("**Gastos calculados (Concesionario → USD, con el TC de arriba)**")
@@ -777,12 +831,14 @@ def _render_registro_ventas() -> None:
                 "Facturación total",
                 "Margen de contribución",
                 "Factor de absorción",
+                "Punto de equilibrio",
                 "Resultado",
             ],
             "Valor": [
                 f"US$ {fact_total_usd:,.2f}",
                 f"US$ {margen_global_usd:,.2f}",
                 (f"{factor_abs_global_pct:,.2f} %" if factor_abs_global_pct is not None else "—"),
+                (f"US$ {punto_equilibrio_usd:,.2f}" if punto_equilibrio_usd is not None else "—"),
                 f"US$ {resultado_global_usd:,.2f}",
             ],
         }
@@ -799,6 +855,7 @@ def _render_registro_ventas() -> None:
     st.caption(
         "Margen = facturación total − gastos variables. "
         "Factor de absorción = margen / gastos fijos. "
+        "Punto de equilibrio = gastos fijos / % de margen (en fracción). "
         "Resultado = margen − gastos fijos."
     )
 
