@@ -400,6 +400,70 @@ def _fmt_pct(v: float | None) -> str:
     return f"{float(v):,.2f}%"
 
 
+def _get_gemini_api_key() -> str | None:
+    env = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    if env:
+        return env
+    try:
+        sec = st.secrets.get("GEMINI_API_KEY") or st.secrets.get("GOOGLE_API_KEY")
+        if sec:
+            return str(sec)
+    except Exception:
+        pass
+    return None
+
+
+def _build_gemini_report_analysis(sel: dict, compare_df: pd.DataFrame) -> str | None:
+    api_key = _get_gemini_api_key()
+    if not api_key:
+        return None
+    try:
+        import google.generativeai as genai
+
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel("gemini-2.0-flash")
+        branches = sel["branches"].copy()
+        branch_lines = []
+        for _, b in branches.iterrows():
+            branch_lines.append(
+                f"- {b['sucursal']}: fact={float(b['fact_total_usd']):.2f}, "
+                f"mostrador={float(b['fact_mostrador_usd']):.2f}, "
+                f"taller={float(b['fact_taller_usd']):.2f}, servicios={float(b['fact_servicios_usd']):.2f}"
+            )
+        comp_lines = []
+        if compare_df is not None and len(compare_df):
+            for _, r in compare_df.iterrows():
+                comp_lines.append(
+                    f"- {r['Métrica']}: mes={float(r['Mes seleccionado']):.2f}, "
+                    f"prom3m={float(r['Promedio 3 meses previos']):.2f}, dif_pct={float(r['Dif. %']):.2f}"
+                )
+        prompt = (
+            "Actuá como consultor financiero de postventa.\n"
+            "Devolvé SOLO 6 bullets en español, breves y accionables:\n"
+            "1) resumen ejecutivo del mes,\n"
+            "2) comparación vs últimos 3 meses,\n"
+            "3) sucursales que crecen/caen,\n"
+            "4) mix mostrador vs taller+servicios,\n"
+            "5) riesgos,\n"
+            "6) 2 acciones concretas.\n\n"
+            f"Mes: {MES_NOMBRES[int(sel['mes'])-1]} {int(sel['anio'])}\n"
+            f"Facturación total: {float(sel['fact_total_usd']):.2f}\n"
+            f"Gastos variables: {float(sel['gastos_variables_usd']):.2f}\n"
+            f"Gastos fijos: {float(sel['gastos_fijos_usd']):.2f}\n"
+            f"Margen: {float(sel['margen_usd']):.2f} ({float(sel['margen_pct'] or 0):.2f}%)\n"
+            f"Resultado: {float(sel['resultado_usd']):.2f}\n"
+            f"Factor absorción: {float(sel['factor_abs_pct'] or 0):.2f}%\n"
+            f"Punto equilibrio: {float(sel['punto_equilibrio_usd'] or 0):.2f}\n"
+            "Detalle sucursales:\n" + "\n".join(branch_lines) + "\n"
+            "Comparación 3 meses previos:\n" + ("\n".join(comp_lines) if comp_lines else "Sin datos suficientes")
+        )
+        resp = model.generate_content(prompt)
+        text = (resp.text or "").strip()
+        return text if text else None
+    except Exception:
+        return None
+
+
 def _build_comparison_last3(data: list[dict], sel: dict) -> pd.DataFrame:
     ordered = sorted(data, key=lambda x: (x["anio"], x["mes"]))
     idx = next(
@@ -448,6 +512,7 @@ def _build_inicio_report_pdf_bytes(
     trend_df: pd.DataFrame,
     sel: dict,
     compare_df: pd.DataFrame,
+    ai_analysis: str | None = None,
 ) -> bytes:
     with tempfile.TemporaryDirectory() as td:
         p_hist = os.path.join(td, "hist.png")
@@ -627,6 +692,14 @@ def _build_inicio_report_pdf_bytes(
                 f"Mayor taller+servicios: {most_ts['sucursal']} ({_fmt_usd(float(most_ts['ts']))})",
                 ln=True,
             )
+        if ai_analysis:
+            pdf.ln(3)
+            pdf.set_font("Arial", "B", 12)
+            pdf.cell(0, 7, "Analisis IA (Gemini)", ln=True)
+            pdf.set_font("Arial", "", 10)
+            for line in [ln.strip() for ln in ai_analysis.splitlines() if ln.strip()]:
+                clean = line.encode("latin-1", errors="replace").decode("latin-1")
+                pdf.multi_cell(0, 6, clean)
 
         out = pdf.output(dest="S")
         if isinstance(out, str):
@@ -955,10 +1028,13 @@ def _render_inicio_dashboard() -> None:
 
     st.markdown("### Exportar informe")
     compare_df = _build_comparison_last3(data, sel)
-    cexp1, cexp2 = st.columns([1, 2])
+    cexp0, cexp1, cexp2 = st.columns([1, 1, 2])
+    with cexp0:
+        include_ai = st.checkbox("Incluir análisis IA", value=True)
     with cexp1:
         if st.button("Generar informe PDF", use_container_width=True):
             try:
+                ai_analysis = _build_gemini_report_analysis(sel, compare_df) if include_ai else None
                 pdf_bytes = _build_inicio_report_pdf_bytes(
                     fig_trend_fact,
                     fig_pie,
@@ -967,6 +1043,7 @@ def _render_inicio_dashboard() -> None:
                     trend_df=trend_all,
                     sel=sel,
                     compare_df=compare_df,
+                    ai_analysis=ai_analysis,
                 )
                 st.session_state["inicio_pdf_bytes"] = pdf_bytes
                 st.success("Informe generado.")
