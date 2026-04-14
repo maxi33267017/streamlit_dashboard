@@ -772,7 +772,11 @@ def compute_cierre_venta_linea(
     ut = min(max(ut, 0.0), 1.0)
 
     neto_rep = fm + ft - dm - dt
-    util_prom = (um + ut) / 2.0
+    utils_no_cero = [u for u in (um, ut) if u > 0]
+    if utils_no_cero:
+        util_prom = sum(utils_no_cero) / len(utils_no_cero)
+    else:
+        util_prom = 0.0
 
     total_bruto = neto_rep + fs
 

@@ -287,6 +287,7 @@ def _util_ponderado(df: pd.DataFrame, canal: str) -> float | None:
 
 def _util_promedio_simple(df: pd.DataFrame, col: str) -> float | None:
     vals = pd.to_numeric(df.get(col), errors="coerce").dropna()
+    vals = vals[vals > 0]
     if len(vals) == 0:
         return None
     return float(vals.mean()) / 100.0
