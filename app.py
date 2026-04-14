@@ -37,10 +37,8 @@ COLS_VENTAS_EDIT = [
     "desc_taller",
     "util_pct_mostrador",
     "util_pct_taller",
+    "util_pct_servicios",
     "fact_servicios",
-    "gastos_fijos",
-    "gastos_var_s",
-    "gastos_var_r",
 ]
 
 
@@ -110,10 +108,8 @@ def _df_editor_cierre_ventas(anio: int, mes: int) -> pd.DataFrame:
                     "desc_taller": float(r.get("desc_taller") or 0),
                     "util_pct_mostrador": float(r.get("util_pct_mostrador") or 0) * 100.0,
                     "util_pct_taller": float(r.get("util_pct_taller") or 0) * 100.0,
+                    "util_pct_servicios": float(r.get("util_pct_servicios") or 0) * 100.0,
                     "fact_servicios": float(r.get("fact_servicios") or 0),
-                    "gastos_fijos": float(r.get("gastos_fijos") or 0),
-                    "gastos_var_s": float(r.get("gastos_var_s") or 0),
-                    "gastos_var_r": float(r.get("gastos_var_r") or 0),
                 }
             )
         else:
@@ -130,15 +126,13 @@ def _row_to_db_dict(s: pd.Series) -> dict:
         "desc_taller": float(s["desc_taller"] or 0),
         "util_pct_mostrador": float(s["util_pct_mostrador"] or 0) / 100.0,
         "util_pct_taller": float(s["util_pct_taller"] or 0) / 100.0,
+        "util_pct_servicios": float(s["util_pct_servicios"] or 0) / 100.0,
         "fact_servicios": float(s["fact_servicios"] or 0),
-        "gastos_fijos": float(s["gastos_fijos"] or 0),
-        "gastos_var_s": float(s["gastos_var_s"] or 0),
-        "gastos_var_r": float(s["gastos_var_r"] or 0),
     }
 
 
 def _util_ponderado(df: pd.DataFrame, canal: str) -> float | None:
-    """Utilidad % en fracción, ponderada por (fact − desc) del canal."""
+    """Utilidad % repuestos en fracción, ponderada por (fact − desc) del canal."""
     num = 0.0
     den = 0.0
     if canal == "mos":
@@ -153,24 +147,34 @@ def _util_ponderado(df: pd.DataFrame, canal: str) -> float | None:
     return (num / den) if den > 0 else None
 
 
+def _util_ponderado_servicios(df: pd.DataFrame) -> float | None:
+    """Utilidad % servicios en fracción, ponderada por facturación de servicios."""
+    num = 0.0
+    den = 0.0
+    for _, r in df.iterrows():
+        fs = max(float(r.get("fact_servicios") or 0), 0.0)
+        u = (float(r.get("util_pct_servicios") or 0) / 100.0) if pd.notna(r.get("util_pct_servicios")) else 0.0
+        den += fs
+        num += u * fs
+    return (num / den) if den > 0 else None
+
+
 def _fila_concesionario(df_edit: pd.DataFrame) -> dict:
     sfm = float(df_edit["fact_rep_mostrador"].sum())
     sft = float(df_edit["fact_rep_taller"].sum())
     sdm = float(df_edit["desc_mostrador"].sum())
     sdt = float(df_edit["desc_taller"].sum())
     sfs = float(df_edit["fact_servicios"].sum())
-    sgf = float(df_edit["gastos_fijos"].sum())
-    sgvs = float(df_edit["gastos_var_s"].sum())
-    sgvr = float(df_edit["gastos_var_r"].sum())
     um = _util_ponderado(df_edit, "mos")
     ut = _util_ponderado(df_edit, "tal")
+    us = _util_ponderado_servicios(df_edit)
     if um is None:
         um = 0.0
     if ut is None:
         ut = 0.0
-    calc = database.compute_cierre_venta_linea(
-        sfm, sft, sdm, sdt, um, ut, sfs, sgf, sgvs, sgvr
-    )
+    if us is None:
+        us = 0.0
+    calc = database.compute_cierre_venta_linea(sfm, sft, sdm, sdt, um, ut, sfs)
     return {
         "sucursal": "CONCESIONARIO",
         "fact_rep_mostrador": sfm,
@@ -179,10 +183,8 @@ def _fila_concesionario(df_edit: pd.DataFrame) -> dict:
         "desc_taller": sdt,
         "util_pct_mostrador": um,
         "util_pct_taller": ut,
+        "util_pct_servicios": us,
         "fact_servicios": sfs,
-        "gastos_fijos": sgf,
-        "gastos_var_s": sgvs,
-        "gastos_var_r": sgvr,
         **calc,
     }
 
@@ -199,14 +201,29 @@ def _preview_tabla(df_edit: pd.DataFrame) -> pd.DataFrame:
             d["util_pct_mostrador"],
             d["util_pct_taller"],
             d["fact_servicios"],
-            d["gastos_fijos"],
-            d["gastos_var_s"],
-            d["gastos_var_r"],
         )
         filas.append({**d, **calc})
     base = pd.DataFrame(filas)
     base = pd.concat([base, pd.DataFrame([_fila_concesionario(df_edit)])], ignore_index=True)
     return base
+
+
+def _rubro_otros_a_db(etiqueta: str) -> str | None:
+    e = (etiqueta or "").strip().lower()
+    if e in ("servicios", "servicio"):
+        return "servicios"
+    if e in ("repuestos", "repuesto"):
+        return "repuestos"
+    return None
+
+
+def _rubro_db_a_select(rubro: str | None) -> str:
+    r = (rubro or "").strip().lower()
+    if r in ("servicios", "servicio"):
+        return "Servicios"
+    if r in ("repuestos", "repuesto"):
+        return "Repuestos"
+    return "— Ninguno —"
 
 
 def _render_registro_ventas() -> None:
@@ -235,7 +252,8 @@ def _render_registro_ventas() -> None:
 
     df_base = _df_editor_cierre_ventas(int(anio), int(mes))
     st.caption(
-        "Editá solo sucursales reales. **Concesionario** se calcula abajo sumando insumos y aplicando la misma lógica de márgenes."
+        "Solo sucursales reales en la grilla. **Concesionario** suma facturación y pondera utilidades. "
+        "Los gastos son **globales del mes** (abajo)."
     )
     edited = st.data_editor(
         df_base,
@@ -247,19 +265,83 @@ def _render_registro_ventas() -> None:
             "fact_rep_taller": st.column_config.NumberColumn("Fact. rep. Taller (ARS)", format="%.2f"),
             "desc_mostrador": st.column_config.NumberColumn("Desc. Mostrador (ARS)", format="%.2f"),
             "desc_taller": st.column_config.NumberColumn("Desc. Taller (ARS)", format="%.2f"),
-            "util_pct_mostrador": st.column_config.NumberColumn("Util. / venta % Mostrador", format="%.2f", min_value=0.0, max_value=100.0),
-            "util_pct_taller": st.column_config.NumberColumn("Util. / venta % Taller", format="%.2f", min_value=0.0, max_value=100.0),
+            "util_pct_mostrador": st.column_config.NumberColumn("Util. venta % rep. Mostrador", format="%.2f", min_value=0.0, max_value=100.0),
+            "util_pct_taller": st.column_config.NumberColumn("Util. venta % rep. Taller", format="%.2f", min_value=0.0, max_value=100.0),
+            "util_pct_servicios": st.column_config.NumberColumn("Util. venta % servicios", format="%.2f", min_value=0.0, max_value=100.0),
             "fact_servicios": st.column_config.NumberColumn("Fact. servicios (ARS)", format="%.2f"),
-            "gastos_fijos": st.column_config.NumberColumn("Gastos fijos (ARS)", format="%.2f"),
-            "gastos_var_s": st.column_config.NumberColumn("Gastos var. S (ARS)", format="%.2f"),
-            "gastos_var_r": st.column_config.NumberColumn("Gastos var. R (ARS)", format="%.2f"),
         },
+    )
+
+    st.markdown("### Gastos del mes (globales)")
+    gf_def = float(cierre.get("gastos_fijos_global") or 0) if cierre else 0.0
+    go_def = float(cierre.get("gastos_var_otros") or 0) if cierre else 0.0
+    rub_def = _rubro_db_a_select(cierre.get("gastos_var_otros_rubro") if cierre else None)
+
+    g1, g2, g3 = st.columns(3)
+    with g1:
+        gastos_fijos = st.number_input(
+            "1. Gastos fijos (ARS)",
+            min_value=0.0,
+            value=gf_def,
+            format="%.2f",
+            key=f"cv_gf_{int(anio)}_{int(mes)}",
+        )
+    with g2:
+        gastos_otros = st.number_input(
+            "4. Otros gastos variables (ARS)",
+            min_value=0.0,
+            value=go_def,
+            format="%.2f",
+            key=f"cv_go_{int(anio)}_{int(mes)}",
+        )
+    with g3:
+        opts = ["— Ninguno —", "Servicios", "Repuestos"]
+        idx = opts.index(rub_def) if rub_def in opts else 0
+        rubro_sel = st.selectbox(
+            "Rubro de otros (suma a variables servicios o repuestos)",
+            options=opts,
+            index=idx,
+            key=f"cv_gr_{int(anio)}_{int(mes)}",
+        )
+    rubro_db = _rubro_otros_a_db(rubro_sel) if rubro_sel != "— Ninguno —" else None
+
+    um_c = _util_ponderado(edited, "mos")
+    ut_c = _util_ponderado(edited, "tal")
+    us_c = _util_ponderado_servicios(edited)
+    gv = database.compute_gastos_variables_globales(
+        fact_rep_mos_conc=float(edited["fact_rep_mostrador"].sum()),
+        desc_rep_mos_conc=float(edited["desc_mostrador"].sum()),
+        fact_rep_tal_conc=float(edited["fact_rep_taller"].sum()),
+        desc_rep_tal_conc=float(edited["desc_taller"].sum()),
+        fact_serv_conc=float(edited["fact_servicios"].sum()),
+        util_mos_conc=um_c,
+        util_tal_conc=ut_c,
+        util_serv_conc=us_c,
+        gastos_fijos_global=gastos_fijos,
+        gastos_var_otros=gastos_otros,
+        gastos_var_otros_rubro=rubro_db,
+    )
+
+    st.markdown("**Cálculo (Concesionario)**")
+    c2a, c2b, c2c, c2d, c2e = st.columns(5)
+    c2a.metric("2. Var. servicios (ARS)", f"$ {gv['gv_servicios_ajustado']:,.2f}")
+    c2b.metric("3. Var. repuestos (ARS)", f"$ {gv['gv_repuestos_ajustado']:,.2f}")
+    c2c.metric("… rep. mostrador (CMV)", f"$ {gv['gv_rep_mostrador']:,.2f}")
+    c2d.metric("… rep. taller (CMV)", f"$ {gv['gv_rep_taller']:,.2f}")
+    c2e.metric("5. Gasto total (ARS)", f"$ {gv['gastos_total']:,.2f}")
+    st.caption(
+        "Fórmulas: CMV mostrador = neto mostrador × (1 − util. Concesionario mostrador); "
+        "CMV taller = neto taller × (1 − util. Concesionario taller); "
+        "variables servicios = fact. servicios × (1 − util. servicios ponderada). "
+        "Los «otros» se suman al bucket elegido."
     )
 
     ver_usd = st.checkbox("Vista previa en USD (usa el TC de arriba)", value=False)
     prev = _preview_tabla(edited)
-    st.markdown("**Vista previa — totales y Concesionario**")
-    show = prev.copy()
+    drop_show = [c for c in prev.columns if c in ("gastos_variables_tot", "gastos_total", "factor_absorcion")]
+    prev_show = prev.drop(columns=drop_show, errors="ignore")
+    st.markdown("**Vista previa — ventas por sucursal y Concesionario**")
+    show = prev_show.copy()
     if ver_usd and tc > 0:
         money_cols = [
             "fact_rep_mostrador",
@@ -267,31 +349,28 @@ def _render_registro_ventas() -> None:
             "desc_mostrador",
             "desc_taller",
             "fact_servicios",
-            "gastos_fijos",
-            "gastos_var_s",
-            "gastos_var_r",
             "total_repuestos",
             "total_bruto",
-            "gastos_variables_tot",
-            "gastos_total",
             "margen_contrib",
             "resultado",
         ]
         for col in money_cols:
             if col in show.columns:
                 show[col] = show[col].astype(float) / tc
-    st.dataframe(
-        show.round(4),
-        use_container_width=True,
-        hide_index=True,
-    )
+    st.dataframe(show.round(4), use_container_width=True, hide_index=True)
 
     b1, b2 = st.columns(2)
     with b1:
         if st.button("Guardar mes", type="primary", use_container_width=True):
             try:
                 cid = database.upsert_cierre_ventas_mes_header(
-                    int(anio), int(mes), float(tc), notas=None
+                    int(anio),
+                    int(mes),
+                    float(tc),
+                    notas=None,
+                    gastos_fijos_global=float(gastos_fijos),
+                    gastos_var_otros=float(gastos_otros),
+                    gastos_var_otros_rubro=rubro_db,
                 )
                 filas = [_row_to_db_dict(edited.loc[i]) for i in range(len(edited))]
                 database.replace_lineas_cierre_ventas(cid, filas)
