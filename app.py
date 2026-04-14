@@ -405,9 +405,17 @@ def _get_gemini_api_key() -> str | None:
     if env:
         return env
     try:
+        # Formato plano: GEMINI_API_KEY=...
         sec = st.secrets.get("GEMINI_API_KEY") or st.secrets.get("GOOGLE_API_KEY")
         if sec:
             return str(sec)
+        # Formato seccionado: [Gemini] GEMINI_API_KEY=...
+        for section_key in ("Gemini", "gemini", "GOOGLE", "google"):
+            section = st.secrets.get(section_key)
+            if section:
+                sec2 = section.get("GEMINI_API_KEY") or section.get("GOOGLE_API_KEY")
+                if sec2:
+                    return str(sec2)
     except Exception:
         pass
     return None
