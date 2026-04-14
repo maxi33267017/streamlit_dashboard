@@ -453,7 +453,7 @@ def _render_registro_ventas() -> None:
     margen_global_usd = fact_total_usd - gastos_var_total_usd
     resultado_global_usd = margen_global_usd - float(gastos_fijos_usd)
     factor_abs_global_pct = (
-        (fact_total_usd / float(gastos_fijos_usd)) * 100.0 if float(gastos_fijos_usd) > 0 else None
+        (margen_global_usd / float(gastos_fijos_usd)) * 100.0 if float(gastos_fijos_usd) > 0 else None
     )
 
     st.markdown("**Gastos calculados (Concesionario → USD, con el TC de arriba)**")
@@ -520,7 +520,7 @@ def _render_registro_ventas() -> None:
     )
     st.caption(
         "Margen = facturación total − gastos variables. "
-        "Factor de absorción = facturación total / gastos fijos. "
+        "Factor de absorción = margen / gastos fijos. "
         "Resultado = margen − gastos fijos."
     )
 
