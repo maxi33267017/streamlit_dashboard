@@ -413,10 +413,10 @@ def _get_gemini_api_key() -> str | None:
     return None
 
 
-def _build_gemini_report_analysis(sel: dict, compare_df: pd.DataFrame) -> str | None:
+def _build_gemini_report_analysis(sel: dict, compare_df: pd.DataFrame) -> tuple[str | None, str]:
     api_key = _get_gemini_api_key()
     if not api_key:
-        return None
+        return None, "No hay API key de Gemini configurada (GEMINI_API_KEY / GOOGLE_API_KEY)."
     try:
         import google.generativeai as genai
 
@@ -459,9 +459,11 @@ def _build_gemini_report_analysis(sel: dict, compare_df: pd.DataFrame) -> str | 
         )
         resp = model.generate_content(prompt)
         text = (resp.text or "").strip()
-        return text if text else None
-    except Exception:
-        return None
+        if text:
+            return text, "OK"
+        return None, "Gemini respondió vacío."
+    except Exception as exc:
+        return None, f"Error Gemini: {exc}"
 
 
 def _build_comparison_last3(data: list[dict], sel: dict) -> pd.DataFrame:
@@ -1034,7 +1036,10 @@ def _render_inicio_dashboard() -> None:
     with cexp1:
         if st.button("Generar informe PDF", use_container_width=True):
             try:
-                ai_analysis = _build_gemini_report_analysis(sel, compare_df) if include_ai else None
+                ai_analysis = None
+                ai_status = "No solicitado."
+                if include_ai:
+                    ai_analysis, ai_status = _build_gemini_report_analysis(sel, compare_df)
                 pdf_bytes = _build_inicio_report_pdf_bytes(
                     fig_trend_fact,
                     fig_pie,
@@ -1046,7 +1051,12 @@ def _render_inicio_dashboard() -> None:
                     ai_analysis=ai_analysis,
                 )
                 st.session_state["inicio_pdf_bytes"] = pdf_bytes
-                st.success("Informe generado.")
+                if include_ai and ai_analysis:
+                    st.success("Informe generado con análisis IA.")
+                elif include_ai:
+                    st.warning(f"Informe generado sin análisis IA. Motivo: {ai_status}")
+                else:
+                    st.success("Informe generado.")
             except Exception as exc:
                 st.error(
                     f"No se pudo generar el PDF: {exc}. Verificá tener instalada la dependencia kaleido."
