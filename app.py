@@ -386,7 +386,7 @@ def _excel_registro_bytes(
     gastos_fijos_usd: float,
     gastos_otros_usd: float,
     inventario_usd: float,
-    resultado_cero_ventas_usd: float,
+    resultado_cero_ventas_pct: float,
     fill_rate_pct: float | None,
     rotacion_inventario: float | None,
 ) -> bytes:
@@ -405,7 +405,7 @@ def _excel_registro_bytes(
                 "gastos_variables_total_usd": round(tot["gastos_var_total_usd"], 4),
                 "gastos_total_usd": round(tot["gastos_total_usd"], 4),
                 "inventario_usd": round(float(inventario_usd), 4),
-                "resultado_cero_ventas_usd": round(float(resultado_cero_ventas_usd), 4),
+                "resultado_cero_ventas_pct": round(float(resultado_cero_ventas_pct), 4),
                 "fill_rate_pct": fill_rate_pct,
                 "rotacion_inventario": rotacion_inventario,
             }
@@ -484,7 +484,7 @@ def _excel_registro_rango_bytes(anio_d: int, mes_d: int, anio_h: int, mes_h: int
         go = float(c.get("gastos_var_otros") or 0)
         tot = _registro_financiero_totales(edited, tc, gf, go, rub)
         inv = float(c.get("inventario_usd") or 0)
-        cv = float(c.get("resultado_cero_ventas_usd") or 0)
+        cv = float(c.get("resultado_cero_ventas_pct") or 0)
         fr = c.get("fill_rate_pct")
         if fr is not None and not (isinstance(fr, float) and pd.isna(fr)):
             fr = float(fr)
@@ -508,7 +508,7 @@ def _excel_registro_rango_bytes(anio_d: int, mes_d: int, anio_h: int, mes_h: int
                 "gastos_variables_total_usd": round(tot["gastos_var_total_usd"], 4),
                 "gastos_total_usd": round(tot["gastos_total_usd"], 4),
                 "inventario_usd": round(inv, 4),
-                "resultado_cero_ventas_usd": round(cv, 4),
+                "resultado_cero_ventas_pct": round(cv, 4),
                 "fill_rate_pct": fr,
                 "rotacion_inventario": rot,
             }
@@ -1395,7 +1395,7 @@ def _render_registro_ventas() -> None:
     rub_def = _rubro_db_a_select(cierre.get("gastos_var_otros_rubro") if cierre else None)
 
     inv_def = float(cierre.get("inventario_usd") or 0) if cierre else 0.0
-    cv_def = float(cierre.get("resultado_cero_ventas_usd") or 0) if cierre else 0.0
+    cv_def = float(cierre.get("resultado_cero_ventas_pct") or 0) if cierre else 0.0
     fr_v = _cierre_hdr_float(cierre, "fill_rate_pct")
     fr_def = float(fr_v) if fr_v is not None else 0.0
     rot_v = _cierre_hdr_float(cierre, "rotacion_inventario")
@@ -1431,8 +1431,8 @@ def _render_registro_ventas() -> None:
 
     st.markdown("### Inventario y abastecimiento")
     st.caption(
-        "Valores e indicadores del mes en **USD** (excepto Fill rate, en %). "
-        "Se persisten al guardar el cierre. Rotación: cargá el índice que uses (ej. ventas / stock medio)."
+        "Inventario en **USD**; **Cero Ventas** y **Fill rate** en **%**; rotación como índice que definas. "
+        "Se persisten al guardar el cierre."
     )
     k1, k2, k3, k4 = st.columns(4)
     with k1:
@@ -1444,11 +1444,13 @@ def _render_registro_ventas() -> None:
             key=f"cv_inv_{int(anio)}_{int(mes)}",
         )
     with k2:
-        val_cero_ventas_usd = st.number_input(
-            "Resultado Cero Ventas (USD)",
-            min_value=-1e12,
+        val_cero_ventas_pct = st.number_input(
+            "Resultado Cero Ventas (%)",
+            min_value=-999.99,
+            max_value=999.99,
             value=float(cv_def),
             format="%.2f",
+            help="Indicador en porcentaje (no en moneda).",
             key=f"cv_cv0_{int(anio)}_{int(mes)}",
         )
     with k3:
@@ -1556,13 +1558,13 @@ def _render_registro_ventas() -> None:
         {
             "Indicador": [
                 "Inventario (USD)",
-                "Resultado Cero Ventas (USD)",
+                "Resultado Cero Ventas (%)",
                 "Fill rate",
                 "Rotación inventario",
             ],
             "Valor": [
                 _fmt_usd(val_inventario_usd),
-                _fmt_usd(val_cero_ventas_usd),
+                f"{val_cero_ventas_pct:,.2f} %",
                 f"{val_fill_rate:,.2f} %",
                 f"{val_rotacion:,.4f}",
             ],
@@ -1589,7 +1591,7 @@ def _render_registro_ventas() -> None:
             gastos_fijos_usd=float(gastos_fijos_usd),
             gastos_otros_usd=float(gastos_otros_usd),
             inventario_usd=float(val_inventario_usd),
-            resultado_cero_ventas_usd=float(val_cero_ventas_usd),
+            resultado_cero_ventas_pct=float(val_cero_ventas_pct),
             fill_rate_pct=float(val_fill_rate),
             rotacion_inventario=float(val_rotacion),
         )
@@ -1669,7 +1671,7 @@ def _render_registro_ventas() -> None:
                     gastos_var_otros=float(gastos_otros_usd),
                     gastos_var_otros_rubro=rubro_db,
                     inventario_usd=float(val_inventario_usd),
-                    resultado_cero_ventas_usd=float(val_cero_ventas_usd),
+                    resultado_cero_ventas_pct=float(val_cero_ventas_pct),
                     fill_rate_pct=float(val_fill_rate),
                     rotacion_inventario=float(val_rotacion),
                 )

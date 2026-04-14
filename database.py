@@ -276,7 +276,7 @@ CIERRE_VENTAS_MES_SQLITE = """
         gastos_var_otros REAL NOT NULL DEFAULT 0,
         gastos_var_otros_rubro TEXT,
         inventario_usd REAL NOT NULL DEFAULT 0,
-        resultado_cero_ventas_usd REAL NOT NULL DEFAULT 0,
+        resultado_cero_ventas_pct REAL NOT NULL DEFAULT 0,
         fill_rate_pct REAL,
         rotacion_inventario REAL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -296,7 +296,7 @@ CIERRE_VENTAS_MES_PG = """
         gastos_var_otros DOUBLE PRECISION NOT NULL DEFAULT 0,
         gastos_var_otros_rubro TEXT,
         inventario_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
-        resultado_cero_ventas_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
+        resultado_cero_ventas_pct DOUBLE PRECISION NOT NULL DEFAULT 0,
         fill_rate_pct DOUBLE PRECISION,
         rotacion_inventario DOUBLE PRECISION,
         created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
@@ -633,6 +633,7 @@ def _ensure_cierre_ventas_schema_pg(cursor, conn) -> None:
         ("cierre_ventas_mes", "gastos_var_otros_rubro", "TEXT"),
         ("cierre_ventas_mes", "inventario_usd", "DOUBLE PRECISION NOT NULL DEFAULT 0"),
         ("cierre_ventas_mes", "resultado_cero_ventas_usd", "DOUBLE PRECISION NOT NULL DEFAULT 0"),
+        ("cierre_ventas_mes", "resultado_cero_ventas_pct", "DOUBLE PRECISION NOT NULL DEFAULT 0"),
         ("cierre_ventas_mes", "fill_rate_pct", "DOUBLE PRECISION"),
         ("cierre_ventas_mes", "rotacion_inventario", "DOUBLE PRECISION"),
         ("cierre_ventas_linea", "util_pct_servicios", "DOUBLE PRECISION"),
@@ -649,6 +650,7 @@ def _ensure_cierre_ventas_schema_sqlite(cursor, conn) -> None:
         "ALTER TABLE cierre_ventas_mes ADD COLUMN gastos_var_otros_rubro TEXT",
         "ALTER TABLE cierre_ventas_mes ADD COLUMN inventario_usd REAL NOT NULL DEFAULT 0",
         "ALTER TABLE cierre_ventas_mes ADD COLUMN resultado_cero_ventas_usd REAL NOT NULL DEFAULT 0",
+        "ALTER TABLE cierre_ventas_mes ADD COLUMN resultado_cero_ventas_pct REAL NOT NULL DEFAULT 0",
         "ALTER TABLE cierre_ventas_mes ADD COLUMN fill_rate_pct REAL",
         "ALTER TABLE cierre_ventas_mes ADD COLUMN rotacion_inventario REAL",
         "ALTER TABLE cierre_ventas_linea ADD COLUMN util_pct_servicios REAL",
@@ -980,7 +982,7 @@ def upsert_cierre_ventas_mes_header(
     gastos_var_otros: float = 0.0,
     gastos_var_otros_rubro: str | None = None,
     inventario_usd: float = 0.0,
-    resultado_cero_ventas_usd: float = 0.0,
+    resultado_cero_ventas_pct: float = 0.0,
     fill_rate_pct: float | None = None,
     rotacion_inventario: float | None = None,
 ) -> int:
@@ -998,7 +1000,7 @@ def upsert_cierre_ventas_mes_header(
                 UPDATE cierre_ventas_mes
                 SET tipo_cambio_ars_usd = ?, notas = ?,
                     gastos_fijos_global = ?, gastos_var_otros = ?, gastos_var_otros_rubro = ?,
-                    inventario_usd = ?, resultado_cero_ventas_usd = ?,
+                    inventario_usd = ?, resultado_cero_ventas_pct = ?,
                     fill_rate_pct = ?, rotacion_inventario = ?,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
@@ -1010,7 +1012,7 @@ def upsert_cierre_ventas_mes_header(
                     gastos_var_otros,
                     gastos_var_otros_rubro,
                     inventario_usd,
-                    resultado_cero_ventas_usd,
+                    resultado_cero_ventas_pct,
                     fill_rate_pct,
                     rotacion_inventario,
                     cid,
@@ -1024,7 +1026,7 @@ def upsert_cierre_ventas_mes_header(
                     INSERT INTO cierre_ventas_mes (
                         anio, mes, tipo_cambio_ars_usd, notas,
                         gastos_fijos_global, gastos_var_otros, gastos_var_otros_rubro,
-                        inventario_usd, resultado_cero_ventas_usd, fill_rate_pct, rotacion_inventario
+                        inventario_usd, resultado_cero_ventas_pct, fill_rate_pct, rotacion_inventario
                     )
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     RETURNING id
@@ -1038,7 +1040,7 @@ def upsert_cierre_ventas_mes_header(
                         gastos_var_otros,
                         gastos_var_otros_rubro,
                         inventario_usd,
-                        resultado_cero_ventas_usd,
+                        resultado_cero_ventas_pct,
                         fill_rate_pct,
                         rotacion_inventario,
                     ),
@@ -1052,7 +1054,7 @@ def upsert_cierre_ventas_mes_header(
                     INSERT INTO cierre_ventas_mes (
                         anio, mes, tipo_cambio_ars_usd, notas,
                         gastos_fijos_global, gastos_var_otros, gastos_var_otros_rubro,
-                        inventario_usd, resultado_cero_ventas_usd, fill_rate_pct, rotacion_inventario
+                        inventario_usd, resultado_cero_ventas_pct, fill_rate_pct, rotacion_inventario
                     )
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
@@ -1065,7 +1067,7 @@ def upsert_cierre_ventas_mes_header(
                         gastos_var_otros,
                         gastos_var_otros_rubro,
                         inventario_usd,
-                        resultado_cero_ventas_usd,
+                        resultado_cero_ventas_pct,
                         fill_rate_pct,
                         rotacion_inventario,
                     ),
