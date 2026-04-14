@@ -290,7 +290,11 @@ def _util_promedio_simple(df: pd.DataFrame, col: str) -> float | None:
     vals = vals[vals > 0]
     if len(vals) == 0:
         return None
-    return float(vals.mean()) / 100.0
+    # En editor vienen 0-100; en BD de cierres vienen fracción 0-1.
+    if float(vals.max()) > 1.0:
+        vals = vals / 100.0
+    vals = vals.clip(lower=0.0, upper=1.0)
+    return float(vals.mean())
 
 
 def _avg_non_zero_pair(a: float | None, b: float | None) -> float:
