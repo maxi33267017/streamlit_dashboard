@@ -1,4 +1,4 @@
-"""Postventa FY — login, registro (ventas / gastos), navbar."""
+"""GOPV — login, registro y navbar."""
 
 import os
 
@@ -9,7 +9,7 @@ import streamlit.components.v1 as components
 import database
 
 st.set_page_config(
-    page_title="Postventa FY",
+    page_title="GOPV",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -225,7 +225,7 @@ def _rubro_db_a_select(rubro: str | None) -> str:
 
 
 def _render_registro_ventas() -> None:
-    st.subheader("Cierre de ventas (mensual)")
+    st.subheader("Registro")
     c1, c2, c3 = st.columns([1, 1, 1])
     with c1:
         mes = st.selectbox(
@@ -384,11 +384,7 @@ def _render_registro_ventas() -> None:
 
 
 def _render_registro() -> None:
-    tab_v, tab_g = st.tabs(["Ventas", "Gastos"])
-    with tab_g:
-        st.info("Registro de gastos: lo vemos en la siguiente etapa.")
-    with tab_v:
-        _render_registro_ventas()
+    _render_registro_ventas()
 
 
 if "is_authed" not in st.session_state:
@@ -402,7 +398,7 @@ _chrome_spacer()
 
 brand_col, actions_col = st.columns([2, 3])
 with brand_col:
-    st.markdown("### Postventa FY")
+    st.markdown("### GOPV")
 with actions_col:
     if st.session_state.is_authed:
         a1, a2, a3 = st.columns(3)
