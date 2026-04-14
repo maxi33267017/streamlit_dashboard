@@ -80,11 +80,9 @@ def _chrome_spacer() -> None:
     )
 
 
-@st.cache_resource(show_spinner=False)
-def _bootstrap_database():
-    """Crea tablas (históricas + cierres de ventas en registro)."""
+def _bootstrap_database() -> None:
+    """Crea tablas y migraciones ligeras (sin cache: debe correr en cada arranque de sesión)."""
     database.init_database()
-    return True
 
 
 def _df_editor_cierre_ventas(anio: int, mes: int) -> pd.DataFrame:
