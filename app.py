@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 from datetime import datetime
 
+import matplotlib.pyplot as plt
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -454,6 +455,7 @@ def _build_inicio_report_pdf_bytes(
         p_bar = os.path.join(td, "bar.png")
         p_stack = os.path.join(td, "stack.png")
         images_ok = True
+        image_engine = "plotly"
         try:
             trend_fact_fig.write_image(p_hist, width=1400, height=700, scale=2)
             detail_pie_fig.write_image(p_pie, width=1200, height=700, scale=2)
@@ -468,7 +470,59 @@ def _build_inicio_report_pdf_bytes(
                 detail_bar_fig.write_image(p_bar, width=1200, height=700, scale=2)
                 detail_stack_fig.write_image(p_stack, width=1400, height=700, scale=2)
             except Exception:
-                images_ok = False
+                # Fallback 2: generar gráficos estáticos con Matplotlib.
+                try:
+                    image_engine = "matplotlib"
+                    # Histórico facturación
+                    hist_df = trend_df.copy().reset_index(drop=True)
+                    plt.figure(figsize=(11, 4))
+                    plt.bar(hist_df["periodo"], hist_df["fact_total_usd"], color=_COL_YELLOW)
+                    plt.xticks(rotation=45, ha="right")
+                    plt.title("Facturación total - todos los meses")
+                    plt.tight_layout()
+                    plt.savefig(p_hist, dpi=180)
+                    plt.close()
+
+                    branches = sel["branches"].copy().reset_index(drop=True)
+                    # Pie por sucursal
+                    plt.figure(figsize=(7, 5))
+                    pie_colors = [_COL_GRAY, _COL_YELLOW, _COL_BLACK][: len(branches)]
+                    plt.pie(
+                        branches["fact_total_usd"],
+                        labels=branches["sucursal"],
+                        autopct="%1.1f%%",
+                        colors=pie_colors,
+                    )
+                    plt.title("Participación de facturación por sucursal")
+                    plt.tight_layout()
+                    plt.savefig(p_pie, dpi=180)
+                    plt.close()
+
+                    # Barras por sucursal
+                    plt.figure(figsize=(8, 5))
+                    plt.bar(branches["sucursal"], branches["fact_total_usd"], color=pie_colors)
+                    plt.title("Comparación de facturación por sucursal")
+                    plt.tight_layout()
+                    plt.savefig(p_bar, dpi=180)
+                    plt.close()
+
+                    # Apilado canal
+                    x = range(len(branches))
+                    plt.figure(figsize=(10, 5))
+                    mos = branches["fact_mostrador_usd"]
+                    tal = branches["fact_taller_usd"]
+                    ser = branches["fact_servicios_usd"]
+                    plt.bar(x, mos, color=_COL_GRAY, label="Mostrador")
+                    plt.bar(x, tal, bottom=mos, color=_COL_ORANGE_MUTED, label="Taller")
+                    plt.bar(x, ser, bottom=mos + tal, color=_COL_YELLOW, label="Servicios")
+                    plt.xticks(list(x), branches["sucursal"])
+                    plt.title("Facturación desagregada por canal")
+                    plt.legend()
+                    plt.tight_layout()
+                    plt.savefig(p_stack, dpi=180)
+                    plt.close()
+                except Exception:
+                    images_ok = False
 
         pdf = FPDF(orientation="P", unit="mm", format="A4")
         pdf.set_auto_page_break(auto=True, margin=12)
@@ -517,6 +571,10 @@ def _build_inicio_report_pdf_bytes(
             pdf.image(p_bar, x=10, w=190)
             pdf.ln(2)
             pdf.image(p_stack, x=10, w=190)
+            if image_engine == "matplotlib":
+                pdf.ln(2)
+                pdf.set_font("Arial", "I", 9)
+                pdf.cell(0, 5, "Nota: gráficos renderizados con fallback Matplotlib.", ln=True)
         else:
             branches = sel["branches"].copy()
             pdf.cell(0, 6, "Detalle por sucursal:", ln=True)
