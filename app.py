@@ -37,9 +37,134 @@ COLS_VENTAS_EDIT = [
     "desc_taller",
     "util_pct_mostrador",
     "util_pct_taller",
-    "util_pct_servicios",
     "fact_servicios",
 ]
+
+# Formato tipo printf (sprintf.js) para NumberColumn — 2 decimales
+_FMT_ARS = "$ %,.2f"
+_FMT_USD = "US$ %,.2f"
+_FMT_PCT = "%.2f %%"
+
+_PREVIEW_MONEY_COLS = (
+    "fact_rep_mostrador",
+    "fact_rep_taller",
+    "desc_mostrador",
+    "desc_taller",
+    "fact_servicios",
+    "total_repuestos",
+    "total_bruto",
+    "margen_contrib",
+    "resultado",
+)
+_PREVIEW_UTIL_FRAC_COLS = ("util_pct_mostrador", "util_pct_taller", "util_prom_pct")
+
+_PREVIEW_LABELS: dict[str, str] = {
+    "fact_rep_mostrador": "Fact. rep. mostrador",
+    "fact_rep_taller": "Fact. rep. taller",
+    "desc_mostrador": "Desc. mostrador",
+    "desc_taller": "Desc. taller",
+    "fact_servicios": "Fact. servicios",
+    "total_repuestos": "Total repuestos",
+    "total_bruto": "Total bruto",
+    "margen_contrib": "Margen contribución",
+    "resultado": "Resultado",
+}
+
+_PREVIEW_UTIL_LABELS: dict[str, str] = {
+    "util_pct_mostrador": "Util. % rep. mostrador",
+    "util_pct_taller": "Util. % rep. taller",
+    "util_prom_pct": "Util. % rep. promedio",
+}
+
+
+def _column_config_cierre_editor() -> dict:
+    return {
+        "sucursal": st.column_config.TextColumn("Sucursal", disabled=True, width="small"),
+        "fact_rep_mostrador": st.column_config.NumberColumn(
+            "Fact. rep. Mostrador (ARS)", format=_FMT_ARS, min_value=0.0, step=0.01
+        ),
+        "fact_rep_taller": st.column_config.NumberColumn(
+            "Fact. rep. Taller (ARS)", format=_FMT_ARS, min_value=0.0, step=0.01
+        ),
+        "desc_mostrador": st.column_config.NumberColumn(
+            "Desc. Mostrador (ARS)", format=_FMT_ARS, min_value=0.0, step=0.01
+        ),
+        "desc_taller": st.column_config.NumberColumn(
+            "Desc. Taller (ARS)", format=_FMT_ARS, min_value=0.0, step=0.01
+        ),
+        "util_pct_mostrador": st.column_config.NumberColumn(
+            "Util. venta % rep. Mostrador",
+            format=_FMT_PCT,
+            min_value=0.0,
+            max_value=100.0,
+            step=0.01,
+        ),
+        "util_pct_taller": st.column_config.NumberColumn(
+            "Util. venta % rep. Taller",
+            format=_FMT_PCT,
+            min_value=0.0,
+            max_value=100.0,
+            step=0.01,
+        ),
+        "fact_servicios": st.column_config.NumberColumn(
+            "Fact. servicios (ARS)", format=_FMT_ARS, min_value=0.0, step=0.01
+        ),
+    }
+
+
+def _prepare_preview_display(show: pd.DataFrame, *, ver_usd: bool, tc: float) -> tuple[pd.DataFrame, dict]:
+    """Escala utilidades a 0–100 para el %; opcionalmente convierte montos a USD; arma column_config."""
+    disp = show.copy()
+    tc_ok = float(tc) > 0
+    use_usd_display = bool(ver_usd and tc_ok)
+    money_fmt = _FMT_USD if use_usd_display else _FMT_ARS
+
+    for c in _PREVIEW_MONEY_COLS:
+        if c not in disp.columns:
+            continue
+        disp[c] = pd.to_numeric(disp[c], errors="coerce")
+        if use_usd_display:
+            disp[c] = disp[c] / float(tc)
+
+    for c in _PREVIEW_UTIL_FRAC_COLS:
+        if c not in disp.columns:
+            continue
+        disp[c] = pd.to_numeric(disp[c], errors="coerce") * 100.0
+
+    cfg: dict = {}
+    for c in disp.columns:
+        if c == "sucursal":
+            cfg[c] = st.column_config.TextColumn("Sucursal", width="small")
+        elif c in _PREVIEW_MONEY_COLS:
+            unit = "USD" if use_usd_display else "ARS"
+            lab = _PREVIEW_LABELS.get(c, c)
+            cfg[c] = st.column_config.NumberColumn(f"{lab} ({unit})", format=money_fmt, step=0.01)
+        elif c in _PREVIEW_UTIL_FRAC_COLS:
+            lab = _PREVIEW_UTIL_LABELS.get(c, c)
+            cfg[c] = st.column_config.NumberColumn(lab, format=_FMT_PCT, step=0.01)
+        elif pd.api.types.is_numeric_dtype(disp[c]):
+            cfg[c] = st.column_config.NumberColumn(c, format="%.2f", step=0.01)
+
+    for c in disp.columns:
+        if c != "sucursal" and pd.api.types.is_numeric_dtype(disp[c]):
+            disp[c] = disp[c].round(2)
+
+    return disp, cfg
+
+
+def _column_config_hist_cierres(df: pd.DataFrame) -> dict:
+    cfg: dict = {}
+    if "id" in df.columns:
+        cfg["id"] = st.column_config.NumberColumn("Id", format="%d", step=1)
+    if "anio" in df.columns:
+        cfg["anio"] = st.column_config.NumberColumn("Año", format="%d", step=1)
+    if "mes" in df.columns:
+        cfg["mes"] = st.column_config.NumberColumn("Mes", format="%d", step=1)
+    if "tipo_cambio_ars_usd" in df.columns:
+        cfg["tipo_cambio_ars_usd"] = st.column_config.NumberColumn(
+            "TC (ARS por USD)", format="%.2f", step=0.01
+        )
+    return cfg
 
 
 def _app_password() -> str:
@@ -106,7 +231,6 @@ def _df_editor_cierre_ventas(anio: int, mes: int) -> pd.DataFrame:
                     "desc_taller": float(r.get("desc_taller") or 0),
                     "util_pct_mostrador": float(r.get("util_pct_mostrador") or 0) * 100.0,
                     "util_pct_taller": float(r.get("util_pct_taller") or 0) * 100.0,
-                    "util_pct_servicios": float(r.get("util_pct_servicios") or 0) * 100.0,
                     "fact_servicios": float(r.get("fact_servicios") or 0),
                 }
             )
@@ -124,7 +248,7 @@ def _row_to_db_dict(s: pd.Series) -> dict:
         "desc_taller": float(s["desc_taller"] or 0),
         "util_pct_mostrador": float(s["util_pct_mostrador"] or 0) / 100.0,
         "util_pct_taller": float(s["util_pct_taller"] or 0) / 100.0,
-        "util_pct_servicios": float(s["util_pct_servicios"] or 0) / 100.0,
+        "util_pct_servicios": 0.0,
         "fact_servicios": float(s["fact_servicios"] or 0),
     }
 
@@ -145,18 +269,6 @@ def _util_ponderado(df: pd.DataFrame, canal: str) -> float | None:
     return (num / den) if den > 0 else None
 
 
-def _util_ponderado_servicios(df: pd.DataFrame) -> float | None:
-    """Utilidad % servicios en fracción, ponderada por facturación de servicios."""
-    num = 0.0
-    den = 0.0
-    for _, r in df.iterrows():
-        fs = max(float(r.get("fact_servicios") or 0), 0.0)
-        u = (float(r.get("util_pct_servicios") or 0) / 100.0) if pd.notna(r.get("util_pct_servicios")) else 0.0
-        den += fs
-        num += u * fs
-    return (num / den) if den > 0 else None
-
-
 def _fila_concesionario(df_edit: pd.DataFrame) -> dict:
     sfm = float(df_edit["fact_rep_mostrador"].sum())
     sft = float(df_edit["fact_rep_taller"].sum())
@@ -165,13 +277,10 @@ def _fila_concesionario(df_edit: pd.DataFrame) -> dict:
     sfs = float(df_edit["fact_servicios"].sum())
     um = _util_ponderado(df_edit, "mos")
     ut = _util_ponderado(df_edit, "tal")
-    us = _util_ponderado_servicios(df_edit)
     if um is None:
         um = 0.0
     if ut is None:
         ut = 0.0
-    if us is None:
-        us = 0.0
     calc = database.compute_cierre_venta_linea(sfm, sft, sdm, sdt, um, ut, sfs)
     return {
         "sucursal": "CONCESIONARIO",
@@ -181,7 +290,6 @@ def _fila_concesionario(df_edit: pd.DataFrame) -> dict:
         "desc_taller": sdt,
         "util_pct_mostrador": um,
         "util_pct_taller": ut,
-        "util_pct_servicios": us,
         "fact_servicios": sfs,
         **calc,
     }
@@ -257,17 +365,7 @@ def _render_registro_ventas() -> None:
         df_base,
         key=f"cv_editor_{anio}_{mes}",
         hide_index=True,
-        column_config={
-            "sucursal": st.column_config.TextColumn("Sucursal", disabled=True, width="small"),
-            "fact_rep_mostrador": st.column_config.NumberColumn("Fact. rep. Mostrador (ARS)", format="%.2f"),
-            "fact_rep_taller": st.column_config.NumberColumn("Fact. rep. Taller (ARS)", format="%.2f"),
-            "desc_mostrador": st.column_config.NumberColumn("Desc. Mostrador (ARS)", format="%.2f"),
-            "desc_taller": st.column_config.NumberColumn("Desc. Taller (ARS)", format="%.2f"),
-            "util_pct_mostrador": st.column_config.NumberColumn("Util. venta % rep. Mostrador", format="%.2f", min_value=0.0, max_value=100.0),
-            "util_pct_taller": st.column_config.NumberColumn("Util. venta % rep. Taller", format="%.2f", min_value=0.0, max_value=100.0),
-            "util_pct_servicios": st.column_config.NumberColumn("Util. venta % servicios", format="%.2f", min_value=0.0, max_value=100.0),
-            "fact_servicios": st.column_config.NumberColumn("Fact. servicios (ARS)", format="%.2f"),
-        },
+        column_config=_column_config_cierre_editor(),
     )
 
     st.markdown("### Gastos del mes (globales, USD)")
@@ -307,8 +405,8 @@ def _render_registro_ventas() -> None:
 
     um_c = _util_ponderado(edited, "mos")
     ut_c = _util_ponderado(edited, "tal")
-    us_c = _util_ponderado_servicios(edited)
     otros_ars = float(gastos_otros_usd) * tc_val
+    # Sin % utilidad de servicios en la grilla: CMV de servicios = 0 salvo «otros» con rubro Servicios.
     gv = database.compute_gastos_variables_globales(
         fact_rep_mos_conc=float(edited["fact_rep_mostrador"].sum()),
         desc_rep_mos_conc=float(edited["desc_mostrador"].sum()),
@@ -317,7 +415,7 @@ def _render_registro_ventas() -> None:
         fact_serv_conc=float(edited["fact_servicios"].sum()),
         util_mos_conc=um_c,
         util_tal_conc=ut_c,
-        util_serv_conc=us_c,
+        util_serv_conc=1.0,
         gastos_fijos_global=0.0,
         gastos_var_otros=otros_ars,
         gastos_var_otros_rubro=rubro_db,
@@ -327,24 +425,27 @@ def _render_registro_ventas() -> None:
     gv_rep_usd = float(gv["gv_repuestos_ajustado"]) / tc_val
     gv_mos_usd = float(gv["gv_rep_mostrador"]) / tc_val
     gv_tal_usd = float(gv["gv_rep_taller"]) / tc_val
-    gastos_total_usd = float(gastos_fijos_usd) + gv_serv_usd + gv_rep_usd
+    gastos_var_total_usd = gv_serv_usd + gv_rep_usd
+    gastos_total_usd = float(gastos_fijos_usd) + gastos_var_total_usd
 
     st.markdown("**Gastos calculados (Concesionario → USD, con el TC de arriba)**")
     df_gastos_calc = pd.DataFrame(
         {
             "Concepto": [
-                "Ítem 2 — Variables servicios",
-                "Ítem 3 — Variables repuestos (total)",
-                "Desglose — CMV repuestos mostrador",
-                "Desglose — CMV repuestos taller",
-                "Ítem 5 — Total gastos (fijos + ítems 2 y 3)",
+                "Gastos variables repuestos mostrador",
+                "Gastos variables repuestos taller",
+                "Otros gastos variables",
+                "Total gastos variables",
+                "Gastos fijos",
+                "Total gastos",
             ],
             "Importe (USD)": [
-                f"US$ {gv_serv_usd:,.2f}",
-                f"US$ {gv_rep_usd:,.2f}",
-                f"US$ {gv_mos_usd:,.2f}",
-                f"US$ {gv_tal_usd:,.2f}",
-                f"US$ {gastos_total_usd:,.2f}",
+                round(gv_mos_usd, 2),
+                round(gv_tal_usd, 2),
+                round(float(gastos_otros_usd), 2),
+                round(gastos_var_total_usd, 2),
+                round(float(gastos_fijos_usd), 2),
+                round(gastos_total_usd, 2),
             ],
         }
     )
@@ -354,37 +455,29 @@ def _render_registro_ventas() -> None:
         use_container_width=True,
         column_config={
             "Concepto": st.column_config.TextColumn("Concepto", width="large"),
-            "Importe (USD)": st.column_config.TextColumn("Importe (USD)", width="medium"),
+            "Importe (USD)": st.column_config.NumberColumn("Importe (USD)", format=_FMT_USD, step=0.01),
         },
     )
     st.caption(
-        "Cálculo en ARS sobre la grilla; acá se muestra en USD (÷ TC). "
-        "Fijos y «otros» los cargás en USD; «otros» pasa a ARS solo para sumar al bucket. "
-        "El total incluye fijos + variables servicios + variables repuestos (con otros según rubro)."
+        "Mostrador y taller: CMV desde facturación neta de repuestos y % utilidad de la grilla. "
+        "«Otros» es el importe en USD que cargás; el rubro indica si entra en variables repuestos o en variables servicios al total. "
+        "Si hay «otros» y el rubro es «Ninguno», ese monto no entra al total de variables hasta que elijas rubro. "
+        "Total gastos = fijos + total variables."
     )
 
     ver_usd = st.checkbox("Vista previa en USD (usa el TC de arriba)", value=False)
     prev = _preview_tabla(edited)
     drop_show = [c for c in prev.columns if c in ("gastos_variables_tot", "gastos_total", "factor_absorcion")]
     prev_show = prev.drop(columns=drop_show, errors="ignore")
+    prev_show = prev_show.drop(columns=["util_pct_servicios"], errors="ignore")
     st.markdown("**Vista previa — ventas por sucursal y Concesionario**")
-    show = prev_show.copy()
-    if ver_usd and tc > 0:
-        money_cols = [
-            "fact_rep_mostrador",
-            "fact_rep_taller",
-            "desc_mostrador",
-            "desc_taller",
-            "fact_servicios",
-            "total_repuestos",
-            "total_bruto",
-            "margen_contrib",
-            "resultado",
-        ]
-        for col in money_cols:
-            if col in show.columns:
-                show[col] = show[col].astype(float) / tc
-    st.dataframe(show.round(4), use_container_width=True, hide_index=True)
+    show_disp, prev_cfg = _prepare_preview_display(prev_show, ver_usd=ver_usd, tc=float(tc))
+    st.dataframe(
+        show_disp,
+        use_container_width=True,
+        hide_index=True,
+        column_config=prev_cfg,
+    )
 
     b1, b2 = st.columns(2)
     with b1:
@@ -409,7 +502,12 @@ def _render_registro_ventas() -> None:
         hist = database.list_cierres_ventas_mes(12)
         if len(hist):
             st.caption("Últimos cierres guardados")
-            st.dataframe(hist, hide_index=True, use_container_width=True)
+            st.dataframe(
+                hist,
+                hide_index=True,
+                use_container_width=True,
+                column_config=_column_config_hist_cierres(hist),
+            )
 
 
 def _render_registro() -> None:
