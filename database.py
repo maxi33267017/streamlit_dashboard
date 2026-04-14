@@ -264,7 +264,7 @@ APP_REGISTROS_TABLE_PG = """
     )
 """
 
-# Cierres mensuales de ventas (Registro → Ventas). Concesionario se calcula en UI sumando sucursales.
+# Cierres mensuales de ventas (Registro). Concesionario en UI. gastos_*_global / otros en USD.
 CIERRE_VENTAS_MES_SQLITE = """
     CREATE TABLE IF NOT EXISTS cierre_ventas_mes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -802,7 +802,9 @@ def compute_gastos_variables_globales(
     Gastos variables globales del mes (Concesionario).
     CMV rep. mostrador / taller: (neto fact − desc) × (1 − utilidad canal).
     Servicios: fact. servicios × (1 − utilidad servicios ponderada).
-    ``util_*`` en fracción 0–1. ``gastos_var_otros`` se suma al bucket según rubro.
+    ``util_*`` en fracción 0–1.
+    ``gastos_var_otros`` debe expresarse en **ARS** (p. ej. USD × TC) para sumarse a buckets en ARS.
+    ``gastos_fijos_global`` en ARS; la UI puede pasar 0 y sumar fijos en USD aparte.
     """
     um = float(util_mos_conc) if util_mos_conc is not None else 0.0
     ut = float(util_tal_conc) if util_tal_conc is not None else 0.0

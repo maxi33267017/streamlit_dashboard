@@ -244,14 +244,14 @@ def _render_registro_ventas() -> None:
             min_value=0.0001,
             value=default_tc,
             format="%.4f",
-            help="Los importes se guardan en pesos; en la vista previa podés verlos en USD dividiendo por este valor.",
+            help="La grilla de ventas está en ARS. Este TC convierte a USD los gastos variables calculados a partir de esas ventas.",
             key=f"cv_tc_{int(anio)}_{int(mes)}",
         )
 
     df_base = _df_editor_cierre_ventas(int(anio), int(mes))
     st.caption(
-        "Solo sucursales reales en la grilla. **Concesionario** suma facturación y pondera utilidades. "
-        "Los gastos son **globales del mes** (abajo)."
+        "Grilla en **ARS**. **Concesionario** suma facturación y pondera utilidades. "
+        "Los gastos globales del mes (abajo) se cargan y muestran en **USD**; los calculados pasan de ARS a USD con el TC."
     )
     edited = st.data_editor(
         df_base,
@@ -270,23 +270,25 @@ def _render_registro_ventas() -> None:
         },
     )
 
-    st.markdown("### Gastos del mes (globales)")
+    st.markdown("### Gastos del mes (globales, USD)")
     gf_def = float(cierre.get("gastos_fijos_global") or 0) if cierre else 0.0
     go_def = float(cierre.get("gastos_var_otros") or 0) if cierre else 0.0
     rub_def = _rubro_db_a_select(cierre.get("gastos_var_otros_rubro") if cierre else None)
 
+    tc_val = max(float(tc), 1e-9)
+
     g1, g2, g3 = st.columns(3)
     with g1:
-        gastos_fijos = st.number_input(
-            "1. Gastos fijos (ARS)",
+        gastos_fijos_usd = st.number_input(
+            "1. Gastos fijos (USD)",
             min_value=0.0,
             value=gf_def,
             format="%.2f",
             key=f"cv_gf_{int(anio)}_{int(mes)}",
         )
     with g2:
-        gastos_otros = st.number_input(
-            "4. Otros gastos variables (ARS)",
+        gastos_otros_usd = st.number_input(
+            "4. Otros gastos variables (USD)",
             min_value=0.0,
             value=go_def,
             format="%.2f",
@@ -306,6 +308,7 @@ def _render_registro_ventas() -> None:
     um_c = _util_ponderado(edited, "mos")
     ut_c = _util_ponderado(edited, "tal")
     us_c = _util_ponderado_servicios(edited)
+    otros_ars = float(gastos_otros_usd) * tc_val
     gv = database.compute_gastos_variables_globales(
         fact_rep_mos_conc=float(edited["fact_rep_mostrador"].sum()),
         desc_rep_mos_conc=float(edited["desc_mostrador"].sum()),
@@ -315,23 +318,28 @@ def _render_registro_ventas() -> None:
         util_mos_conc=um_c,
         util_tal_conc=ut_c,
         util_serv_conc=us_c,
-        gastos_fijos_global=gastos_fijos,
-        gastos_var_otros=gastos_otros,
+        gastos_fijos_global=0.0,
+        gastos_var_otros=otros_ars,
         gastos_var_otros_rubro=rubro_db,
     )
 
-    st.markdown("**Cálculo (Concesionario)**")
+    gv_serv_usd = float(gv["gv_servicios_ajustado"]) / tc_val
+    gv_rep_usd = float(gv["gv_repuestos_ajustado"]) / tc_val
+    gv_mos_usd = float(gv["gv_rep_mostrador"]) / tc_val
+    gv_tal_usd = float(gv["gv_rep_taller"]) / tc_val
+    gastos_total_usd = float(gastos_fijos_usd) + gv_serv_usd + gv_rep_usd
+
+    st.markdown("**Cálculo (Concesionario → USD con el TC)**")
     c2a, c2b, c2c, c2d, c2e = st.columns(5)
-    c2a.metric("2. Var. servicios (ARS)", f"$ {gv['gv_servicios_ajustado']:,.2f}")
-    c2b.metric("3. Var. repuestos (ARS)", f"$ {gv['gv_repuestos_ajustado']:,.2f}")
-    c2c.metric("… rep. mostrador (CMV)", f"$ {gv['gv_rep_mostrador']:,.2f}")
-    c2d.metric("… rep. taller (CMV)", f"$ {gv['gv_rep_taller']:,.2f}")
-    c2e.metric("5. Gasto total (ARS)", f"$ {gv['gastos_total']:,.2f}")
+    c2a.metric("2. Var. servicios (USD)", f"US$ {gv_serv_usd:,.2f}")
+    c2b.metric("3. Var. repuestos (USD)", f"US$ {gv_rep_usd:,.2f}")
+    c2c.metric("… rep. mostrador (CMV)", f"US$ {gv_mos_usd:,.2f}")
+    c2d.metric("… rep. taller (CMV)", f"US$ {gv_tal_usd:,.2f}")
+    c2e.metric("5. Gasto total (USD)", f"US$ {gastos_total_usd:,.2f}")
     st.caption(
-        "Fórmulas: CMV mostrador = neto mostrador × (1 − util. Concesionario mostrador); "
-        "CMV taller = neto taller × (1 − util. Concesionario taller); "
-        "variables servicios = fact. servicios × (1 − util. servicios ponderada). "
-        "Los «otros» se suman al bucket elegido."
+        "En ARS: CMV mostrador/taller y variables servicios; luego ÷ TC. "
+        "Fijos y «otros» los cargás en USD (los «otros» se convierten a ARS solo para sumar al bucket correcto). "
+        "Total USD = fijos + variables servicios + variables repuestos (incluye otros según rubro)."
     )
 
     ver_usd = st.checkbox("Vista previa en USD (usa el TC de arriba)", value=False)
@@ -366,8 +374,8 @@ def _render_registro_ventas() -> None:
                     int(mes),
                     float(tc),
                     notas=None,
-                    gastos_fijos_global=float(gastos_fijos),
-                    gastos_var_otros=float(gastos_otros),
+                    gastos_fijos_global=float(gastos_fijos_usd),
+                    gastos_var_otros=float(gastos_otros_usd),
                     gastos_var_otros_rubro=rubro_db,
                 )
                 filas = [_row_to_db_dict(edited.loc[i]) for i in range(len(edited))]
