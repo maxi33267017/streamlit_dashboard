@@ -1,6 +1,7 @@
 """GOPV — login, registro y navbar."""
 
 import os
+import subprocess
 import tempfile
 from datetime import datetime
 
@@ -452,10 +453,24 @@ def _build_inicio_report_pdf_bytes(
         p_pie = os.path.join(td, "pie.png")
         p_bar = os.path.join(td, "bar.png")
         p_stack = os.path.join(td, "stack.png")
-        trend_fact_fig.write_image(p_hist, width=1400, height=700, scale=2)
-        detail_pie_fig.write_image(p_pie, width=1200, height=700, scale=2)
-        detail_bar_fig.write_image(p_bar, width=1200, height=700, scale=2)
-        detail_stack_fig.write_image(p_stack, width=1400, height=700, scale=2)
+        try:
+            trend_fact_fig.write_image(p_hist, width=1400, height=700, scale=2)
+            detail_pie_fig.write_image(p_pie, width=1200, height=700, scale=2)
+            detail_bar_fig.write_image(p_bar, width=1200, height=700, scale=2)
+            detail_stack_fig.write_image(p_stack, width=1400, height=700, scale=2)
+        except Exception as first_exc:
+            # Intento de autocorrección para entornos sin Chrome instalado.
+            try:
+                subprocess.run(["plotly_get_chrome", "-y"], check=True, capture_output=True, text=True)
+                trend_fact_fig.write_image(p_hist, width=1400, height=700, scale=2)
+                detail_pie_fig.write_image(p_pie, width=1200, height=700, scale=2)
+                detail_bar_fig.write_image(p_bar, width=1200, height=700, scale=2)
+                detail_stack_fig.write_image(p_stack, width=1400, height=700, scale=2)
+            except Exception as second_exc:
+                raise RuntimeError(
+                    "No se pudo exportar imágenes para el PDF. "
+                    "Instalá Chrome para Kaleido ejecutando 'plotly_get_chrome -y' en el entorno donde corre la app."
+                ) from second_exc
 
         pdf = FPDF(orientation="P", unit="mm", format="A4")
         pdf.set_auto_page_break(auto=True, margin=12)
