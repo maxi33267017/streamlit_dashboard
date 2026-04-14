@@ -453,12 +453,13 @@ def _build_inicio_report_pdf_bytes(
         p_pie = os.path.join(td, "pie.png")
         p_bar = os.path.join(td, "bar.png")
         p_stack = os.path.join(td, "stack.png")
+        images_ok = True
         try:
             trend_fact_fig.write_image(p_hist, width=1400, height=700, scale=2)
             detail_pie_fig.write_image(p_pie, width=1200, height=700, scale=2)
             detail_bar_fig.write_image(p_bar, width=1200, height=700, scale=2)
             detail_stack_fig.write_image(p_stack, width=1400, height=700, scale=2)
-        except Exception as first_exc:
+        except Exception:
             # Intento de autocorrección para entornos sin Chrome instalado.
             try:
                 subprocess.run(["plotly_get_chrome", "-y"], check=True, capture_output=True, text=True)
@@ -466,11 +467,8 @@ def _build_inicio_report_pdf_bytes(
                 detail_pie_fig.write_image(p_pie, width=1200, height=700, scale=2)
                 detail_bar_fig.write_image(p_bar, width=1200, height=700, scale=2)
                 detail_stack_fig.write_image(p_stack, width=1400, height=700, scale=2)
-            except Exception as second_exc:
-                raise RuntimeError(
-                    "No se pudo exportar imágenes para el PDF. "
-                    "Instalá Chrome para Kaleido ejecutando 'plotly_get_chrome -y' en el entorno donde corre la app."
-                ) from second_exc
+            except Exception:
+                images_ok = False
 
         pdf = FPDF(orientation="P", unit="mm", format="A4")
         pdf.set_auto_page_break(auto=True, margin=12)
@@ -487,7 +485,15 @@ def _build_inicio_report_pdf_bytes(
         pdf.cell(0, 6, f"Facturacion acumulada: {_fmt_usd(float(trend_df['fact_total_usd'].sum()))}", ln=True)
         pdf.cell(0, 6, f"Promedio mensual facturacion: {_fmt_usd(float(trend_df['fact_total_usd'].mean()))}", ln=True)
         pdf.ln(2)
-        pdf.image(p_hist, x=10, w=190)
+        if images_ok:
+            pdf.image(p_hist, x=10, w=190)
+        else:
+            pdf.multi_cell(
+                0,
+                6,
+                "Nota: no se pudieron exportar los graficos en este entorno (dependencias de Chrome/Kaleido). "
+                "El informe se genera en modo texto con todos los KPIs y comparativos.",
+            )
 
         pdf.add_page()
         pdf.set_font("Arial", "B", 12)
@@ -505,11 +511,23 @@ def _build_inicio_report_pdf_bytes(
         for line in lines:
             pdf.cell(0, 6, line, ln=True)
         pdf.ln(2)
-        pdf.image(p_pie, x=10, w=190)
-        pdf.ln(2)
-        pdf.image(p_bar, x=10, w=190)
-        pdf.ln(2)
-        pdf.image(p_stack, x=10, w=190)
+        if images_ok:
+            pdf.image(p_pie, x=10, w=190)
+            pdf.ln(2)
+            pdf.image(p_bar, x=10, w=190)
+            pdf.ln(2)
+            pdf.image(p_stack, x=10, w=190)
+        else:
+            branches = sel["branches"].copy()
+            pdf.cell(0, 6, "Detalle por sucursal:", ln=True)
+            for _, b in branches.iterrows():
+                pdf.cell(
+                    0,
+                    6,
+                    f"{b['sucursal']}: Fact {_fmt_usd(b['fact_total_usd'])} | Mostrador {_fmt_usd(b['fact_mostrador_usd'])} | "
+                    f"Taller {_fmt_usd(b['fact_taller_usd'])} | Servicios {_fmt_usd(b['fact_servicios_usd'])}",
+                    ln=True,
+                )
 
         pdf.add_page()
         pdf.set_font("Arial", "B", 12)
