@@ -64,6 +64,8 @@ _PREVIEW_FRAC_PCT_COLS = (
 
 # Vista previa por sucursal: sin margen/resultado/factor (no se discriminan por sucursal).
 _PREVIEW_DROP_COLS = (
+    "gastos_variables_tot",
+    "gastos_total",
     "margen_contrib",
     "margen_contrib_pct",
     "resultado",
@@ -440,6 +442,19 @@ def _render_registro_ventas() -> None:
     gv_tal_usd = float(gv["gv_rep_taller"]) / tc_val
     gastos_var_total_usd = gv_serv_usd + gv_rep_usd
     gastos_total_usd = float(gastos_fijos_usd) + gastos_var_total_usd
+    fact_total_ars = (
+        float(edited["fact_rep_mostrador"].sum())
+        + float(edited["fact_rep_taller"].sum())
+        - float(edited["desc_mostrador"].sum())
+        - float(edited["desc_taller"].sum())
+        + float(edited["fact_servicios"].sum())
+    )
+    fact_total_usd = fact_total_ars / tc_val
+    margen_global_usd = fact_total_usd - gastos_var_total_usd
+    resultado_global_usd = margen_global_usd - float(gastos_fijos_usd)
+    factor_abs_global_pct = (
+        (fact_total_usd / float(gastos_fijos_usd)) * 100.0 if float(gastos_fijos_usd) > 0 else None
+    )
 
     st.markdown("**Gastos calculados (Concesionario → USD, con el TC de arriba)**")
     df_gastos_calc = pd.DataFrame(
@@ -476,6 +491,37 @@ def _render_registro_ventas() -> None:
         "«Otros» es el importe en USD que cargás; el rubro indica si entra en variables repuestos o en variables servicios al total. "
         "Si hay «otros» y el rubro es «Ninguno», ese monto no entra al total de variables hasta que elijas rubro. "
         "Total gastos = fijos + total variables."
+    )
+    st.markdown("**Indicadores globales (Concesionario)**")
+    df_global = pd.DataFrame(
+        {
+            "Indicador": [
+                "Facturación total",
+                "Margen de contribución",
+                "Factor de absorción",
+                "Resultado",
+            ],
+            "Valor": [
+                f"US$ {fact_total_usd:,.2f}",
+                f"US$ {margen_global_usd:,.2f}",
+                (f"{factor_abs_global_pct:,.2f} %" if factor_abs_global_pct is not None else "—"),
+                f"US$ {resultado_global_usd:,.2f}",
+            ],
+        }
+    )
+    st.dataframe(
+        df_global,
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "Indicador": st.column_config.TextColumn("Indicador", width="large"),
+            "Valor": st.column_config.TextColumn("Valor", width="medium"),
+        },
+    )
+    st.caption(
+        "Margen = facturación total − gastos variables. "
+        "Factor de absorción = facturación total / gastos fijos. "
+        "Resultado = margen − gastos fijos."
     )
 
     ver_usd = st.checkbox("Vista previa en USD (usa el TC de arriba)", value=False)
