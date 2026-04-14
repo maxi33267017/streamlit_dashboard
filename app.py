@@ -46,6 +46,12 @@ _FMT_ARS = "$ %,.2f"
 _FMT_USD = "US$ %,.2f"
 _FMT_PCT = "%.2f %%"
 
+# Paleta UI (compatible claro/oscuro): gris, amarillo, negro + naranja opaco.
+_COL_GRAY = "#7A7A7A"
+_COL_YELLOW = "#E0B100"
+_COL_BLACK = "#1A1A1A"
+_COL_ORANGE_MUTED = "#B56A3B"
+
 _PREVIEW_MONEY_COLS = (
     "fact_rep_mostrador",
     "fact_rep_taller",
@@ -554,6 +560,10 @@ def _render_inicio_dashboard() -> None:
             barmode="group",
             text_auto=".2f",
             title="Tendencia 12 meses — Punto de equilibrio vs Facturación",
+            color_discrete_map={
+                "Facturación total": _COL_YELLOW,
+                "Punto de equilibrio": _COL_GRAY,
+            },
         )
         fig_trend.update_layout(xaxis_title="", yaxis_title="")
         st.plotly_chart(fig_trend, use_container_width=True)
@@ -582,6 +592,7 @@ def _render_inicio_dashboard() -> None:
             text_auto=".2f",
             title=f"Tendencia 12 meses — {sel_metric}",
         )
+        fig_trend.update_traces(marker_color=_COL_YELLOW)
         fig_trend.update_layout(xaxis_title="", yaxis_title="")
         st.plotly_chart(fig_trend, use_container_width=True)
 
@@ -622,9 +633,9 @@ def _render_inicio_dashboard() -> None:
 
     df_suc = sel["branches"].copy()
     color_map = {
-        "RIO GRANDE": "#1f77b4",
-        "RIO GALLEGOS": "#ff7f0e",
-        "COMODORO": "#2ca02c",
+        "RIO GRANDE": _COL_GRAY,
+        "RIO GALLEGOS": _COL_YELLOW,
+        "COMODORO": _COL_BLACK,
     }
 
     c3, c4 = st.columns([1, 1])
@@ -670,6 +681,11 @@ def _render_inicio_dashboard() -> None:
         color="canal",
         barmode="stack",
         title="Facturación por sucursal desagregada (Mostrador + Taller + Servicios)",
+        color_discrete_map={
+            "Mostrador": _COL_GRAY,
+            "Taller": _COL_ORANGE_MUTED,
+            "Servicios": _COL_YELLOW,
+        },
     )
     fig_stack.update_layout(xaxis_title="", yaxis_title="")
     st.plotly_chart(fig_stack, use_container_width=True)
