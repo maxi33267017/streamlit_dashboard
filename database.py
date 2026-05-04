@@ -1167,7 +1167,14 @@ def replace_lineas_cierre_ventas(cierre_id: int, filas: list[dict]) -> None:
             (cierre_id,),
         )
         row_tc = cursor.fetchone()
-        tc_hdr = max(float(row_tc[0] or 1200.0), 1e-9) if row_tc and row_tc[0] is not None else 1200.0
+        if not row_tc:
+            tc_hdr = 1200.0
+        else:
+            try:
+                raw_tc = row_tc["tipo_cambio_ars_usd"]
+            except (KeyError, TypeError):
+                raw_tc = row_tc[0]
+            tc_hdr = max(float(raw_tc or 1200.0), 1e-9)
         _execute(cursor, "DELETE FROM cierre_ventas_linea WHERE cierre_id = ?", (cierre_id,))
         for row in filas:
             calc = compute_cierre_venta_linea(
