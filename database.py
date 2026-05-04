@@ -279,6 +279,7 @@ CIERRE_VENTAS_MES_SQLITE = """
         resultado_cero_ventas_pct REAL NOT NULL DEFAULT 0,
         fill_rate_pct REAL,
         rotacion_inventario REAL,
+        gastos_var_maquinarias_usd REAL NOT NULL DEFAULT 0,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         UNIQUE (anio, mes)
@@ -299,6 +300,7 @@ CIERRE_VENTAS_MES_PG = """
         resultado_cero_ventas_pct DOUBLE PRECISION NOT NULL DEFAULT 0,
         fill_rate_pct DOUBLE PRECISION,
         rotacion_inventario DOUBLE PRECISION,
+        gastos_var_maquinarias_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
         created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
         UNIQUE (anio, mes)
@@ -318,7 +320,10 @@ CIERRE_VENTAS_LINEA_SQLITE = """
         util_pct_taller REAL,
         util_pct_servicios REAL,
         fact_servicios REAL NOT NULL DEFAULT 0,
+        fact_maquinarias REAL NOT NULL DEFAULT 0,
+        fact_alquileres REAL NOT NULL DEFAULT 0,
         gastos_fijos REAL NOT NULL DEFAULT 0,
+        gastos_var_otros_usd REAL NOT NULL DEFAULT 0,
         gastos_var_s REAL NOT NULL DEFAULT 0,
         gastos_var_r REAL NOT NULL DEFAULT 0,
         total_repuestos REAL,
@@ -348,7 +353,10 @@ CIERRE_VENTAS_LINEA_PG = """
         util_pct_taller DOUBLE PRECISION,
         util_pct_servicios DOUBLE PRECISION,
         fact_servicios DOUBLE PRECISION NOT NULL DEFAULT 0,
+        fact_maquinarias DOUBLE PRECISION NOT NULL DEFAULT 0,
+        fact_alquileres DOUBLE PRECISION NOT NULL DEFAULT 0,
         gastos_fijos DOUBLE PRECISION NOT NULL DEFAULT 0,
+        gastos_var_otros_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
         gastos_var_s DOUBLE PRECISION NOT NULL DEFAULT 0,
         gastos_var_r DOUBLE PRECISION NOT NULL DEFAULT 0,
         total_repuestos DOUBLE PRECISION,
@@ -636,7 +644,11 @@ def _ensure_cierre_ventas_schema_pg(cursor, conn) -> None:
         ("cierre_ventas_mes", "resultado_cero_ventas_pct", "DOUBLE PRECISION NOT NULL DEFAULT 0"),
         ("cierre_ventas_mes", "fill_rate_pct", "DOUBLE PRECISION"),
         ("cierre_ventas_mes", "rotacion_inventario", "DOUBLE PRECISION"),
+        ("cierre_ventas_mes", "gastos_var_maquinarias_usd", "DOUBLE PRECISION NOT NULL DEFAULT 0"),
         ("cierre_ventas_linea", "util_pct_servicios", "DOUBLE PRECISION"),
+        ("cierre_ventas_linea", "fact_maquinarias", "DOUBLE PRECISION NOT NULL DEFAULT 0"),
+        ("cierre_ventas_linea", "fact_alquileres", "DOUBLE PRECISION NOT NULL DEFAULT 0"),
+        ("cierre_ventas_linea", "gastos_var_otros_usd", "DOUBLE PRECISION NOT NULL DEFAULT 0"),
     ):
         if not _pg_cierre_has_column(cursor, table, col):
             _execute(cursor, f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
@@ -654,6 +666,10 @@ def _ensure_cierre_ventas_schema_sqlite(cursor, conn) -> None:
         "ALTER TABLE cierre_ventas_mes ADD COLUMN fill_rate_pct REAL",
         "ALTER TABLE cierre_ventas_mes ADD COLUMN rotacion_inventario REAL",
         "ALTER TABLE cierre_ventas_linea ADD COLUMN util_pct_servicios REAL",
+        "ALTER TABLE cierre_ventas_mes ADD COLUMN gastos_var_maquinarias_usd REAL NOT NULL DEFAULT 0",
+        "ALTER TABLE cierre_ventas_linea ADD COLUMN fact_maquinarias REAL NOT NULL DEFAULT 0",
+        "ALTER TABLE cierre_ventas_linea ADD COLUMN fact_alquileres REAL NOT NULL DEFAULT 0",
+        "ALTER TABLE cierre_ventas_linea ADD COLUMN gastos_var_otros_usd REAL NOT NULL DEFAULT 0",
     ):
         try:
             _execute(cursor, ddl)
@@ -767,12 +783,16 @@ def compute_cierre_venta_linea(
     util_pct_mostrador: float | None,
     util_pct_taller: float | None,
     fact_servicios: float,
+    *,
+    fact_maquinarias: float = 0.0,
+    fact_alquileres: float = 0.0,
 ) -> dict:
     """
     Por sucursal: ventas en ARS y CMV (gastos variables) por línea.
     ``util_pct_*`` en fracción (0.3346 = 33,46 %).
 
-    Facturación total = neto repuestos + fact. servicios.
+    Facturación total = neto repuestos + fact. servicios + maquinarias + alquileres.
+    Maquinarias y alquileres se tratan como servicios (sin CMV en grilla).
     Gastos variables = CMV mostrador + CMV taller + CMV servicios (sin % utilidad
     servicios en grilla → utilidad servicios 100 % ⇒ CMV servicios = 0).
     Margen contribución = facturación total − gastos variables.
@@ -785,6 +805,8 @@ def compute_cierre_venta_linea(
     um = float(util_pct_mostrador) if util_pct_mostrador is not None else 0.0
     ut = float(util_pct_taller) if util_pct_taller is not None else 0.0
     fs = float(fact_servicios or 0)
+    fmaq = max(float(fact_maquinarias or 0), 0.0)
+    falq = max(float(fact_alquileres or 0), 0.0)
 
     um = min(max(um, 0.0), 1.0)
     ut = min(max(ut, 0.0), 1.0)
@@ -796,12 +818,13 @@ def compute_cierre_venta_linea(
     else:
         util_prom = 0.0
 
-    total_bruto = neto_rep + fs
+    fs_y_afines = fs + fmaq + falq
+    total_bruto = neto_rep + fs_y_afines
 
     # Regla solicitada: variables repuestos desde utilidad promedio de repuestos.
     us = 1.0  # sin % utilidad servicios en grilla => CMV servicios 0
     gv_rep = max(neto_rep, 0.0) * (1.0 - util_prom)
-    gv_serv = fs * (1.0 - us)
+    gv_serv = fs_y_afines * (1.0 - us)
     gastos_variables_tot = gv_rep + gv_serv
     margen_contrib = total_bruto - gastos_variables_tot
 
@@ -839,6 +862,8 @@ def compute_gastos_variables_globales(
     gastos_fijos_global: float,
     gastos_var_otros: float,
     gastos_var_otros_rubro: str | None,
+    fact_maquinarias_conc: float = 0.0,
+    fact_alquileres_conc: float = 0.0,
 ) -> dict:
     """
     Gastos variables globales del mes (Concesionario).
@@ -857,7 +882,11 @@ def compute_gastos_variables_globales(
 
     net_mos = max(float(fact_rep_mos_conc or 0) - float(desc_rep_mos_conc or 0), 0.0)
     net_tal = max(float(fact_rep_tal_conc or 0) - float(desc_rep_tal_conc or 0), 0.0)
-    fs = max(float(fact_serv_conc or 0), 0.0)
+    fs = (
+        max(float(fact_serv_conc or 0), 0.0)
+        + max(float(fact_maquinarias_conc or 0), 0.0)
+        + max(float(fact_alquileres_conc or 0), 0.0)
+    )
 
     utils_no_cero = [u for u in (um, ut) if u > 0]
     util_rep_prom = (sum(utils_no_cero) / len(utils_no_cero)) if utils_no_cero else 0.0
@@ -959,6 +988,7 @@ def list_cierres_ventas_dashboard(limit: int = 60) -> pd.DataFrame:
                 gastos_fijos_global,
                 gastos_var_otros,
                 gastos_var_otros_rubro,
+                gastos_var_maquinarias_usd,
                 updated_at
             FROM cierre_ventas_mes
             ORDER BY anio DESC, mes DESC
@@ -981,6 +1011,7 @@ def upsert_cierre_ventas_mes_header(
     gastos_fijos_global: float = 0.0,
     gastos_var_otros: float = 0.0,
     gastos_var_otros_rubro: str | None = None,
+    gastos_var_maquinarias_usd: float = 0.0,
     inventario_usd: float = 0.0,
     resultado_cero_ventas_pct: float = 0.0,
     fill_rate_pct: float | None = None,
@@ -1000,6 +1031,7 @@ def upsert_cierre_ventas_mes_header(
                 UPDATE cierre_ventas_mes
                 SET tipo_cambio_ars_usd = ?, notas = ?,
                     gastos_fijos_global = ?, gastos_var_otros = ?, gastos_var_otros_rubro = ?,
+                    gastos_var_maquinarias_usd = ?,
                     inventario_usd = ?, resultado_cero_ventas_pct = ?,
                     fill_rate_pct = ?, rotacion_inventario = ?,
                     updated_at = CURRENT_TIMESTAMP
@@ -1011,6 +1043,7 @@ def upsert_cierre_ventas_mes_header(
                     gastos_fijos_global,
                     gastos_var_otros,
                     gastos_var_otros_rubro,
+                    gastos_var_maquinarias_usd,
                     inventario_usd,
                     resultado_cero_ventas_pct,
                     fill_rate_pct,
@@ -1026,9 +1059,10 @@ def upsert_cierre_ventas_mes_header(
                     INSERT INTO cierre_ventas_mes (
                         anio, mes, tipo_cambio_ars_usd, notas,
                         gastos_fijos_global, gastos_var_otros, gastos_var_otros_rubro,
+                        gastos_var_maquinarias_usd,
                         inventario_usd, resultado_cero_ventas_pct, fill_rate_pct, rotacion_inventario
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     RETURNING id
                     """,
                     (
@@ -1039,6 +1073,7 @@ def upsert_cierre_ventas_mes_header(
                         gastos_fijos_global,
                         gastos_var_otros,
                         gastos_var_otros_rubro,
+                        gastos_var_maquinarias_usd,
                         inventario_usd,
                         resultado_cero_ventas_pct,
                         fill_rate_pct,
@@ -1054,9 +1089,10 @@ def upsert_cierre_ventas_mes_header(
                     INSERT INTO cierre_ventas_mes (
                         anio, mes, tipo_cambio_ars_usd, notas,
                         gastos_fijos_global, gastos_var_otros, gastos_var_otros_rubro,
+                        gastos_var_maquinarias_usd,
                         inventario_usd, resultado_cero_ventas_pct, fill_rate_pct, rotacion_inventario
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         anio,
@@ -1066,6 +1102,7 @@ def upsert_cierre_ventas_mes_header(
                         gastos_fijos_global,
                         gastos_var_otros,
                         gastos_var_otros_rubro,
+                        gastos_var_maquinarias_usd,
                         inventario_usd,
                         resultado_cero_ventas_pct,
                         fill_rate_pct,
@@ -1111,6 +1148,8 @@ def replace_lineas_cierre_ventas(cierre_id: int, filas: list[dict]) -> None:
                 row.get("util_pct_mostrador"),
                 row.get("util_pct_taller"),
                 row["fact_servicios"],
+                fact_maquinarias=float(row.get("fact_maquinarias") or 0),
+                fact_alquileres=float(row.get("fact_alquileres") or 0),
             )
             _execute(
                 cursor,
@@ -1119,11 +1158,12 @@ def replace_lineas_cierre_ventas(cierre_id: int, filas: list[dict]) -> None:
                     cierre_id, sucursal,
                     fact_rep_mostrador, fact_rep_taller, desc_mostrador, desc_taller,
                     util_pct_mostrador, util_pct_taller, util_pct_servicios, fact_servicios,
-                    gastos_fijos, gastos_var_s, gastos_var_r,
+                    fact_maquinarias, fact_alquileres,
+                    gastos_fijos, gastos_var_otros_usd, gastos_var_s, gastos_var_r,
                     total_repuestos, util_prom_pct, total_bruto,
                     gastos_variables_tot, gastos_total, margen_contrib, margen_contrib_pct,
                     resultado, factor_absorcion
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     cierre_id,
@@ -1136,7 +1176,10 @@ def replace_lineas_cierre_ventas(cierre_id: int, filas: list[dict]) -> None:
                     row.get("util_pct_taller"),
                     row.get("util_pct_servicios"),
                     row["fact_servicios"],
-                    0.0,
+                    float(row.get("fact_maquinarias") or 0),
+                    float(row.get("fact_alquileres") or 0),
+                    float(row.get("gastos_fijos") or 0),
+                    float(row.get("gastos_var_otros_usd") or 0),
                     0.0,
                     0.0,
                     calc["total_repuestos"],
@@ -1176,7 +1219,9 @@ def recalculate_cierres_ventas_derivados() -> int:
                 desc_taller,
                 util_pct_mostrador,
                 util_pct_taller,
-                fact_servicios
+                fact_servicios,
+                fact_maquinarias,
+                fact_alquileres
             FROM cierre_ventas_linea
             """,
             conn,
@@ -1193,6 +1238,8 @@ def recalculate_cierres_ventas_derivados() -> int:
                 row.get("util_pct_mostrador"),
                 row.get("util_pct_taller"),
                 float(row.get("fact_servicios") or 0),
+                fact_maquinarias=float(row.get("fact_maquinarias") or 0),
+                fact_alquileres=float(row.get("fact_alquileres") or 0),
             )
             _execute(
                 cursor,
