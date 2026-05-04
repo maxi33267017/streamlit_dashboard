@@ -790,17 +790,19 @@ def compute_cierre_venta_linea(
     *,
     fact_maquinarias: float = 0.0,
     fact_alquileres: float = 0.0,
+    tipo_cambio_ars_usd: float | None = None,
 ) -> dict:
     """
-    Por sucursal: ventas en ARS y CMV (gastos variables) por línea.
+    Por sucursal: repuestos, descuentos y servicios en **ARS**; maquinarias y alquileres en **USD**
+    (misma moneda que en la grilla de registro).
+
+    ``tipo_cambio_ars_usd`` (ARS por USD) convierte maq./alq. a pesos solo para sumarlos con
+    servicios y calcular CMV en el mismo espacio que el resto del canal servicios/afines.
+
     ``util_pct_*`` en fracción (0.3346 = 33,46 %).
 
-    Facturación total = neto repuestos + fact. servicios + maquinarias + alquileres.
-    Maquinarias y alquileres se tratan como servicios (sin CMV en grilla).
-    Gastos variables = CMV mostrador + CMV taller + CMV servicios (sin % utilidad
-    servicios en grilla → utilidad servicios 100 % ⇒ CMV servicios = 0).
-    Margen contribución = facturación total − gastos variables.
-    Margen % = margen / facturación total (fracción 0–1; None si total ≤ 0).
+    Facturación total (ARS, para totales internos) = neto repuestos + servicios (ARS)
+    + maquinarias (USD×TC) + alquileres (USD×TC).
     """
     fm = float(fact_rep_mostrador or 0)
     ft = float(fact_rep_taller or 0)
@@ -809,8 +811,15 @@ def compute_cierre_venta_linea(
     um = float(util_pct_mostrador) if util_pct_mostrador is not None else 0.0
     ut = float(util_pct_taller) if util_pct_taller is not None else 0.0
     fs = float(fact_servicios or 0)
-    fmaq = max(float(fact_maquinarias or 0), 0.0)
-    falq = max(float(fact_alquileres or 0), 0.0)
+    fmaq_usd = max(float(fact_maquinarias or 0), 0.0)
+    falq_usd = max(float(fact_alquileres or 0), 0.0)
+    tc = max(float(tipo_cambio_ars_usd or 0.0), 1e-9) if tipo_cambio_ars_usd is not None else None
+    if tc is not None:
+        fmaq_ar = fmaq_usd * tc
+        falq_ar = falq_usd * tc
+    else:
+        # Compatibilidad: sin TC se asume que maq./alq. ya vienen en ARS (datos viejos).
+        fmaq_ar, falq_ar = fmaq_usd, falq_usd
 
     um = min(max(um, 0.0), 1.0)
     ut = min(max(ut, 0.0), 1.0)
@@ -822,7 +831,7 @@ def compute_cierre_venta_linea(
     else:
         util_prom = 0.0
 
-    fs_y_afines = fs + fmaq + falq
+    fs_y_afines = fs + fmaq_ar + falq_ar
     total_bruto = neto_rep + fs_y_afines
 
     # Regla solicitada: variables repuestos desde utilidad promedio de repuestos.
@@ -875,6 +884,8 @@ def compute_gastos_variables_globales(
     Servicios: fact. servicios × (1 − utilidad servicios ponderada).
     ``util_*`` en fracción 0–1.
     ``gastos_var_otros`` debe expresarse en **ARS** (p. ej. USD × TC) para sumarse a buckets en ARS.
+    ``fact_maquinarias_conc`` y ``fact_alquileres_conc`` deben ir en **ARS** (en la app: USD de grilla × TC)
+    para sumarse con ``fact_serv_conc`` en pesos.
     ``gastos_fijos_global`` en ARS; la UI puede pasar 0 y sumar fijos en USD aparte.
     """
     um = float(util_mos_conc) if util_mos_conc is not None else 0.0
@@ -1150,6 +1161,13 @@ def replace_lineas_cierre_ventas(cierre_id: int, filas: list[dict]) -> None:
     conn = get_connection()
     cursor = conn.cursor()
     try:
+        _execute(
+            cursor,
+            "SELECT tipo_cambio_ars_usd FROM cierre_ventas_mes WHERE id = ?",
+            (cierre_id,),
+        )
+        row_tc = cursor.fetchone()
+        tc_hdr = max(float(row_tc[0] or 1200.0), 1e-9) if row_tc and row_tc[0] is not None else 1200.0
         _execute(cursor, "DELETE FROM cierre_ventas_linea WHERE cierre_id = ?", (cierre_id,))
         for row in filas:
             calc = compute_cierre_venta_linea(
@@ -1162,6 +1180,7 @@ def replace_lineas_cierre_ventas(cierre_id: int, filas: list[dict]) -> None:
                 row["fact_servicios"],
                 fact_maquinarias=float(row.get("fact_maquinarias") or 0),
                 fact_alquileres=float(row.get("fact_alquileres") or 0),
+                tipo_cambio_ars_usd=tc_hdr,
             )
             _execute(
                 cursor,
@@ -1224,17 +1243,19 @@ def recalculate_cierres_ventas_derivados() -> int:
         df = _read_sql(
             """
             SELECT
-                id,
-                fact_rep_mostrador,
-                fact_rep_taller,
-                desc_mostrador,
-                desc_taller,
-                util_pct_mostrador,
-                util_pct_taller,
-                fact_servicios,
-                fact_maquinarias,
-                fact_alquileres
-            FROM cierre_ventas_linea
+                l.id,
+                l.fact_rep_mostrador,
+                l.fact_rep_taller,
+                l.desc_mostrador,
+                l.desc_taller,
+                l.util_pct_mostrador,
+                l.util_pct_taller,
+                l.fact_servicios,
+                l.fact_maquinarias,
+                l.fact_alquileres,
+                m.tipo_cambio_ars_usd AS tc_cierre
+            FROM cierre_ventas_linea l
+            JOIN cierre_ventas_mes m ON m.id = l.cierre_id
             """,
             conn,
         )
@@ -1242,6 +1263,7 @@ def recalculate_cierres_ventas_derivados() -> int:
             return 0
 
         for _, row in df.iterrows():
+            tc_row = max(float(row.get("tc_cierre") or 1200.0), 1e-9)
             calc = compute_cierre_venta_linea(
                 float(row.get("fact_rep_mostrador") or 0),
                 float(row.get("fact_rep_taller") or 0),
@@ -1252,6 +1274,7 @@ def recalculate_cierres_ventas_derivados() -> int:
                 float(row.get("fact_servicios") or 0),
                 fact_maquinarias=float(row.get("fact_maquinarias") or 0),
                 fact_alquileres=float(row.get("fact_alquileres") or 0),
+                tipo_cambio_ars_usd=tc_row,
             )
             _execute(
                 cursor,
