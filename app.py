@@ -1939,6 +1939,22 @@ def _render_inicio_dashboard() -> None:
     )
     fig_gastos_suc.update_layout(xaxis_title="", yaxis_title="")
     st.plotly_chart(fig_gastos_suc, use_container_width=True)
+    st.dataframe(
+        df_suc[["sucursal", "cmv_repuestos_usd"]].rename(
+            columns={
+                "sucursal": "Sucursal",
+                "cmv_repuestos_usd": "CMV repuestos (USD)",
+            }
+        ),
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "Sucursal": st.column_config.TextColumn("Sucursal", width="small"),
+            "CMV repuestos (USD)": st.column_config.NumberColumn(
+                "CMV repuestos (USD)", format=_FMT_USD, step=0.01
+            ),
+        },
+    )
 
     st.markdown("### Tablas — mes en foco (USD)")
     tc_sel = float(sel.get("tipo_cambio_ars_usd") or 1.0)
