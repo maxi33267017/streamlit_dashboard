@@ -859,6 +859,8 @@ def compute_cierre_venta_linea(
         "margen_contrib_pct": margen_contrib_pct,
         "resultado": resultado,
         "factor_absorcion": None,
+        "cmv_repuestos_ars": gv_rep,
+        "cmv_servicios_afines_ars": gv_serv,
     }
 
 
