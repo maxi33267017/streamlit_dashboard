@@ -1191,7 +1191,7 @@ def _build_inicio_report_pdf_bytes(
         pdf.ln(2)
         if images_ok:
             pdf.set_font("Arial", "B", 11)
-            pdf.cell(0, 6, "Graficos — global (participacion y mix por sucursal)", ln=True)
+            pdf.cell(0, 6, "Graficos - global (participacion y mix por sucursal)", ln=True)
             pdf.set_font("Arial", "", 9)
             pdf.cell(0, 5, "Postventa, maquinarias y alquileres se ven apilados por canal en el grafico inferior.", ln=True)
             pdf.ln(1)
