@@ -839,13 +839,18 @@ def _build_gemini_report_analysis(sel: dict, compare_df: pd.DataFrame) -> tuple[
             "1) resumen ejecutivo del mes,\n"
             "2) comparación vs últimos 3 meses,\n"
             "3) sucursales que crecen/caen,\n"
-            "4) mix mostrador vs taller+servicios,\n"
-            "5) riesgos,\n"
+            "4) mix de canales (mostrador, taller, servicios, maquinarias, alquileres),\n"
+            "5) riesgos (costos fijos por sucursal vs central, variables),\n"
             "6) 2 acciones concretas.\n\n"
             f"Mes: {MES_NOMBRES[int(sel['mes'])-1]} {int(sel['anio'])}\n"
-            f"Facturación total: {float(sel['fact_total_usd']):.2f}\n"
-            f"Gastos variables: {float(sel['gastos_variables_usd']):.2f}\n"
-            f"Gastos fijos: {float(sel['gastos_fijos_usd']):.2f}\n"
+            f"Facturación total (USD): {float(sel['fact_total_usd']):.2f}\n"
+            f"  - Repuestos neto: {float(sel.get('ventas_repuestos_neto_usd') or 0):.2f} | Servicios: {float(sel.get('ventas_servicios_usd') or 0):.2f} | "
+            f"Maq.: {float(sel.get('ventas_maquinarias_usd') or 0):.2f} | Alq.: {float(sel.get('ventas_alquileres_usd') or 0):.2f}\n"
+            f"Gastos variables total (USD): {float(sel['gastos_variables_usd']):.2f} "
+            f"(CMV mos/tal: {float(sel.get('cmv_rep_mostrador_usd') or 0):.2f} / {float(sel.get('cmv_rep_taller_usd') or 0):.2f}, "
+            f"otros cargados: {float(sel.get('gastos_var_otros_usd') or 0):.2f}, var. maq. gasto: {float(sel.get('gastos_var_maquinarias_usd') or 0):.2f})\n"
+            f"Gastos fijos total (USD): {float(sel['gastos_fijos_usd']):.2f} "
+            f"(sucursales: {float(sel.get('gastos_fijos_sucursales_usd') or 0):.2f}, concesionario: {float(sel.get('gastos_fijos_concesionario_usd') or 0):.2f})\n"
             f"Margen: {float(sel['margen_usd']):.2f} ({float(sel['margen_pct'] or 0):.2f}%)\n"
             f"Resultado: {float(sel['resultado_usd']):.2f}\n"
             f"Factor absorción: {float(sel['factor_abs_pct'] or 0):.2f}%\n"
@@ -877,6 +882,11 @@ def _build_comparison_last3(data: list[dict], sel: dict) -> pd.DataFrame:
     base_fact = float(prev_df["fact_total_usd"].mean())
     base_margen = float(prev_df["margen_usd"].mean())
     base_res = float(prev_df["resultado_usd"].mean())
+    base_gvar = float(prev_df["gastos_variables_usd"].mean()) if "gastos_variables_usd" in prev_df.columns else 0.0
+    base_gtot = float(prev_df["total_gastos_usd"].mean()) if "total_gastos_usd" in prev_df.columns else 0.0
+    base_maq_alq = (
+        float(prev_df["ventas_maq_alq_usd"].mean()) if "ventas_maq_alq_usd" in prev_df.columns else 0.0
+    )
 
     rows = [
         {
@@ -886,10 +896,30 @@ def _build_comparison_last3(data: list[dict], sel: dict) -> pd.DataFrame:
             "Dif. %": (_safe_ratio(float(sel["fact_total_usd"]) - base_fact, base_fact) or 0.0) * 100.0,
         },
         {
+            "Métrica": "Ventas maq. + alquileres",
+            "Mes seleccionado": float(sel.get("ventas_maq_alq_usd") or 0),
+            "Promedio 3 meses previos": base_maq_alq,
+            "Dif. %": (
+                (_safe_ratio(float(sel.get("ventas_maq_alq_usd") or 0) - base_maq_alq, base_maq_alq) or 0.0) * 100.0
+            ),
+        },
+        {
             "Métrica": "Margen contribución",
             "Mes seleccionado": float(sel["margen_usd"]),
             "Promedio 3 meses previos": base_margen,
             "Dif. %": (_safe_ratio(float(sel["margen_usd"]) - base_margen, base_margen) or 0.0) * 100.0,
+        },
+        {
+            "Métrica": "Gastos variables",
+            "Mes seleccionado": float(sel["gastos_variables_usd"]),
+            "Promedio 3 meses previos": base_gvar,
+            "Dif. %": (_safe_ratio(float(sel["gastos_variables_usd"]) - base_gvar, base_gvar) or 0.0) * 100.0,
+        },
+        {
+            "Métrica": "Total gastos",
+            "Mes seleccionado": float(sel["total_gastos_usd"]),
+            "Promedio 3 meses previos": base_gtot,
+            "Dif. %": (_safe_ratio(float(sel["total_gastos_usd"]) - base_gtot, base_gtot) or 0.0) * 100.0,
         },
         {
             "Métrica": "Resultado",
@@ -1035,8 +1065,13 @@ def _build_inicio_report_pdf_bytes(
         pdf.set_font("Arial", "", 10)
         lines = [
             f"Facturacion total: {_fmt_usd(sel['fact_total_usd'])}",
-            f"Gastos variables: {_fmt_usd(sel['gastos_variables_usd'])}",
-            f"Gastos fijos: {_fmt_usd(sel['gastos_fijos_usd'])}",
+            f"  Repuestos neto: {_fmt_usd(sel.get('ventas_repuestos_neto_usd'))} | Servicios: {_fmt_usd(sel.get('ventas_servicios_usd'))}",
+            f"  Maquinarias: {_fmt_usd(sel.get('ventas_maquinarias_usd'))} | Alquileres: {_fmt_usd(sel.get('ventas_alquileres_usd'))}",
+            f"Gastos variables (total): {_fmt_usd(sel['gastos_variables_usd'])}",
+            f"  CMV rep. mostrador: {_fmt_usd(sel.get('cmv_rep_mostrador_usd'))} | CMV rep. taller: {_fmt_usd(sel.get('cmv_rep_taller_usd'))}",
+            f"  Otros variables (cargados): {_fmt_usd(sel.get('gastos_var_otros_usd'))} | Var. maq. (gasto): {_fmt_usd(sel.get('gastos_var_maquinarias_usd'))}",
+            f"Gastos fijos (total): {_fmt_usd(sel['gastos_fijos_usd'])}",
+            f"  Sucursales: {_fmt_usd(sel.get('gastos_fijos_sucursales_usd'))} | Concesionario: {_fmt_usd(sel.get('gastos_fijos_concesionario_usd'))}",
             f"Margen contribucion: {_fmt_usd(sel['margen_usd'])} ({_fmt_pct(sel['margen_pct'])})",
             f"Resultado: {_fmt_usd(sel['resultado_usd'])}",
             f"Factor absorcion: {_fmt_pct(sel['factor_abs_pct'])}",
@@ -1064,7 +1099,8 @@ def _build_inicio_report_pdf_bytes(
                     6,
                     f"{b['sucursal']}: Fact {_fmt_usd(b['fact_total_usd'])} | Mostrador {_fmt_usd(b['fact_mostrador_usd'])} | "
                     f"Taller {_fmt_usd(b['fact_taller_usd'])} | Servicios {_fmt_usd(b['fact_servicios_usd'])} | "
-                    f"Maq. {_fmt_usd(b['fact_maquinarias_usd'])} | Alq. {_fmt_usd(b['fact_alquileres_usd'])}",
+                    f"Maq. {_fmt_usd(b['fact_maquinarias_usd'])} | Alq. {_fmt_usd(b['fact_alquileres_usd'])} | "
+                    f"Fijos {_fmt_usd(b['gastos_fijos_usd'])} | Otros var. {_fmt_usd(b['gastos_var_otros_usd'])}",
                     ln=True,
                 )
 
@@ -1192,6 +1228,15 @@ def _build_cierre_dashboard_metrics(cierre: dict, lineas: pd.DataFrame) -> dict 
 
     fact_total_ars = float(df["fact_total_ars"].sum())
     fact_total_usd = fact_total_ars / tc
+    neto_rep_ars = max(fm + ft - dm - dt, 0.0)
+    ventas_repuestos_neto_usd = neto_rep_ars / tc
+    ventas_servicios_usd = fs / tc
+    ventas_maquinarias_usd = fmaq / tc
+    ventas_alquileres_usd = falq / tc
+    ventas_maq_alq_usd = ventas_maquinarias_usd + ventas_alquileres_usd
+    cmv_rep_mostrador_usd = float(gv["gv_rep_mostrador"]) / tc
+    cmv_rep_taller_usd = float(gv["gv_rep_taller"]) / tc
+    cmv_servicios_afines_usd = float(gv["gv_servicios"]) / tc
     gastos_var_usd = (float(gv["gv_servicios_ajustado"]) + float(gv["gv_repuestos_ajustado"])) / tc
     gastos_var_usd += max(gastos_var_maq_usd, 0.0)
     total_gastos_usd = gastos_fijos_usd + gastos_var_usd
@@ -1225,8 +1270,21 @@ def _build_cierre_dashboard_metrics(cierre: dict, lineas: pd.DataFrame) -> dict 
         "mes": int(cierre["mes"]),
         "periodo": f"{_mes_corto(int(cierre['mes']))} {int(cierre['anio'])}",
         "fact_total_usd": fact_total_usd,
+        "tipo_cambio_ars_usd": tc,
         "gastos_fijos_usd": gastos_fijos_usd,
+        "gastos_fijos_sucursales_usd": float(gf_line),
+        "gastos_fijos_concesionario_usd": gfc,
         "gastos_variables_usd": gastos_var_usd,
+        "gastos_var_otros_usd": gastos_otros_usd,
+        "gastos_var_maquinarias_usd": gastos_var_maq_usd,
+        "cmv_rep_mostrador_usd": cmv_rep_mostrador_usd,
+        "cmv_rep_taller_usd": cmv_rep_taller_usd,
+        "cmv_servicios_afines_usd": cmv_servicios_afines_usd,
+        "ventas_repuestos_neto_usd": ventas_repuestos_neto_usd,
+        "ventas_servicios_usd": ventas_servicios_usd,
+        "ventas_maquinarias_usd": ventas_maquinarias_usd,
+        "ventas_alquileres_usd": ventas_alquileres_usd,
+        "ventas_maq_alq_usd": ventas_maq_alq_usd,
         "total_gastos_usd": total_gastos_usd,
         "margen_usd": margen_usd,
         "margen_pct": (margen_ratio * 100.0) if margen_ratio is not None else None,
@@ -1271,8 +1329,13 @@ def _render_inicio_dashboard() -> None:
                 "anio": d["anio"],
                 "mes": d["mes"],
                 "fact_total_usd": d["fact_total_usd"],
+                "ventas_maq_alq_usd": float(d.get("ventas_maq_alq_usd") or 0),
+                "ventas_servicios_usd": float(d.get("ventas_servicios_usd") or 0),
                 "gastos_fijos_usd": d["gastos_fijos_usd"],
+                "gastos_fijos_sucursales_usd": float(d.get("gastos_fijos_sucursales_usd") or 0),
+                "gastos_fijos_concesionario_usd": float(d.get("gastos_fijos_concesionario_usd") or 0),
                 "gastos_variables_usd": d["gastos_variables_usd"],
+                "gastos_var_maquinarias_usd": float(d.get("gastos_var_maquinarias_usd") or 0),
                 "total_gastos_usd": d["total_gastos_usd"],
                 "margen_usd": d["margen_usd"],
                 "margen_pct": d["margen_pct"],
@@ -1299,8 +1362,13 @@ def _render_inicio_dashboard() -> None:
 
     metric_map = {
         "Facturación total": ("fact_total_usd", _FMT_USD),
-        "Gastos fijos": ("gastos_fijos_usd", _FMT_USD),
+        "Ventas maquinarias + alquileres": ("ventas_maq_alq_usd", _FMT_USD),
+        "Ventas servicios": ("ventas_servicios_usd", _FMT_USD),
+        "Gastos fijos (total)": ("gastos_fijos_usd", _FMT_USD),
+        "Gastos fijos sucursales": ("gastos_fijos_sucursales_usd", _FMT_USD),
+        "Gastos fijos concesionario": ("gastos_fijos_concesionario_usd", _FMT_USD),
         "Gastos variables": ("gastos_variables_usd", _FMT_USD),
+        "Variables maquinaria (gasto)": ("gastos_var_maquinarias_usd", _FMT_USD),
         "Total gastos": ("total_gastos_usd", _FMT_USD),
         "Margen de contribución ($)": ("margen_usd", _FMT_USD),
         "Margen de contribución (%)": ("margen_pct", _FMT_PCT),
@@ -1370,6 +1438,47 @@ def _render_inicio_dashboard() -> None:
         fig_trend.update_layout(xaxis_title="", yaxis_title="")
         st.plotly_chart(fig_trend, use_container_width=True)
 
+    st.markdown("#### Otras tendencias (todos los meses, USD)")
+    t1, t2 = st.columns(2)
+    with t1:
+        fig_maq_alq = px.bar(
+            trend_all[["periodo", "ventas_maq_alq_usd"]].copy(),
+            x="periodo",
+            y="ventas_maq_alq_usd",
+            text_auto=".2f",
+            title="Facturación maquinarias + alquileres",
+        )
+        fig_maq_alq.update_traces(marker_color="#8B7355")
+        fig_maq_alq.update_layout(xaxis_title="", yaxis_title="")
+        st.plotly_chart(fig_maq_alq, use_container_width=True)
+    with t2:
+        fij_long = trend_all.melt(
+            id_vars=["periodo"],
+            value_vars=["gastos_fijos_sucursales_usd", "gastos_fijos_concesionario_usd"],
+            var_name="tipo",
+            value_name="importe",
+        )
+        fij_long["tipo"] = fij_long["tipo"].map(
+            {
+                "gastos_fijos_sucursales_usd": "Fijos sucursales",
+                "gastos_fijos_concesionario_usd": "Fijos concesionario",
+            }
+        )
+        fig_fij_stack = px.bar(
+            fij_long,
+            x="periodo",
+            y="importe",
+            color="tipo",
+            barmode="stack",
+            title="Gastos fijos — sucursales vs concesionario",
+            color_discrete_map={
+                "Fijos sucursales": _COL_GRAY,
+                "Fijos concesionario": _COL_ORANGE_MUTED,
+            },
+        )
+        fig_fij_stack.update_layout(xaxis_title="", yaxis_title="")
+        st.plotly_chart(fig_fij_stack, use_container_width=True)
+
     st.markdown("### Detalle por mes")
     years = sorted({int(d["anio"]) for d in data}, reverse=True)
     c1, c2 = st.columns([1, 1])
@@ -1399,12 +1508,23 @@ def _render_inicio_dashboard() -> None:
     k6.metric("Margen de contribución", f"US$ {float(sel['margen_usd']):,.2f}")
     k7.metric("Margen de contribución %", f"{float(sel['margen_pct'] or 0.0):,.2f} %")
     k8.metric("Resultado", f"US$ {float(sel['resultado_usd']):,.2f}")
-    k9, k10, _, _ = st.columns(4)
+    k9, k10, k11, k12 = st.columns(4)
     k9.metric("Factor de absorción", f"{float(sel['factor_abs_pct'] or 0.0):,.2f} %")
     k10.metric(
         "Punto de equilibrio",
         f"US$ {float(sel['punto_equilibrio_usd']):,.2f}" if sel["punto_equilibrio_usd"] is not None else "—",
     )
+    k11.metric(
+        "Ventas maq. + alq.",
+        f"US$ {float(sel.get('ventas_maq_alq_usd') or 0):,.2f}",
+    )
+    k12.metric(
+        "Variables maq. (gasto)",
+        f"US$ {float(sel.get('gastos_var_maquinarias_usd') or 0):,.2f}",
+    )
+    k13, k14, _, _ = st.columns(4)
+    k13.metric("Fijos sucursales", f"US$ {float(sel.get('gastos_fijos_sucursales_usd') or 0):,.2f}")
+    k14.metric("Fijos concesionario", f"US$ {float(sel.get('gastos_fijos_concesionario_usd') or 0):,.2f}")
 
     df_suc = sel["branches"].copy()
     color_map = {
@@ -1474,6 +1594,92 @@ def _render_inicio_dashboard() -> None:
     )
     fig_stack.update_layout(xaxis_title="", yaxis_title="")
     st.plotly_chart(fig_stack, use_container_width=True)
+
+    st.markdown("### Gastos por sucursal (USD)")
+    gst = df_suc.melt(
+        id_vars=["sucursal"],
+        value_vars=["gastos_fijos_usd", "gastos_var_otros_usd"],
+        var_name="concepto",
+        value_name="importe_usd",
+    )
+    gst["concepto"] = gst["concepto"].map(
+        {"gastos_fijos_usd": "Gastos fijos", "gastos_var_otros_usd": "Otros variables"}
+    )
+    fig_gastos_suc = px.bar(
+        gst,
+        x="sucursal",
+        y="importe_usd",
+        color="concepto",
+        barmode="group",
+        title="Fijos y otros variables por sucursal",
+        color_discrete_map={"Gastos fijos": _COL_GRAY, "Otros variables": _COL_ORANGE_MUTED},
+    )
+    fig_gastos_suc.update_layout(xaxis_title="", yaxis_title="")
+    st.plotly_chart(fig_gastos_suc, use_container_width=True)
+
+    st.markdown("### Concesionario — ventas y costos variables (USD, mes seleccionado)")
+    tc_sel = float(sel.get("tipo_cambio_ars_usd") or 1.0)
+    df_ventas_conc = pd.DataFrame(
+        {
+            "Concepto": [
+                "Repuestos (neto fact.)",
+                "Servicios",
+                "Maquinarias",
+                "Alquileres",
+                "Facturación total",
+            ],
+            "Importe (USD)": [
+                float(sel.get("ventas_repuestos_neto_usd") or 0),
+                float(sel.get("ventas_servicios_usd") or 0),
+                float(sel.get("ventas_maquinarias_usd") or 0),
+                float(sel.get("ventas_alquileres_usd") or 0),
+                float(sel["fact_total_usd"]),
+            ],
+        }
+    )
+    df_gastos_var_conc = pd.DataFrame(
+        {
+            "Concepto": [
+                "CMV rep. mostrador",
+                "CMV rep. taller",
+                "CMV servicios / afines (modelo)",
+                "Otros variables (cargados)",
+                "Variables maquinaria (gasto)",
+                "Total gastos variables",
+            ],
+            "Importe (USD)": [
+                float(sel.get("cmv_rep_mostrador_usd") or 0),
+                float(sel.get("cmv_rep_taller_usd") or 0),
+                float(sel.get("cmv_servicios_afines_usd") or 0),
+                float(sel.get("gastos_var_otros_usd") or 0),
+                float(sel.get("gastos_var_maquinarias_usd") or 0),
+                float(sel["gastos_variables_usd"]),
+            ],
+        }
+    )
+    cvc1, cvc2 = st.columns(2)
+    with cvc1:
+        st.caption(f"TC del cierre: {tc_sel:,.4f} ARS/USD")
+        st.dataframe(
+            df_ventas_conc,
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "Concepto": st.column_config.TextColumn("Concepto", width="medium"),
+                "Importe (USD)": st.column_config.NumberColumn("Importe (USD)", format=_FMT_USD, step=0.01),
+            },
+        )
+    with cvc2:
+        st.caption("«Otros» y rubro pueden imputarse al CMV rep. o servicios en el modelo.")
+        st.dataframe(
+            df_gastos_var_conc,
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "Concepto": st.column_config.TextColumn("Concepto", width="medium"),
+                "Importe (USD)": st.column_config.NumberColumn("Importe (USD)", format=_FMT_USD, step=0.01),
+            },
+        )
 
     st.markdown("### Exportar informe")
     compare_df = _build_comparison_last3(data, sel)
