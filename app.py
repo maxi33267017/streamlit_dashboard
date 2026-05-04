@@ -159,10 +159,10 @@ def _column_config_cierre_editor() -> dict:
             "Fact. servicios (ARS)", format=_FMT_ARS, min_value=0.0, step=0.01
         ),
         "fact_maquinarias": st.column_config.NumberColumn(
-            "Ventas maquinarias (ARS)", format=_FMT_ARS, min_value=0.0, step=0.01
+            "Ventas maquinarias (USD)", format=_FMT_USD, min_value=0.0, step=0.01
         ),
         "fact_alquileres": st.column_config.NumberColumn(
-            "Ventas alquileres (ARS)", format=_FMT_ARS, min_value=0.0, step=0.01
+            "Ventas alquileres (USD)", format=_FMT_USD, min_value=0.0, step=0.01
         ),
         "gastos_fijos_usd": st.column_config.NumberColumn(
             "Gastos fijos (USD)", format=_FMT_USD, min_value=0.0, step=0.01
@@ -279,8 +279,14 @@ def _bootstrap_database() -> None:
     database.init_database()
 
 
-def _df_editor_cierre_ventas(anio: int, mes: int) -> pd.DataFrame:
+def _df_editor_cierre_ventas(anio: int, mes: int, *, tc_display: float | None = None) -> pd.DataFrame:
     c = database.get_cierre_ventas_mes(anio, mes)
+    if tc_display is not None and float(tc_display) > 0:
+        tc_disp = max(float(tc_display), 1e-9)
+    elif c is not None:
+        tc_disp = max(float(c.get("tipo_cambio_ars_usd") or 1200.0), 1e-9)
+    else:
+        tc_disp = 1200.0
     rows = []
     if c is None:
         for suc in database.SUCURSALES_VENTAS_REAL:
@@ -301,8 +307,8 @@ def _df_editor_cierre_ventas(anio: int, mes: int) -> pd.DataFrame:
                     "util_pct_mostrador": float(r.get("util_pct_mostrador") or 0) * 100.0,
                     "util_pct_taller": float(r.get("util_pct_taller") or 0) * 100.0,
                     "fact_servicios": float(r.get("fact_servicios") or 0),
-                    "fact_maquinarias": float(r.get("fact_maquinarias") or 0),
-                    "fact_alquileres": float(r.get("fact_alquileres") or 0),
+                    "fact_maquinarias": float(r.get("fact_maquinarias") or 0) / tc_disp,
+                    "fact_alquileres": float(r.get("fact_alquileres") or 0) / tc_disp,
                     "gastos_fijos_usd": float(r.get("gastos_fijos") or 0),
                     "gastos_var_otros_usd": float(r.get("gastos_var_otros_usd") or 0),
                 }
@@ -322,7 +328,8 @@ def _df_editor_cierre_ventas(anio: int, mes: int) -> pd.DataFrame:
     return out
 
 
-def _row_to_db_dict(s: pd.Series) -> dict:
+def _row_to_db_dict(s: pd.Series, tc: float) -> dict:
+    tc = max(float(tc), 1e-9)
     gf_u = float(s.get("gastos_fijos_usd") or 0)
     go_u = float(s.get("gastos_var_otros_usd") or 0)
     return {
@@ -335,8 +342,8 @@ def _row_to_db_dict(s: pd.Series) -> dict:
         "util_pct_taller": float(s["util_pct_taller"] or 0) / 100.0,
         "util_pct_servicios": 0.0,
         "fact_servicios": float(s["fact_servicios"] or 0),
-        "fact_maquinarias": float(s.get("fact_maquinarias") or 0),
-        "fact_alquileres": float(s.get("fact_alquileres") or 0),
+        "fact_maquinarias": float(s.get("fact_maquinarias") or 0) * tc,
+        "fact_alquileres": float(s.get("fact_alquileres") or 0) * tc,
         "gastos_fijos": gf_u,
         "gastos_fijos_usd": gf_u,
         "gastos_var_otros_usd": go_u,
@@ -367,8 +374,9 @@ def _registro_financiero_totales(
     um_c = _util_promedio_simple(edited, "util_pct_mostrador")
     ut_c = _util_promedio_simple(edited, "util_pct_taller")
     otros_ars = float(gastos_otros_usd) * tc_val
-    s_maq = float(pd.to_numeric(edited.get("fact_maquinarias"), errors="coerce").fillna(0).sum())
-    s_alq = float(pd.to_numeric(edited.get("fact_alquileres"), errors="coerce").fillna(0).sum())
+    # En grilla: maquinarias y alquileres en USD → ARS para modelo interno
+    s_maq = float(pd.to_numeric(edited.get("fact_maquinarias"), errors="coerce").fillna(0).sum()) * tc_val
+    s_alq = float(pd.to_numeric(edited.get("fact_alquileres"), errors="coerce").fillna(0).sum()) * tc_val
     gv = database.compute_gastos_variables_globales(
         fact_rep_mos_conc=float(edited["fact_rep_mostrador"].sum()),
         desc_rep_mos_conc=float(edited["desc_mostrador"].sum()),
@@ -397,8 +405,8 @@ def _registro_financiero_totales(
         - float(edited["desc_mostrador"].sum())
         - float(edited["desc_taller"].sum())
         + float(edited["fact_servicios"].sum())
-        + s_maq
-        + s_alq
+        + float(s_maq)
+        + float(s_alq)
     )
     fact_total_usd = fact_total_ars / tc_val
     margen_global_usd = fact_total_usd - gastos_var_total_usd
@@ -438,26 +446,30 @@ def _registro_financiero_totales(
 def _df_lineas_cierre_usd(edited: pd.DataFrame, tc_val: float) -> pd.DataFrame:
     tc_val = max(float(tc_val), 1e-9)
     out = edited.copy()
-    money = (
+    money_ars = (
         "fact_rep_mostrador",
         "fact_rep_taller",
         "desc_mostrador",
         "desc_taller",
         "fact_servicios",
-        "fact_maquinarias",
-        "fact_alquileres",
     )
-    for col in money:
+    money_usd_editor = ("fact_maquinarias", "fact_alquileres")
+    for col in money_ars:
         if col not in out.columns:
             out[col] = 0.0
         out[f"{col}_usd"] = pd.to_numeric(out[col], errors="coerce").fillna(0.0) / tc_val
+    for col in money_usd_editor:
+        if col not in out.columns:
+            out[col] = 0.0
+        out[f"{col}_usd"] = pd.to_numeric(out[col], errors="coerce").fillna(0.0)
     for col in ("gastos_fijos_usd", "gastos_var_otros_usd"):
         if col not in out.columns:
             out[col] = 0.0
         out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0.0)
     keep = (
         ["sucursal"]
-        + [f"{c}_usd" for c in money]
+        + [f"{c}_usd" for c in money_ars]
+        + [f"{c}_usd" for c in money_usd_editor]
         + ["gastos_fijos_usd", "gastos_var_otros_usd", "util_pct_mostrador", "util_pct_taller"]
     )
     return out[keep].round(4)
@@ -683,14 +695,15 @@ def _avg_non_zero_pair(a: float | None, b: float | None) -> float:
     return float(sum(vals) / len(vals))
 
 
-def _fila_concesionario(df_edit: pd.DataFrame, gastos_fijos_concesionario_usd: float = 0.0) -> dict:
+def _fila_concesionario(df_edit: pd.DataFrame, gastos_fijos_concesionario_usd: float = 0.0, tc: float = 1200.0) -> dict:
+    tc = max(float(tc), 1e-9)
     sfm = float(df_edit["fact_rep_mostrador"].sum())
     sft = float(df_edit["fact_rep_taller"].sum())
     sdm = float(df_edit["desc_mostrador"].sum())
     sdt = float(df_edit["desc_taller"].sum())
     sfs = float(df_edit["fact_servicios"].sum())
-    smaq = float(pd.to_numeric(df_edit.get("fact_maquinarias"), errors="coerce").fillna(0).sum())
-    salq = float(pd.to_numeric(df_edit.get("fact_alquileres"), errors="coerce").fillna(0).sum())
+    smaq = float(pd.to_numeric(df_edit.get("fact_maquinarias"), errors="coerce").fillna(0).sum()) * tc
+    salq = float(pd.to_numeric(df_edit.get("fact_alquileres"), errors="coerce").fillna(0).sum()) * tc
     um = _util_promedio_simple(df_edit, "util_pct_mostrador")
     ut = _util_promedio_simple(df_edit, "util_pct_taller")
     if um is None:
@@ -722,10 +735,10 @@ def _fila_concesionario(df_edit: pd.DataFrame, gastos_fijos_concesionario_usd: f
     }
 
 
-def _preview_tabla(df_edit: pd.DataFrame, gastos_fijos_concesionario_usd: float = 0.0) -> pd.DataFrame:
+def _preview_tabla(df_edit: pd.DataFrame, gastos_fijos_concesionario_usd: float = 0.0, tc: float = 1200.0) -> pd.DataFrame:
     filas = []
     for _, s in df_edit.iterrows():
-        d = _row_to_db_dict(s)
+        d = _row_to_db_dict(s, tc)
         calc = database.compute_cierre_venta_linea(
             d["fact_rep_mostrador"],
             d["fact_rep_taller"],
@@ -740,7 +753,7 @@ def _preview_tabla(df_edit: pd.DataFrame, gastos_fijos_concesionario_usd: float 
         filas.append({**d, **calc})
     base = pd.DataFrame(filas)
     base = pd.concat(
-        [base, pd.DataFrame([_fila_concesionario(df_edit, gastos_fijos_concesionario_usd)])],
+        [base, pd.DataFrame([_fila_concesionario(df_edit, gastos_fijos_concesionario_usd, tc)])],
         ignore_index=True,
     )
     return base
@@ -1976,8 +1989,9 @@ def _render_inicio_dashboard() -> None:
 def _render_registro_ventas() -> None:
     st.subheader("Registro")
     st.caption(
-        "Cargá el mes, el tipo de cambio, las ventas en **ARS** por sucursal y los **gastos fijos / otros variables en USD** "
-        "en la grilla por sucursal. Los **fijos del concesionario** (central) van aparte; maquinaria (variable) también es global del mes."
+        "Cargá el mes y el tipo de cambio. En la grilla: repuestos, descuentos y servicios en **ARS**; "
+        "**maquinarias y alquileres en USD**; gastos fijos y otros variables por sucursal en **USD**. "
+        "Los **fijos del concesionario** (central) van aparte; el gasto variable de maquinaria del mes también es global."
     )
 
     st.markdown("##### 1. Período y tipo de cambio")
@@ -1999,17 +2013,19 @@ def _render_registro_ventas() -> None:
             min_value=0.0001,
             value=default_tc,
             format="%.4f",
-            help="La grilla de ventas está en ARS. Este TC convierte a USD los gastos variables que se calculan a partir de esas ventas.",
+            help="Repuestos y servicios de la grilla están en ARS; maquinarias y alquileres en USD. "
+            "Este TC (ARS por USD) convierte maq./alq. a pesos al guardar y alimenta los cálculos en USD.",
             key=f"cv_tc_{int(anio)}_{int(mes)}",
         )
 
-    st.markdown("##### 2. Ventas (ARS) y gastos por sucursal (USD)")
+    st.markdown("##### 2. Ventas y gastos por sucursal")
     st.caption(
-        "Columnas en pesos: repuestos, descuentos, servicios, maquinarias y alquileres. "
-        "Columnas en dólares: **gastos fijos** y **otros gastos variables** por sucursal (el rubro de «otros» es único para el mes, abajo). "
-        "La fila Concesionario en la vista previa suma totales."
+        "**ARS:** repuestos (mostrador/taller), descuentos y servicios. "
+        "**USD:** maquinarias, alquileres, gastos fijos y otros gastos variables por sucursal "
+        "(el TC de arriba convierte maq./alq. a pesos al guardar y al calcular totales). "
+        "El rubro de «otros» es único para el mes (abajo). La fila Concesionario en la vista previa suma totales."
     )
-    df_base = _df_editor_cierre_ventas(int(anio), int(mes))
+    df_base = _df_editor_cierre_ventas(int(anio), int(mes), tc_display=float(tc))
     edited = st.data_editor(
         df_base,
         key=f"cv_editor_{anio}_{mes}",
@@ -2285,7 +2301,7 @@ def _render_registro_ventas() -> None:
             st.caption("No hay cierres guardados en ese rango.")
 
     ver_usd = st.checkbox("Vista previa en USD (usa el TC de arriba)", value=False)
-    prev = _preview_tabla(edited, float(gastos_fijos_concesionario_usd))
+    prev = _preview_tabla(edited, float(gastos_fijos_concesionario_usd), float(tc))
     drop_show = [c for c in prev.columns if c in _PREVIEW_DROP_COLS or c == "gastos_fijos"]
     prev_show = prev.drop(columns=drop_show, errors="ignore")
     st.markdown("**Vista previa — ventas por sucursal y Concesionario**")
@@ -2318,7 +2334,7 @@ def _render_registro_ventas() -> None:
                     fill_rate_pct=float(val_fill_rate),
                     rotacion_inventario=float(val_rotacion),
                 )
-                filas = [_row_to_db_dict(edited.loc[i]) for i in range(len(edited))]
+                filas = [_row_to_db_dict(edited.loc[i], float(tc)) for i in range(len(edited))]
                 database.replace_lineas_cierre_ventas(cid, filas)
                 st.success("Guardado.")
                 st.rerun()
