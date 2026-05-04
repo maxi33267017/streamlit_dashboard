@@ -357,9 +357,12 @@ def _registro_financiero_totales(
     tc_val: float,
     rubro_db: str | None,
     gastos_var_maquinarias_usd: float = 0.0,
+    gastos_fijos_concesionario_usd: float = 0.0,
 ) -> dict:
     tc_val = max(float(tc_val), 1e-9)
-    gastos_fijos_usd = float(pd.to_numeric(edited.get("gastos_fijos_usd"), errors="coerce").fillna(0).sum())
+    gf_suc = float(pd.to_numeric(edited.get("gastos_fijos_usd"), errors="coerce").fillna(0).sum())
+    gfc = max(float(gastos_fijos_concesionario_usd), 0.0)
+    gastos_fijos_usd = gf_suc + gfc
     gastos_otros_usd = float(pd.to_numeric(edited.get("gastos_var_otros_usd"), errors="coerce").fillna(0).sum())
     um_c = _util_promedio_simple(edited, "util_pct_mostrador")
     ut_c = _util_promedio_simple(edited, "util_pct_taller")
@@ -426,6 +429,8 @@ def _registro_financiero_totales(
         "factor_abs_global_pct": factor_abs_global_pct,
         "punto_equilibrio_usd": punto_equilibrio_usd,
         "gastos_fijos_usd": gastos_fijos_usd,
+        "gastos_fijos_sucursales_usd": gf_suc,
+        "gastos_fijos_concesionario_usd": gfc,
         "gastos_otros_usd": gastos_otros_usd,
     }
 
@@ -498,7 +503,9 @@ def _excel_registro_bytes(
                 "Otros gastos variables (USD cargados)",
                 "Gastos variables maquinaria (USD cargados)",
                 "Total gastos variables",
-                "Gastos fijos",
+                "Gastos fijos sucursales",
+                "Gastos fijos concesionario",
+                "Total gastos fijos",
                 "Total gastos",
             ],
             "Importe_USD": [
@@ -507,6 +514,8 @@ def _excel_registro_bytes(
                 round(float(tot.get("gastos_otros_usd") or 0), 4),
                 round(float(tot.get("gastos_var_maq_usd") or 0), 4),
                 round(tot["gastos_var_total_usd"], 4),
+                round(float(tot.get("gastos_fijos_sucursales_usd") or 0), 4),
+                round(float(tot.get("gastos_fijos_concesionario_usd") or 0), 4),
                 round(float(tot.get("gastos_fijos_usd") or 0), 4),
                 round(tot["gastos_total_usd"], 4),
             ],
@@ -562,7 +571,8 @@ def _excel_registro_rango_bytes(anio_d: int, mes_d: int, anio_h: int, mes_h: int
         if rub is not None and (rub == "" or rub.lower() == "nan"):
             rub = None
         gvm = float(c.get("gastos_var_maquinarias_usd") or 0)
-        tot = _registro_financiero_totales(edited, tc, rub, gvm)
+        gfc = float(c.get("gastos_fijos_concesionario_usd") or 0)
+        tot = _registro_financiero_totales(edited, tc, rub, gvm, gfc)
         inv = float(c.get("inventario_usd") or 0)
         cv = float(c.get("resultado_cero_ventas_pct") or 0)
         fr = c.get("fill_rate_pct")
@@ -599,15 +609,17 @@ def _excel_registro_rango_bytes(anio_d: int, mes_d: int, anio_h: int, mes_h: int
         lineas_parts.append(ln)
         df_g = pd.DataFrame(
             {
-                "anio": [a] * 7,
-                "mes": [m] * 7,
+                "anio": [a] * 9,
+                "mes": [m] * 9,
                 "Concepto": [
                     "Gastos variables repuestos mostrador",
                     "Gastos variables repuestos taller",
                     "Otros gastos variables (USD cargados)",
                     "Gastos variables maquinaria (USD cargados)",
                     "Total gastos variables",
-                    "Gastos fijos",
+                    "Gastos fijos sucursales",
+                    "Gastos fijos concesionario",
+                    "Total gastos fijos",
                     "Total gastos",
                 ],
                 "Importe_USD": [
@@ -616,6 +628,8 @@ def _excel_registro_rango_bytes(anio_d: int, mes_d: int, anio_h: int, mes_h: int
                     round(float(tot.get("gastos_otros_usd") or 0), 4),
                     round(gvm, 4),
                     round(tot["gastos_var_total_usd"], 4),
+                    round(float(tot.get("gastos_fijos_sucursales_usd") or 0), 4),
+                    round(float(tot.get("gastos_fijos_concesionario_usd") or 0), 4),
                     round(float(tot.get("gastos_fijos_usd") or 0), 4),
                     round(tot["gastos_total_usd"], 4),
                 ],
@@ -669,7 +683,7 @@ def _avg_non_zero_pair(a: float | None, b: float | None) -> float:
     return float(sum(vals) / len(vals))
 
 
-def _fila_concesionario(df_edit: pd.DataFrame) -> dict:
+def _fila_concesionario(df_edit: pd.DataFrame, gastos_fijos_concesionario_usd: float = 0.0) -> dict:
     sfm = float(df_edit["fact_rep_mostrador"].sum())
     sft = float(df_edit["fact_rep_taller"].sum())
     sdm = float(df_edit["desc_mostrador"].sum())
@@ -686,8 +700,10 @@ def _fila_concesionario(df_edit: pd.DataFrame) -> dict:
     calc = database.compute_cierre_venta_linea(
         sfm, sft, sdm, sdt, um, ut, sfs, fact_maquinarias=smaq, fact_alquileres=salq
     )
-    sgf = float(pd.to_numeric(df_edit.get("gastos_fijos_usd"), errors="coerce").fillna(0).sum())
+    sgf_suc = float(pd.to_numeric(df_edit.get("gastos_fijos_usd"), errors="coerce").fillna(0).sum())
     sgo = float(pd.to_numeric(df_edit.get("gastos_var_otros_usd"), errors="coerce").fillna(0).sum())
+    gfc = max(float(gastos_fijos_concesionario_usd), 0.0)
+    sgf_tot = sgf_suc + gfc
     return {
         "sucursal": "CONCESIONARIO",
         "fact_rep_mostrador": sfm,
@@ -699,14 +715,14 @@ def _fila_concesionario(df_edit: pd.DataFrame) -> dict:
         "fact_servicios": sfs,
         "fact_maquinarias": smaq,
         "fact_alquileres": salq,
-        "gastos_fijos": sgf,
-        "gastos_fijos_usd": sgf,
+        "gastos_fijos": sgf_tot,
+        "gastos_fijos_usd": sgf_tot,
         "gastos_var_otros_usd": sgo,
         **calc,
     }
 
 
-def _preview_tabla(df_edit: pd.DataFrame) -> pd.DataFrame:
+def _preview_tabla(df_edit: pd.DataFrame, gastos_fijos_concesionario_usd: float = 0.0) -> pd.DataFrame:
     filas = []
     for _, s in df_edit.iterrows():
         d = _row_to_db_dict(s)
@@ -723,7 +739,10 @@ def _preview_tabla(df_edit: pd.DataFrame) -> pd.DataFrame:
         )
         filas.append({**d, **calc})
     base = pd.DataFrame(filas)
-    base = pd.concat([base, pd.DataFrame([_fila_concesionario(df_edit)])], ignore_index=True)
+    base = pd.concat(
+        [base, pd.DataFrame([_fila_concesionario(df_edit, gastos_fijos_concesionario_usd)])],
+        ignore_index=True,
+    )
     return base
 
 
@@ -1133,11 +1152,12 @@ def _build_cierre_dashboard_metrics(cierre: dict, lineas: pd.DataFrame) -> dict 
     go_line = float(pd.to_numeric(df.get("gastos_var_otros_usd"), errors="coerce").fillna(0).sum())
     hdr_gf = float(cierre.get("gastos_fijos_global") or 0.0)
     hdr_go = float(cierre.get("gastos_var_otros") or 0.0)
-    if gf_line < 1e-9 and hdr_gf > 0:
+    gfc = max(float(cierre.get("gastos_fijos_concesionario_usd") or 0.0), 0.0)
+    if gf_line < 1e-9 and hdr_gf > 0 and gfc < 1e-9:
         gf_line = hdr_gf
     if go_line < 1e-9 and hdr_go > 0:
         go_line = hdr_go
-    gastos_fijos_usd = gf_line
+    gastos_fijos_usd = gf_line + gfc
     gastos_otros_usd = go_line
     gastos_var_maq_usd = float(cierre.get("gastos_var_maquinarias_usd") or 0.0)
     rubro_otros = cierre.get("gastos_var_otros_rubro")
@@ -1504,7 +1524,7 @@ def _render_registro_ventas() -> None:
     st.subheader("Registro")
     st.caption(
         "Cargá el mes, el tipo de cambio, las ventas en **ARS** por sucursal y los **gastos fijos / otros variables en USD** "
-        "en la misma grilla. Maquinaria (variable) sigue siendo un importe global del mes. Al guardar, todo queda en la base."
+        "en la grilla por sucursal. Los **fijos del concesionario** (central) van aparte; maquinaria (variable) también es global del mes."
     )
 
     st.markdown("##### 1. Período y tipo de cambio")
@@ -1545,6 +1565,7 @@ def _render_registro_ventas() -> None:
     )
 
     gvm_def = float(cierre.get("gastos_var_maquinarias_usd") or 0) if cierre else 0.0
+    gfc_def = float(cierre.get("gastos_fijos_concesionario_usd") or 0) if cierre else 0.0
     rub_def = _rubro_db_a_select(cierre.get("gastos_var_otros_rubro") if cierre else None)
 
     inv_def = float(cierre.get("inventario_usd") or 0) if cierre else 0.0
@@ -1554,13 +1575,12 @@ def _render_registro_ventas() -> None:
     rot_v = _cierre_hdr_float(cierre, "rotacion_inventario")
     rot_def = float(rot_v) if rot_v is not None else 0.0
 
-    st.markdown("##### 3. Gastos variables globales (USD)")
+    st.markdown("##### 3. Gastos globales del mes (USD)")
     st.caption(
-        "**Maquinaria:** un importe del mes (no por sucursal). "
-        "**Rubro de «otros»:** aplica al total de «otros variables» cargados en la grilla (suma por sucursal); "
-        "elegí Servicios o Repuestos para que entre en el cálculo de variables."
+        "**Maquinaria:** variable del mes (no por sucursal). **Fijos concesionario:** costos fijos centrales que no asignás a una sucursal. "
+        "**Rubro de «otros»:** aplica al total de «otros variables» de la grilla."
     )
-    g1, g2 = st.columns(2)
+    g1, g2, g3 = st.columns(3)
     with g1:
         gastos_var_maquinarias_usd = st.number_input(
             "Gastos variables — maquinaria (mes)",
@@ -1571,6 +1591,15 @@ def _render_registro_ventas() -> None:
             key=f"cv_gvm_{int(anio)}_{int(mes)}",
         )
     with g2:
+        gastos_fijos_concesionario_usd = st.number_input(
+            "Gastos fijos — concesionario",
+            min_value=0.0,
+            value=float(gfc_def),
+            format="%.2f",
+            help="Fijos del concesionario (central), en USD. Se suman a los fijos cargados por sucursal en la grilla.",
+            key=f"cv_gfc_{int(anio)}_{int(mes)}",
+        )
+    with g3:
         opts = ["— Ninguno —", "Servicios", "Repuestos"]
         idx = opts.index(rub_def) if rub_def in opts else 0
         rubro_sel = st.selectbox(
@@ -1625,6 +1654,7 @@ def _render_registro_ventas() -> None:
         float(tc),
         rubro_db,
         gastos_var_maquinarias_usd=float(gastos_var_maquinarias_usd),
+        gastos_fijos_concesionario_usd=float(gastos_fijos_concesionario_usd),
     )
     fact_total_usd = tot["fact_total_usd"]
     margen_global_usd = tot["margen_global_usd"]
@@ -1645,7 +1675,9 @@ def _render_registro_ventas() -> None:
                 "Otros gastos variables (cargados)",
                 "Gastos variables maquinaria (cargados)",
                 "Total gastos variables",
-                "Gastos fijos",
+                "Gastos fijos sucursales",
+                "Gastos fijos concesionario",
+                "Total gastos fijos",
                 "Total gastos",
             ],
             "Importe (USD)": [
@@ -1654,6 +1686,8 @@ def _render_registro_ventas() -> None:
                 round(float(tot.get("gastos_otros_usd") or 0), 2),
                 round(float(tot.get("gastos_var_maq_usd") or 0), 2),
                 round(gastos_var_total_usd, 2),
+                round(float(tot.get("gastos_fijos_sucursales_usd") or 0), 2),
+                round(float(tot.get("gastos_fijos_concesionario_usd") or 0), 2),
                 round(float(tot.get("gastos_fijos_usd") or 0), 2),
                 round(gastos_total_usd, 2),
             ],
@@ -1670,8 +1704,8 @@ def _render_registro_ventas() -> None:
     )
     st.caption(
         "Mostrador y taller: CMV desde facturación neta de repuestos y % utilidad de la grilla. "
-        "Fijos y «otros» variables vienen de la **suma por sucursal** en la grilla; el rubro aplica al total de «otros». "
-        "**Maquinaria** suma siempre como variable global. Total gastos = suma fijos sucursales + total variables."
+        "Fijos sucursales y «otros» variables vienen de la grilla; **fijos concesionario** se suman aparte. "
+        "Total gastos = fijos (sucursales + concesionario) + variables."
     )
     st.markdown("**Indicadores globales (Concesionario)**")
     df_global = pd.DataFrame(
@@ -1703,9 +1737,8 @@ def _render_registro_ventas() -> None:
     )
     st.caption(
         "Margen = facturación total − gastos variables. "
-        "Factor de absorción = margen / gastos fijos. "
-        "Punto de equilibrio = gastos fijos / % de margen (en fracción). "
-        "Resultado = margen − gastos fijos."
+        "Factor de absorción y punto de equilibrio usan el **total de gastos fijos** (sucursales + concesionario). "
+        "Resultado = margen − total fijos."
     )
 
     st.markdown("**Inventario y logística (referencia del mes)**")
@@ -1799,7 +1832,7 @@ def _render_registro_ventas() -> None:
             st.caption("No hay cierres guardados en ese rango.")
 
     ver_usd = st.checkbox("Vista previa en USD (usa el TC de arriba)", value=False)
-    prev = _preview_tabla(edited)
+    prev = _preview_tabla(edited, float(gastos_fijos_concesionario_usd))
     drop_show = [c for c in prev.columns if c in _PREVIEW_DROP_COLS or c == "gastos_fijos"]
     prev_show = prev.drop(columns=drop_show, errors="ignore")
     st.markdown("**Vista previa — ventas por sucursal y Concesionario**")
@@ -1823,6 +1856,7 @@ def _render_registro_ventas() -> None:
                     float(tc),
                     notas=None,
                     gastos_fijos_global=gf_sum,
+                    gastos_fijos_concesionario_usd=float(gastos_fijos_concesionario_usd),
                     gastos_var_otros=go_sum,
                     gastos_var_otros_rubro=rubro_db,
                     gastos_var_maquinarias_usd=float(gastos_var_maquinarias_usd),

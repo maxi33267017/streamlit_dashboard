@@ -280,6 +280,7 @@ CIERRE_VENTAS_MES_SQLITE = """
         fill_rate_pct REAL,
         rotacion_inventario REAL,
         gastos_var_maquinarias_usd REAL NOT NULL DEFAULT 0,
+        gastos_fijos_concesionario_usd REAL NOT NULL DEFAULT 0,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         UNIQUE (anio, mes)
@@ -301,6 +302,7 @@ CIERRE_VENTAS_MES_PG = """
         fill_rate_pct DOUBLE PRECISION,
         rotacion_inventario DOUBLE PRECISION,
         gastos_var_maquinarias_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
+        gastos_fijos_concesionario_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
         created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
         UNIQUE (anio, mes)
@@ -645,6 +647,7 @@ def _ensure_cierre_ventas_schema_pg(cursor, conn) -> None:
         ("cierre_ventas_mes", "fill_rate_pct", "DOUBLE PRECISION"),
         ("cierre_ventas_mes", "rotacion_inventario", "DOUBLE PRECISION"),
         ("cierre_ventas_mes", "gastos_var_maquinarias_usd", "DOUBLE PRECISION NOT NULL DEFAULT 0"),
+        ("cierre_ventas_mes", "gastos_fijos_concesionario_usd", "DOUBLE PRECISION NOT NULL DEFAULT 0"),
         ("cierre_ventas_linea", "util_pct_servicios", "DOUBLE PRECISION"),
         ("cierre_ventas_linea", "fact_maquinarias", "DOUBLE PRECISION NOT NULL DEFAULT 0"),
         ("cierre_ventas_linea", "fact_alquileres", "DOUBLE PRECISION NOT NULL DEFAULT 0"),
@@ -667,6 +670,7 @@ def _ensure_cierre_ventas_schema_sqlite(cursor, conn) -> None:
         "ALTER TABLE cierre_ventas_mes ADD COLUMN rotacion_inventario REAL",
         "ALTER TABLE cierre_ventas_linea ADD COLUMN util_pct_servicios REAL",
         "ALTER TABLE cierre_ventas_mes ADD COLUMN gastos_var_maquinarias_usd REAL NOT NULL DEFAULT 0",
+        "ALTER TABLE cierre_ventas_mes ADD COLUMN gastos_fijos_concesionario_usd REAL NOT NULL DEFAULT 0",
         "ALTER TABLE cierre_ventas_linea ADD COLUMN fact_maquinarias REAL NOT NULL DEFAULT 0",
         "ALTER TABLE cierre_ventas_linea ADD COLUMN fact_alquileres REAL NOT NULL DEFAULT 0",
         "ALTER TABLE cierre_ventas_linea ADD COLUMN gastos_var_otros_usd REAL NOT NULL DEFAULT 0",
@@ -989,6 +993,7 @@ def list_cierres_ventas_dashboard(limit: int = 60) -> pd.DataFrame:
                 gastos_var_otros,
                 gastos_var_otros_rubro,
                 gastos_var_maquinarias_usd,
+                gastos_fijos_concesionario_usd,
                 updated_at
             FROM cierre_ventas_mes
             ORDER BY anio DESC, mes DESC
@@ -1009,6 +1014,7 @@ def upsert_cierre_ventas_mes_header(
     notas: str | None = None,
     *,
     gastos_fijos_global: float = 0.0,
+    gastos_fijos_concesionario_usd: float = 0.0,
     gastos_var_otros: float = 0.0,
     gastos_var_otros_rubro: str | None = None,
     gastos_var_maquinarias_usd: float = 0.0,
@@ -1030,7 +1036,8 @@ def upsert_cierre_ventas_mes_header(
                 """
                 UPDATE cierre_ventas_mes
                 SET tipo_cambio_ars_usd = ?, notas = ?,
-                    gastos_fijos_global = ?, gastos_var_otros = ?, gastos_var_otros_rubro = ?,
+                    gastos_fijos_global = ?, gastos_fijos_concesionario_usd = ?,
+                    gastos_var_otros = ?, gastos_var_otros_rubro = ?,
                     gastos_var_maquinarias_usd = ?,
                     inventario_usd = ?, resultado_cero_ventas_pct = ?,
                     fill_rate_pct = ?, rotacion_inventario = ?,
@@ -1041,6 +1048,7 @@ def upsert_cierre_ventas_mes_header(
                     tipo_cambio_ars_usd,
                     notas,
                     gastos_fijos_global,
+                    gastos_fijos_concesionario_usd,
                     gastos_var_otros,
                     gastos_var_otros_rubro,
                     gastos_var_maquinarias_usd,
@@ -1058,11 +1066,12 @@ def upsert_cierre_ventas_mes_header(
                     """
                     INSERT INTO cierre_ventas_mes (
                         anio, mes, tipo_cambio_ars_usd, notas,
-                        gastos_fijos_global, gastos_var_otros, gastos_var_otros_rubro,
+                        gastos_fijos_global, gastos_fijos_concesionario_usd,
+                        gastos_var_otros, gastos_var_otros_rubro,
                         gastos_var_maquinarias_usd,
                         inventario_usd, resultado_cero_ventas_pct, fill_rate_pct, rotacion_inventario
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     RETURNING id
                     """,
                     (
@@ -1071,6 +1080,7 @@ def upsert_cierre_ventas_mes_header(
                         tipo_cambio_ars_usd,
                         notas,
                         gastos_fijos_global,
+                        gastos_fijos_concesionario_usd,
                         gastos_var_otros,
                         gastos_var_otros_rubro,
                         gastos_var_maquinarias_usd,
@@ -1088,11 +1098,12 @@ def upsert_cierre_ventas_mes_header(
                     """
                     INSERT INTO cierre_ventas_mes (
                         anio, mes, tipo_cambio_ars_usd, notas,
-                        gastos_fijos_global, gastos_var_otros, gastos_var_otros_rubro,
+                        gastos_fijos_global, gastos_fijos_concesionario_usd,
+                        gastos_var_otros, gastos_var_otros_rubro,
                         gastos_var_maquinarias_usd,
                         inventario_usd, resultado_cero_ventas_pct, fill_rate_pct, rotacion_inventario
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         anio,
@@ -1100,6 +1111,7 @@ def upsert_cierre_ventas_mes_header(
                         tipo_cambio_ars_usd,
                         notas,
                         gastos_fijos_global,
+                        gastos_fijos_concesionario_usd,
                         gastos_var_otros,
                         gastos_var_otros_rubro,
                         gastos_var_maquinarias_usd,
